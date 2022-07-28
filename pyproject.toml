@@ -1,0 +1,21 @@
+[project]
+name = "jax-triton"
+version = "0.1.0"
+description = "JAX + OpenAI Triton integration"
+readme = "README.md"
+requires-python = ">=3.7"
+dependencies = [
+  "jax[cuda]>=0.3.15",
+  "triton>=2.0.0.dev20220720",
+]
+
+[build-system]
+requires = [
+    "setuptools",
+    "wheel",
+    "pybind11",
+]
+build-backend = "setuptools.build_meta"
+
+[tools.setuptools]
+packages = ["jax_triton"]
