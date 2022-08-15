@@ -44,9 +44,11 @@ xc.register_custom_call_target("triton_call", custom_call.get_custom_call(), pla
 
 def get_triton_type(obj: Any) -> str:
     type_map = {
+        jnp.dtype("float64"): "f64",
         jnp.dtype("float32"): "f32",
         jnp.dtype("float16"): "f16",
         jnp.dtype("int32"): "i32",
+        jnp.dtype("int64"): "i64",
     }
     if isinstance(obj, jax.core.ShapedArray):
         return type_map[obj.dtype]
@@ -107,7 +109,8 @@ def triton_call(*args, kernel, out_shape, grid, num_warps=4, num_stages=2, **met
       grid=grid, num_warps=num_warps, num_stages=num_stages, **metaparams)
   return tree_util.tree_unflatten(out_tree, out_flat)
 
-table = {'float32': torch.float32, 'int32': torch.int32, 'float16': torch.float16}
+table = {'float32': torch.float32, 'int32': torch.int32, 'float16': torch.float16,
+         'float64': torch.float64, 'int64': torch.int64 }
 
 @triton_call_p.def_impl
 def triton_call_impl(*args, kernel, out_shapes, grid, **metaparams):
