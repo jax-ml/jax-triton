@@ -64,7 +64,8 @@ void do_custom_call(CUstream stream, void** buffers,
   }
   size_t params_size = (std::ptrdiff_t)(params_ptr - &params[0]);
   void* config[] = {
-    CU_LAUNCH_PARAM_BUFFER_POINTER, params.data(),
+    CU_LAUNCH_PARAM_BUFFER_POINTER,
+    static_cast<void*>(const_cast<char*>(params.data())),
     CU_LAUNCH_PARAM_BUFFER_SIZE, &params_size,
     CU_LAUNCH_PARAM_END
   };
