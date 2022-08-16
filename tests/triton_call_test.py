@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import unittest
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
@@ -20,6 +22,7 @@ import jax.numpy as jnp
 import numpy as np
 import triton
 import triton.language as tl
+import torch
 
 import jax_triton as jt
 
@@ -122,6 +125,9 @@ class TritonKernelCallTest(parameterized.TestCase):
     ])
   def test_matmul(self, m, n, k, dtype, block_size_m, block_size_n,
       block_size_k, group_size_m):
+
+    if torch.cuda.get_device_capability() < (7, 0):
+      raise unittest.SkipTest("Matmul only works on GPUs with capability >= sm70")
 
     grid = lambda META: (
         triton.cdiv(m, META['BLOCK_SIZE_M']) * triton.cdiv(n, META['BLOCK_SIZE_N']),

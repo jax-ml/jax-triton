@@ -10,6 +10,12 @@ The `jax-triton` repository contains integrations between [JAX](https://github.c
 $ pip install jax-triton
 ```
 
+Make sure you have a CUDA-compatible `jaxlib` installed.
+For example you could run:
+```bash
+$ pip install "jax[cuda11_cudnn82]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+```
+
 ## Development
 
 To develop `jax-triton`, you can clone the repo with:
