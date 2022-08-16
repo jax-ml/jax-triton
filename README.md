@@ -24,7 +24,7 @@ $ git clone https://github.com/jax-ml/jax-triton.git
 ```
 and do an editable install with:
 ```bash
-$ pip install -e jax-triton
+$ pip install -e .
 ```
 To run the `jax-triton` tests, you'll need `pytest`:
 ```bash
