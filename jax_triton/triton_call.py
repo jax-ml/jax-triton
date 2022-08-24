@@ -13,9 +13,9 @@
 # limitations under the License.
 
 import os
-import torch
+import pickle
 
-from typing import Any, Callable, Tuple, Union
+from typing import Any, Callable, Optional, Tuple, Union
 from types import SimpleNamespace
 
 import jax
@@ -28,9 +28,8 @@ from jax import tree_util
 from jax._src import util
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import mhlo
-
 import numpy as np
-
+import torch
 import triton
 import triton.language as tl
 
@@ -103,17 +102,20 @@ ShapeDtypeDuck = Any
 triton_call_p = jax.core.Primitive('triton_call')
 triton_call_p.multiple_results = True
 
-def triton_call(*args, kernel, out_shape, grid, num_warps=4, num_stages=2, **metaparams):
+def triton_call(*args, kernel, out_shape, grid, num_warps=4, num_stages=2, 
+                dump_binary_path: Optional[str] = None, **metaparams):
   flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
   out_flat = triton_call_p.bind(*args, kernel=kernel, out_shapes=flat_out_shapes,
-      grid=grid, num_warps=num_warps, num_stages=num_stages, **metaparams)
+      grid=grid, num_warps=num_warps, num_stages=num_stages, 
+      dump_binary_path=dump_binary_path, **metaparams)
   return tree_util.tree_unflatten(out_tree, out_flat)
 
 table = {'float32': torch.float32, 'int32': torch.int32, 'float16': torch.float16,
          'float64': torch.float64, 'int64': torch.int64 }
 
 @triton_call_p.def_impl
-def triton_call_impl(*args, kernel, out_shapes, grid, **metaparams):
+def triton_call_impl(*args, kernel, out_shapes, grid, dump_binary_path, **metaparams):
+  del dump_binary_path
   args_torch = [j2t(x) for x in args]
   outputs_torch = [torch.empty(out_shape.shape, dtype=table[out_shape.dtype.name],
                    device=torch.device('cuda:0')) for out_shape in out_shapes]
@@ -131,12 +133,21 @@ def aval_to_layout(aval):
   arange = np.arange(aval.ndim, dtype='int64')[::-1].copy()
   return ir.DenseIntElementsAttr.get(arange, type=ir.IndexType.get())
 
-def emit_triton_call(triton_func, avals_in, avals_out, grid, num_warps, num_stages, **metaparams):
+def emit_triton_call(triton_func, avals_in, avals_out, grid, num_warps, num_stages,
+                     dump_binary_path: Optional[str], **metaparams):
   metadata = {triton_func.arg_names.index(k) : v for k, v in metaparams.items()}
   compile(triton_func, metadata, num_warps=num_warps, num_stages=num_stages, key="foo")(*avals_in, *avals_out)
   loaded_binary = triton_func.bin_cache["foo"]
   kernel_ptr = loaded_binary.kernel
   shared_mem = loaded_binary.shared_mem
+  if dump_binary_path is not None:
+    binary = dict(
+        asm=loaded_binary.asm,
+        shared_mem=shared_mem,
+        name=loaded_binary.bin.name)
+    with open(dump_binary_path, "wb") as fp:
+      pickle.dump(binary, fp)
+
   grid_ = grid(metaparams)
   grid_0 = grid_[0]
   if len(grid_) == 1:
@@ -151,12 +162,15 @@ def emit_triton_call(triton_func, avals_in, avals_out, grid, num_warps, num_stag
   descriptor = custom_call.make_triton_call_descriptor(kernel_ptr, shared_mem, grid_0, grid_1, grid_2, num_warps, arity)
   return descriptor
 
-def triton_call_lowering(ctx, *args, kernel, out_shapes, grid, num_warps=4, num_stages=2, **metaparams):
+def triton_call_lowering(ctx, *args, kernel, out_shapes, grid, num_warps=4, num_stages=2,
+                         dump_binary_path: Optional[str], **metaparams):
   out_type = ir.TupleType.get_tuple([
       ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
       for out_shape in out_shapes])
   i32_type = ir.IntegerType.get_signless(32)
-  descriptor = emit_triton_call(kernel, ctx.avals_in, ctx.avals_out, grid, num_warps, num_stages, **metaparams)
+  descriptor = emit_triton_call(kernel, ctx.avals_in, ctx.avals_out, grid,
+                                num_warps, num_stages, dump_binary_path,
+                                **metaparams)
   out = mhlo.CustomCallOp(
             [out_type], args,
             call_target_name=ir.StringAttr.get("triton_call"),
