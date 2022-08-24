@@ -31,15 +31,16 @@ config.update("jax_enable_x64", True)
 
 @triton.jit
 def add_kernel(x_ptr, y_ptr, output_ptr,
-                       BLOCK_SIZE: tl.constexpr, n_elements: tl.constexpr):
-  pid = tl.program_id(axis=0)  # We use a 1D launch grid so axis is 0
-  block_start = pid * BLOCK_SIZE
-  offsets = block_start + tl.arange(0, BLOCK_SIZE)
+                       block_size: tl.constexpr, n_elements: tl.constexpr):
+  pid = tl.program_id(axis=0)  # we use a 1d launch grid so axis is 0
+  block_start = pid * block_size
+  offsets = block_start + tl.arange(0, block_size)
   mask = offsets < n_elements
   x = tl.load(x_ptr + offsets, mask=mask)
   y = tl.load(y_ptr + offsets, mask=mask)
   output = x + y
   tl.store(output_ptr + offsets, output, mask=mask)
+
 
 @triton.jit
 def matmul_kernel(
