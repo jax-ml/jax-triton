@@ -13,4 +13,8 @@
 # limitations under the License.
 
 """Library for JAX-Triton integrations."""
-from jax_triton.triton_call import triton_call, triton_kernel_call
+from jax_triton.triton_call import triton_call
+from jax_triton.triton_call import triton_kernel_call
+from jax_triton.triton_call import cdiv
+from jax_triton.triton_call import strides_from_shape
+from jax_triton import pallas

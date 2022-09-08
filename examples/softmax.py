@@ -25,40 +25,49 @@ next_pow2 = lambda x: int(math.pow(2, math.ceil(math.log(x, 2))))
 
 
 @triton.jit
-def softmax_kernel(input_ptr, output_ptr, block_size: tl.constexpr,
-                   size: tl.constexpr):
-  """Computes the softmax of a vector."""
-  input_row_stride = 1
-  output_row_stride = 1
-  row_idx = tl.program_id(0)
-  row_start_ptr = input_ptr + row_idx * input_row_stride
-  col_offsets = tl.arange(0, block_size)
-  input_ptrs = row_start_ptr + col_offsets
-  row = tl.load(input_ptrs, mask=col_offsets < size, other=-float("inf"))
-  row_minus_max = row - tl.max(row, axis=0)
-  numerator = tl.exp(row_minus_max)
-  denominator = tl.sum(numerator, axis=0)
-  softmax_output = numerator / denominator
-  output_row_start_ptr = output_ptr + row_idx * output_row_stride
-  output_ptrs = output_row_start_ptr + col_offsets
-  tl.store(output_ptrs, softmax_output, mask=col_offsets < size)
+def softmax_kernel(
+    input_ptr, output_ptr,
+    input_row_stride: tl.constexpr, output_row_stride: tl.constexpr, n_cols:
+    tl.constexpr, block_size: tl.constexpr
+):
+    # The rows of the softmax are independent, so we parallelize across those
+    row_idx = tl.program_id(0)
+    # The stride represents how much we need to increase the pointer to advance 1 row
+    row_start_ptr = input_ptr + row_idx * input_row_stride
+    # The block size is the next power of two greater than n_cols, so we can fit each
+    # row in a single block
+    col_offsets = tl.arange(0, block_size)
+    input_ptrs = row_start_ptr + col_offsets
+    # Load the row into SRAM, using a mask since BLOCK_SIZE may be > than n_cols
+    row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
+    # Substract maximum for numerical stability
+    row_minus_max = row - tl.max(row, axis=0)
+    # Note that exponentials in Triton are fast but approximate (i.e., think __expf in CUDA)
+    numerator = tl.exp(row_minus_max)
+    denominator = tl.sum(numerator, axis=0)
+    softmax_output = numerator / denominator
+    # Write back output to DRAM
+    output_row_start_ptr = output_ptr + row_idx * output_row_stride
+    output_ptrs = output_row_start_ptr + col_offsets
+    tl.store(output_ptrs, softmax_output, mask=col_offsets < n_cols)
 
 
 def softmax(x: jnp.ndarray) -> jnp.ndarray:
   out_shape = jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)
-  size = x.shape[0]
-  block_size = next_pow2(size)
-  grid = (triton.cdiv(x.size, block_size),)
+  block_size = next_pow2(x.shape[1])
+  strides = jt.strides_from_shape(x.shape)
   return jt.triton_call(
       x,
       kernel=softmax_kernel,
       out_shape=out_shape,
-      size=x.shape[0],
-      grid=grid,
-      block_size=next_pow2(x.shape[0]))
+      input_row_stride=strides[0],
+      output_row_stride=strides[0],
+      n_cols=x.shape[1],
+      grid=x.shape[0],
+      block_size=block_size)
 
 
 if __name__ == "__main__":
-  x_val = jnp.ones(1024, dtype="float32")
+  x_val = jnp.ones((8, 5), dtype="float32")
   print(softmax(x_val).block_until_ready())
   print(jax.jit(softmax)(x_val).block_until_ready())
