@@ -20,7 +20,6 @@ import jax_triton as jt
 
 import jax
 import jax.numpy as jnp
-import math
 
 m=512		
 n=512

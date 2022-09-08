@@ -19,8 +19,8 @@ setup(
     packages = ["jax_triton"],
     ext_modules = [
       Extension(
-        name="jax_triton.custom_call",
-        sources=["lib/custom_call.cc"],
+        name="jax_triton.triton_kernel_call",
+        sources=["lib/triton_kernel_call.cc"],
         include_dirs = [
           "/usr/local/cuda/include",
           pybind11.get_include()], 

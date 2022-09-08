@@ -26,6 +26,7 @@ from jax.lib import xla_client as xc
 from jax.interpreters import mlir
 from jax import tree_util
 from jax._src import util
+from jax._src.lib import xla_bridge as xb
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import mhlo
 import numpy as np
@@ -33,13 +34,13 @@ import torch
 import triton
 import triton.language as tl
 
-from jax_triton import custom_call
+from jax_triton import triton_kernel_call
 
 os.environ["TRITON_CACHE_DIR"] = ""
 map, unsafe_map = util.safe_map, map
 zip, unsafe_zip = util.safe_zip, zip
 
-xc.register_custom_call_target("triton_call", custom_call.get_custom_call(), platform="CUDA")
+xc.register_custom_call_target("triton_kernel_call", triton_kernel_call.get_custom_call(), platform="CUDA")
 
 def get_triton_type(obj: Any) -> str:
     type_map = {
@@ -79,8 +80,6 @@ def get_triton_python_ir(aval):
 
 def compile(triton_function, constants, *, key, device=0, num_warps=4, num_stages=2):
     def lower(*args):
-        arg_types = [get_triton_python_ir(a) for a in args]
-        attributes = {i: 16 for i in range(len(args))}
         triton_function._warmup(arg_types=arg_types, device=device,
             attributes=attributes, constants=constants, num_warps=num_warps,
             num_stages=num_stages, key=key, is_manual_warmup=True,
@@ -133,18 +132,24 @@ def aval_to_layout(aval):
   arange = np.arange(aval.ndim, dtype='int64')[::-1].copy()
   return ir.DenseIntElementsAttr.get(arange, type=ir.IndexType.get())
 
-def emit_triton_call(triton_func, avals_in, avals_out, grid, num_warps, num_stages,
+def emit_triton_call(ctx, triton_func, grid, num_warps, num_stages,
                      dump_binary_path: Optional[str], **metaparams):
   metadata = {triton_func.arg_names.index(k) : v for k, v in metaparams.items()}
-  compile(triton_func, metadata, num_warps=num_warps, num_stages=num_stages, key="foo")(*avals_in, *avals_out)
-  loaded_binary = triton_func.bin_cache["foo"]
-  kernel_ptr = loaded_binary.kernel
-  shared_mem = loaded_binary.shared_mem
+  all_args = [*ctx.avals_in, *ctx.avals_out]
+  arg_types = [get_triton_python_ir(a) for a in all_args]
+  attributes = {i: 16 for i in range(len(all_args))}
+  # TODO(sharadmv): handle multiple devices, right now we assume device 0 which
+  # is fine when we have multiple of the same GPU but this won't work in
+  # general.
+  binary = triton_func._compile(arg_types=arg_types, device=0,
+      attributes=attributes, constants=metadata, num_warps=num_warps,
+      num_stages=num_stages, extern_libs={})
+  name, asm, shared_mem = binary.name, binary.asm, binary.shared_mem
   if dump_binary_path is not None:
     binary = dict(
-        asm=loaded_binary.asm,
+        asm=asm,
         shared_mem=shared_mem,
-        name=loaded_binary.bin.name)
+        name=name)
     with open(dump_binary_path, "wb") as fp:
       pickle.dump(binary, fp)
 
@@ -158,9 +163,10 @@ def emit_triton_call(triton_func, avals_in, avals_out, grid, num_warps, num_stag
     grid_1, grid_2 = grid_[1], grid_[2]
   else:
     assert False
-  arity = len(avals_in) + len(avals_out)
-  descriptor = custom_call.make_triton_call_descriptor(kernel_ptr, shared_mem, grid_0, grid_1, grid_2, num_warps, arity)
-  return descriptor
+  arity = len(ctx.avals_in) + len(ctx.avals_out)
+  descriptor, keepalive = triton_kernel_call.make_triton_call_descriptor(
+      name, asm, shared_mem, grid_0, grid_1, grid_2, num_warps, arity)
+  return descriptor, keepalive
 
 def triton_call_lowering(ctx, *args, kernel, out_shapes, grid, num_warps=4, num_stages=2,
                          dump_binary_path: Optional[str], **metaparams):
@@ -168,12 +174,13 @@ def triton_call_lowering(ctx, *args, kernel, out_shapes, grid, num_warps=4, num_
       ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
       for out_shape in out_shapes])
   i32_type = ir.IntegerType.get_signless(32)
-  descriptor = emit_triton_call(kernel, ctx.avals_in, ctx.avals_out, grid,
-                                num_warps, num_stages, dump_binary_path,
-                                **metaparams)
+  descriptor, keepalive = emit_triton_call(ctx, kernel, grid,
+                                           num_warps, num_stages, dump_binary_path,
+                                           **metaparams)
+  ctx.module_context.add_keepalive(keepalive)
   out = mhlo.CustomCallOp(
             [out_type], args,
-            call_target_name=ir.StringAttr.get("triton_call"),
+            call_target_name=ir.StringAttr.get("triton_kernel_call"),
             has_side_effect=ir.BoolAttr.get(False),
             backend_config=ir.StringAttr.get(descriptor),
             api_version=ir.IntegerAttr.get(i32_type, 1),
