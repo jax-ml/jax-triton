@@ -87,6 +87,8 @@ def matmul_kernel(
 def triton_call(*args, **kwargs):
   return jax.jit(lambda *args: jt.triton_call(*args, **kwargs))(*args)
 
+def triton_call_pmap(*args, **kwargs):
+  return jax.pmap(lambda *args: jt.triton_call(*args, **kwargs))(*args)
 
 class TritonKernelCallTest(parameterized.TestCase):
 
@@ -107,6 +109,31 @@ class TritonKernelCallTest(parameterized.TestCase):
 
     out = triton_call(x, y, kernel=add_kernel, out_shape=x,
                       grid=grid, block_size=block_size, n_elements=size)
+    expected = x + y
+    np.testing.assert_allclose(out, expected)
+
+  @parameterized.named_parameters(*[
+    (f"size_{size}_dtype_{dtype}_blocksize_{block_size}", size, dtype, block_size)
+     for size in [1, 2, 5, 8, 100, 256, 1024]
+     for dtype in ['int32', 'float32', 'float16', 'int64', 'float64']
+     for block_size in [1, 8, 32, 256]
+    ])
+  def test_pmap_add_vectors(self, size, dtype, block_size):
+    n_devices = jax.local_device_count()
+    if n_devices < 2:
+      self.skipTest("Not enough devices")
+    grid = lambda meta: (size // meta["block_size"] + 1,)
+    k1, k2 = random.split(random.PRNGKey(0), 2)
+    if dtype in {"float32", "float16", "float64"}:
+      x, y = (random.normal(k1, [n_devices, size], dtype=dtype),
+              random.normal(k2, [n_devices, size], dtype=dtype))
+    elif dtype in {"int32", "int64"}:
+      x, y = (random.randint(k1, [n_devices, size], -100, 100, dtype=dtype),
+              random.randint(k2, [n_devices, size], -100, 100, dtype=dtype))
+
+    out = triton_call_pmap(x, y, kernel=add_kernel,
+                           out_shape=jax.ShapeDtypeStruct(x.shape[1:], x.dtype),
+                           grid=grid, block_size=block_size, n_elements=size)
     expected = x + y
     np.testing.assert_allclose(out, expected)
 
