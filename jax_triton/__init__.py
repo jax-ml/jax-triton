@@ -12,4 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from jax_triton.triton_call import triton_call
+from jax_triton.triton_call import triton_call, triton_kernel_call
