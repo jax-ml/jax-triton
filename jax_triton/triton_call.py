@@ -52,6 +52,7 @@ xc.register_custom_call_target(
 
 def get_triton_type(obj: Any) -> str:
     type_map = {
+        jnp.dtype("bfloat16"): "bf16",
         jnp.dtype("float64"): "f64",
         jnp.dtype("float32"): "f32",
         jnp.dtype("float16"): "f16",
