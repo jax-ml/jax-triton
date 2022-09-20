@@ -35,6 +35,7 @@ import numpy as np
 CAN_USE_TRITON = False
 try:
   import triton
+  import triton.compiler as tc
   import triton.language as tl
   del triton
   CAN_USE_TRITON = True
@@ -53,14 +54,14 @@ xc.register_custom_call_target(
 def get_triton_type(obj: Any) -> str:
     type_map = {
         jnp.dtype("bfloat16"): "bf16",
-        jnp.dtype("float64"): "f64",
-        jnp.dtype("float32"): "f32",
-        jnp.dtype("float16"): "f16",
+        jnp.dtype("float64"): "fp64",
+        jnp.dtype("float32"): "fp32",
+        jnp.dtype("float16"): "fp16",
         jnp.dtype("int32"): "i32",
         jnp.dtype("int64"): "i64",
     }
     if isinstance(obj, jax.core.ShapedArray):
-      return type_map[obj.dtype]
+      return f"*{type_map[obj.dtype]}"
     if isinstance(obj, tl.constexpr):
       obj = obj.value
     if isinstance(obj, int):
@@ -83,9 +84,7 @@ def get_triton_type(obj: Any) -> str:
     raise NotImplementedError(f'could not compute type name for {obj}')
     
 def get_triton_python_ir(aval):
-  if aval.shape == ():
-    return "scalar", get_triton_type(aval)
-  return "ptr", get_triton_type(aval)
+  return get_triton_type(aval)
 
 Metaparameters = Any
 ShapeDtypeDuck = Any
@@ -111,16 +110,13 @@ def compile_triton_func(
     avals_in, avals_out, triton_func, num_warps, num_stages, metaparams):
   metadata = {triton_func.arg_names.index(k) : v for k, v in metaparams.items()}
   all_args = [*avals_in, *avals_out]
-  arg_types = [get_triton_python_ir(a) for a in all_args]
-  # Assume every input is a pointer (no dynamic shape info)
-  attributes = {i: 16 for i in range(len(all_args))}
+  signature = {i: get_triton_python_ir(a) for i, a in enumerate(all_args)}
   # TODO(sharadmv): handle multiple devices, right now we assume device 0 which
   # is fine when we have multiple of the same GPU but this won't work in
   # general.
-  binary = triton_func._compile(arg_types=arg_types, device=0,
-      attributes=attributes, constants=metadata, num_warps=num_warps,
-      num_stages=num_stages, extern_libs={})
-  name, asm, shared_mem = binary.name, binary.asm, binary.shared_mem
+  asm, shared_mem, name = tc._compile(triton_func, signature=signature, device=0,
+      constants=metadata, num_warps=num_warps,
+      num_stages=num_stages, extern_libs={}, output="cubin")
   return name, asm, shared_mem
 
 def emit_triton_kernel_call(ctx, name, asm, shared_mem, *, dump_binary_path:
