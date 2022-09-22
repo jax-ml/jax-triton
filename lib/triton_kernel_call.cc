@@ -64,14 +64,14 @@ CUfunction TritonExecutable::load(CUdevice device) {
   const std::lock_guard<std::mutex> lock(mut);
   if (is_loaded(device)) {
     return kernels[device];
-  } 
+  }
   // Mimics Triton kernel loading
   std::string assembly;
   auto iter = asm_map.find("cubin");
   if (iter != asm_map.end())
     assembly = py::cast<std::string>(asm_map["cubin"]);
   else {
-    assert(asm_map.contains("ptx"));
+    assert(asm_map.count("ptx") == 1);
     assembly = py::cast<std::string>(asm_map["ptx"]);
   }
   CUfunction fun;
