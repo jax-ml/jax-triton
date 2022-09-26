@@ -16,7 +16,7 @@ import os
 import functools
 import pickle
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Tuple, Union
 
 import jax
 import jax.dlpack
@@ -89,6 +89,9 @@ def get_triton_python_ir(aval):
 Metaparameters = Any
 ShapeDtypeDuck = Any
 
+Grid = Union[Tuple[int], Tuple[int, int], Tuple[int, int, int]]
+GridOrLambda = Union[Grid, Callable[[Any], Grid]]
+
 triton_kernel_call_p = jax.core.Primitive('triton_kernel_call')
 triton_kernel_call_p.multiple_results =True
 
@@ -119,8 +122,9 @@ def compile_triton_func(
       num_stages=num_stages, extern_libs={}, output="cubin")
   return name, asm, shared_mem
 
-def emit_triton_kernel_call(ctx, name, asm, shared_mem, *, dump_binary_path:
-    Optional[str], grid, metaparams, num_warps):
+def emit_triton_kernel_call(ctx, name, asm, shared_mem, *,
+                            dump_binary_path: Optional[str], grid: GridOrLambda,
+                            metaparams, num_warps):
   if dump_binary_path is not None:
     binary = dict(
         asm=asm,
@@ -129,7 +133,10 @@ def emit_triton_kernel_call(ctx, name, asm, shared_mem, *, dump_binary_path:
     with open(dump_binary_path, "wb") as fp:
       pickle.dump(binary, fp)
 
-  grid_ = grid(metaparams)
+  if callable(grid):
+    grid_ = grid(metaparams)
+  else:
+    grid_ = grid
   grid_0 = grid_[0]
   if len(grid_) == 1:
     grid_1, grid_2 = 1, 1
@@ -145,7 +152,7 @@ def emit_triton_kernel_call(ctx, name, asm, shared_mem, *, dump_binary_path:
   return descriptor, keepalive
 
 def triton_kernel_call_lowering(ctx, *args, name, asm, shared_mem,
-                                out_shapes, grid, num_warps, num_stages,
+                                out_shapes, grid: GridOrLambda, num_warps: int,
                                 dump_binary_path: Optional[str], **metaparams):
   out_type = ir.TupleType.get_tuple([
       ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
@@ -174,8 +181,9 @@ class Asm:
   def __init__(self, asm_map):
     self.asm_map = asm_map
 
-def triton_call(*args, kernel, out_shape, grid, num_warps=4, num_stages=2,
-                dump_binary_path: Optional[str] = None, **metaparams):
+def triton_call(*args, kernel, out_shape, grid: GridOrLambda, num_warps=4,
+                num_stages=2, dump_binary_path: Optional[str] = None,
+                **metaparams):
   if not CAN_USE_TRITON:
     raise ValueError("`triton_call` is only available when `triton` is installed.")
   out_shape = tree_util.tree_map(
@@ -196,7 +204,8 @@ def triton_call(*args, kernel, out_shape, grid, num_warps=4, num_stages=2,
   return tree_util.tree_unflatten(out_tree, out_flat)
 
 def triton_kernel_call(*args, name, asm, shared_mem, out_shape,
-                       grid, num_warps=4, num_stages=2, **metaparams):
+                       grid: GridOrLambda, num_warps=4,
+                       **metaparams):
   out_shape = tree_util.tree_map(
       lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), out_shape)
   flat_args, in_tree = tree_util.tree_flatten(args)
@@ -205,6 +214,6 @@ def triton_kernel_call(*args, name, asm, shared_mem, out_shape,
   flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
   out_flat = triton_kernel_call_p.bind(*flat_args, name=name, asm=Asm(asm),
       shared_mem=shared_mem, out_shapes=tuple(flat_out_shapes),
-      grid=grid, num_warps=num_warps, num_stages=num_stages,
+      grid=grid, num_warps=num_warps,
       dump_binary_path=None, **metaparams)
   return tree_util.tree_unflatten(out_tree, out_flat)

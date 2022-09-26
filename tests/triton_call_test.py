@@ -172,6 +172,19 @@ class TritonKernelCallTest(parameterized.TestCase):
     expected = jnp.matmul(x, y)
     np.testing.assert_allclose(out, expected, atol=0.05, rtol=0.05)
 
+  def test_triton_call_with_tuple_grid(self):
+    grid = (8,)
+    size = 8
+    dtype = "float32"
+    k1, k2 = random.split(random.PRNGKey(0), 2)
+    block_size = 1
+    x, y = random.normal(k1, [size], dtype=dtype), random.normal(k2, [size], dtype=dtype)
+    out = triton_call(x, y, kernel=add_kernel, out_shape=x,
+                      grid=grid, block_size=block_size, n_elements=size)
+    expected = x + y
+    np.testing.assert_allclose(out, expected)
+
+
 
 if __name__ == '__main__':
   absltest.main()
