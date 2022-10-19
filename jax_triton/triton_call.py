@@ -154,7 +154,7 @@ def emit_triton_kernel_call(ctx, name, asm, shared_mem, *,
 
 def triton_kernel_call_lowering(ctx, *args, name, asm, shared_mem,
                                 out_shapes, grid: GridOrLambda, num_warps: int,
-                                dump_binary_path: Optional[str], 
+                                dump_binary_path: Optional[str],
                                 input_output_aliases: Dict[int, int], **metaparams):
   if jaxlib.version.__version_info__ < (0, 3, 22) and input_output_aliases:
     raise NotImplementedError(
