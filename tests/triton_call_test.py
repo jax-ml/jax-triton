@@ -184,6 +184,29 @@ class TritonKernelCallTest(parameterized.TestCase):
     expected = x + y
     np.testing.assert_allclose(out, expected)
 
+  def test_triton_call_with_input_output_aliasing(self):
+    @triton.jit
+    def add_inplace_kernel(_, output_ptr,
+                           block_size: tl.constexpr, n_elements: tl.constexpr):
+      pid = tl.program_id(axis=0)  # we use a 1d launch grid so axis is 0
+      block_start = pid * block_size
+      offsets = block_start + tl.arange(0, block_size)
+      mask = offsets < n_elements
+      x = tl.load(output_ptr + offsets, mask=mask)
+      output = x + 1
+      tl.store(output_ptr + offsets, output, mask=mask)
+
+    grid = (8,)
+    size = 8
+    dtype = "float32"
+    k1 = random.PRNGKey(0)
+    block_size = 1
+    x = random.normal(k1, [size], dtype=dtype)
+    out = triton_call(x, kernel=add_inplace_kernel, out_shape=x,
+                      grid=grid, block_size=block_size, n_elements=size,
+                      input_output_aliases={0: 0})
+    expected = x + 1
+    np.testing.assert_allclose(out, expected)
 
 
 if __name__ == '__main__':

@@ -16,7 +16,7 @@ import os
 import functools
 import pickle
 
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import jax
 import jax.dlpack
@@ -30,6 +30,7 @@ from jax._src import util
 from jax._src.lib import xla_bridge as xb
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import mhlo
+import jaxlib
 import numpy as np
 
 CAN_USE_TRITON = False
@@ -153,7 +154,11 @@ def emit_triton_kernel_call(ctx, name, asm, shared_mem, *,
 
 def triton_kernel_call_lowering(ctx, *args, name, asm, shared_mem,
                                 out_shapes, grid: GridOrLambda, num_warps: int,
-                                dump_binary_path: Optional[str], **metaparams):
+                                dump_binary_path: Optional[str], 
+                                input_output_aliases: Dict[int, int], **metaparams):
+  if jaxlib.version.__version_info__ < (0, 3, 22) and input_output_aliases:
+    raise NotImplementedError(
+        "`input_output_aliases` only supported on `jaxlib>=0.3.22")
   out_type = ir.TupleType.get_tuple([
       ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
       for out_shape in out_shapes])
@@ -162,6 +167,13 @@ def triton_kernel_call_lowering(ctx, *args, name, asm, shared_mem,
       ctx, name, asm.asm_map, shared_mem, dump_binary_path=dump_binary_path,
       num_warps=num_warps, grid=grid, metaparams=metaparams)
   ctx.module_context.add_keepalive(keepalive)
+  output_operand_aliases = ir.ArrayAttr.get([
+          mhlo.OutputOperandAlias.get(
+              output_tuple_indices=[output],
+              operand_index=input,
+              operand_tuple_indices=[])
+          for input, output in input_output_aliases.items()
+      ])
   out = mhlo.CustomCallOp(
             [out_type], args,
             call_target_name=ir.StringAttr.get("triton_kernel_call"),
@@ -170,7 +182,8 @@ def triton_kernel_call_lowering(ctx, *args, name, asm, shared_mem,
             api_version=ir.IntegerAttr.get(i32_type, 1),
             called_computations=ir.ArrayAttr.get([]),
             operand_layouts=avals_to_layouts(ctx.avals_in),
-            result_layouts=avals_to_layouts(ctx.avals_out))
+            result_layouts=avals_to_layouts(ctx.avals_out),
+            output_operand_aliases=output_operand_aliases)
   results = [mhlo.GetTupleElementOp(out, mlir.i32_attr(i)).result
              for i in range(len(out_shapes))]
   return results
@@ -183,6 +196,7 @@ class Asm:
 
 def triton_call(*args, kernel, out_shape, grid: GridOrLambda, num_warps=4,
                 num_stages=2, dump_binary_path: Optional[str] = None,
+                input_output_aliases: Dict[int, int] = {},
                 **metaparams):
   if not CAN_USE_TRITON:
     raise ValueError("`triton_call` is only available when `triton` is installed.")
@@ -200,11 +214,13 @@ def triton_call(*args, kernel, out_shape, grid: GridOrLambda, num_warps=4,
   out_flat = triton_kernel_call_p.bind(*flat_args, name=name, asm=asm,
       shared_mem=shared_mem, out_shapes=tuple(flat_out_shapes),
       grid=grid, num_warps=num_warps, num_stages=num_stages,
-      dump_binary_path=dump_binary_path, **metaparams)
+      dump_binary_path=dump_binary_path, input_output_aliases=input_output_aliases,
+      **metaparams)
   return tree_util.tree_unflatten(out_tree, out_flat)
 
 def triton_kernel_call(*args, name, asm, shared_mem, out_shape,
-                       grid: GridOrLambda, num_warps=4,
+                       grid: GridOrLambda, num_warps: int = 4,
+                       input_output_aliases: Dict[int, int] = {},
                        **metaparams):
   out_shape = tree_util.tree_map(
       lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), out_shape)
@@ -215,5 +231,5 @@ def triton_kernel_call(*args, name, asm, shared_mem, out_shape,
   out_flat = triton_kernel_call_p.bind(*flat_args, name=name, asm=Asm(asm),
       shared_mem=shared_mem, out_shapes=tuple(flat_out_shapes),
       grid=grid, num_warps=num_warps,
-      dump_binary_path=None, **metaparams)
+      dump_binary_path=None, input_output_aliases=input_output_aliases, **metaparams)
   return tree_util.tree_unflatten(out_tree, out_flat)
