@@ -155,7 +155,7 @@ def emit_triton_kernel_call(ctx, name, asm, shared_mem, *,
 def triton_kernel_call_lowering(ctx, *args, name, asm, shared_mem,
                                 out_shapes, grid: GridOrLambda, num_warps: int,
                                 dump_binary_path: Optional[str],
-                                input_output_aliases: Dict[int, int], **metaparams):
+                                input_output_aliases: Tuple[Tuple[int, int], ...], **metaparams):
   if jaxlib.version.__version_info__ < (0, 3, 22) and input_output_aliases:
     raise NotImplementedError(
         "`input_output_aliases` only supported on `jaxlib>=0.3.22")
@@ -172,7 +172,7 @@ def triton_kernel_call_lowering(ctx, *args, name, asm, shared_mem,
               output_tuple_indices=[output],
               operand_index=input,
               operand_tuple_indices=[])
-          for input, output in input_output_aliases.items()
+          for input, output in input_output_aliases
       ])
   out = mhlo.CustomCallOp(
             [out_type], args,
@@ -214,8 +214,8 @@ def triton_call(*args, kernel, out_shape, grid: GridOrLambda, num_warps=4,
   out_flat = triton_kernel_call_p.bind(*flat_args, name=name, asm=asm,
       shared_mem=shared_mem, out_shapes=tuple(flat_out_shapes),
       grid=grid, num_warps=num_warps, num_stages=num_stages,
-      dump_binary_path=dump_binary_path, input_output_aliases=input_output_aliases,
-      **metaparams)
+      dump_binary_path=dump_binary_path,
+     input_output_aliases=tuple(input_output_aliases.items()), **metaparams)
   return tree_util.tree_unflatten(out_tree, out_flat)
 
 def triton_kernel_call(*args, name, asm, shared_mem, out_shape,
@@ -231,5 +231,7 @@ def triton_kernel_call(*args, name, asm, shared_mem, out_shape,
   out_flat = triton_kernel_call_p.bind(*flat_args, name=name, asm=Asm(asm),
       shared_mem=shared_mem, out_shapes=tuple(flat_out_shapes),
       grid=grid, num_warps=num_warps,
-      dump_binary_path=None, input_output_aliases=input_output_aliases, **metaparams)
+      dump_binary_path=None,
+      input_output_aliases=tuple(input_output_aliases.items()),
+      **metaparams)
   return tree_util.tree_unflatten(out_tree, out_flat)
