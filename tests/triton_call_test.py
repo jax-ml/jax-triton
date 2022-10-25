@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import unittest
 
 from absl.testing import absltest
@@ -214,4 +215,5 @@ class TritonKernelCallTest(parameterized.TestCase):
 
 
 if __name__ == '__main__':
+  os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
   absltest.main()
