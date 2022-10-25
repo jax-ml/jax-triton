@@ -22,7 +22,10 @@ import jax.numpy as jnp
 import numpy as np
 import triton
 import triton.language as tl
-import torch
+try:
+  import torch
+except ModuleNotFoundError:
+  torch = None
 
 import jax_triton as jt
 
@@ -154,7 +157,8 @@ class TritonKernelCallTest(parameterized.TestCase):
   def test_matmul(self, m, n, k, dtype, block_size_m, block_size_n,
       block_size_k, group_size_m):
 
-    if torch.cuda.get_device_capability() < (7, 0):
+    # TODO(sharadmv): expose this information in `jaxlib`
+    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
       raise unittest.SkipTest("Matmul only works on GPUs with capability >= sm70")
 
     grid = lambda META: (
