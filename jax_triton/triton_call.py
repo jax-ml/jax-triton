@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
 import os
 import functools
 import pickle
@@ -115,10 +116,16 @@ def compile_triton_func(
   metadata = {triton_func.arg_names.index(k) : v for k, v in metaparams.items()}
   all_args = [*avals_in, *avals_out]
   signature = {i: get_triton_python_ir(a) for i, a in enumerate(all_args)}
+  # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
+  specialization = collections.namedtuple(
+      "instance_descriptor", ["divisible_by_16", "equal_to_1"])(
+          tuple(range(len(all_args))), ())
   # TODO(sharadmv): handle multiple devices, right now we assume device 0 which
   # is fine when we have multiple of the same GPU but this won't work in
   # general.
-  asm, shared_mem, name = tc._compile(triton_func, signature=signature, device=0,
+  asm, shared_mem, name = tc._compile(
+      triton_func, signature=signature, device=0,
+      specialization=specialization,
       constants=metadata, num_warps=num_warps,
       num_stages=num_stages, extern_libs={}, output="cubin")
   return name, asm, shared_mem
