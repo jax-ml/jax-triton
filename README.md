@@ -20,7 +20,7 @@ $ pip install "jax[cuda11_cudnn82]" -f https://storage.googleapis.com/jax-releas
 
 To develop `jax-triton`, you can clone the repo with:
 ```bash
-$ git clone https://github.com/jax-ml/jax-triton.git 
+$ git clone https://github.com/jax-ml/jax-triton.git
 ```
 and do an editable install with:
 ```bash
