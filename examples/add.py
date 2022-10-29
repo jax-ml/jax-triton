@@ -37,7 +37,6 @@ def add_kernel(
   output = x + y
   tl.store(output_ptr + offsets, output, mask=mask)
 
-
 def add(x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
   out_shape = jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)
   block_size = 8

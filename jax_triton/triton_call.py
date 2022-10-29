@@ -28,6 +28,7 @@ from jax.lib import xla_client as xc
 from jax.interpreters import mlir
 from jax.interpreters import xla
 from jax import tree_util
+from jax._src import state
 from jax._src import util
 from jax._src.lib import xla_bridge as xb
 from jax._src.lib.mlir import ir
@@ -40,7 +41,6 @@ try:
   import triton
   import triton.compiler as tc
   import triton.language as tl
-  del triton
   CAN_USE_TRITON = True
 except ModuleNotFoundError:
   pass
@@ -54,37 +54,41 @@ zip, unsafe_zip = util.safe_zip, zip
 xc.register_custom_call_target(
     "triton_kernel_call",triton_kernel_call_lib.get_custom_call(), platform="CUDA")
 
+triton_type_mappings = {}
+
 def get_triton_type(obj: Any) -> str:
-    type_map = {
-        jnp.dtype("bfloat16"): "bf16",
-        jnp.dtype("float64"): "fp64",
-        jnp.dtype("float32"): "fp32",
-        jnp.dtype("float16"): "fp16",
-        jnp.dtype("int32"): "i32",
-        jnp.dtype("int64"): "i64",
-    }
-    if isinstance(obj, jax.core.ShapedArray):
-      return f"*{type_map[obj.dtype]}"
-    if isinstance(obj, tl.constexpr):
-      obj = obj.value
-    if isinstance(obj, int):
-      if -2**31 <= obj < 2**31:
-        return 'i32'
-      elif 2**31 <= obj < 2**32:
-        return 'u32'
-      elif -2**63 <= obj < 2**63:
-        return 'i64'
-      elif 2**63 <= obj < 2**64:
-        return 'u64'
-      else:
-        raise ValueError(f'integer overflow representing {obj}')
-    if isinstance(obj, float):
-      return 'f'
-    if isinstance(obj, bool):
-      return 'B'
-    if isinstance(obj, str):
-      return 'str'
-    raise NotImplementedError(f'could not compute type name for {obj}')
+  type_map = {
+      jnp.dtype("bfloat16"): "bf16",
+      jnp.dtype("float64"): "fp64",
+      jnp.dtype("float32"): "fp32",
+      jnp.dtype("float16"): "fp16",
+      jnp.dtype("int32"): "i32",
+      jnp.dtype("int64"): "i64",
+  }
+  if isinstance(obj, (jax.core.ShapedArray, state.ShapedArrayRef)):
+    return f"*{type_map[obj.dtype]}"
+  if isinstance(obj, tl.constexpr):
+    obj = obj.value
+  if isinstance(obj, int):
+    if -2**31 <= obj < 2**31:
+      return 'i32'
+    elif 2**31 <= obj < 2**32:
+      return 'u32'
+    elif -2**63 <= obj < 2**63:
+      return 'i64'
+    elif 2**63 <= obj < 2**64:
+      return 'u64'
+    else:
+      raise ValueError(f'integer overflow representing {obj}')
+  if isinstance(obj, float):
+    return 'f'
+  if isinstance(obj, bool):
+    return 'B'
+  if isinstance(obj, str):
+    return 'str'
+  if type(obj) in triton_type_mappings:
+    return triton_type_mappings[type(obj)](obj)
+  raise NotImplementedError(f'could not compute type name for {obj}: {type(obj)}')
 
 def get_triton_python_ir(aval):
   return get_triton_type(aval)
@@ -202,12 +206,14 @@ class Asm:
   def __init__(self, asm_map):
     self.asm_map = asm_map
 
-def triton_call(*args, kernel, out_shape, grid: GridOrLambda, num_warps=4,
-                num_stages=2, dump_binary_path: Optional[str] = None,
+def triton_call(*args, kernel, out_shape, grid: Union[int, GridOrLambda],
+                num_warps=4, num_stages=2, dump_binary_path: Optional[str] = None,
                 input_output_aliases: Dict[int, int] = {},
                 **metaparams):
   if not CAN_USE_TRITON:
     raise ValueError("`triton_call` is only available when `triton` is installed.")
+  if isinstance(grid, int):
+    grid = (grid,)
   out_shape = tree_util.tree_map(
       lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), out_shape)
   flat_args, in_tree = tree_util.tree_flatten(args)
@@ -227,9 +233,11 @@ def triton_call(*args, kernel, out_shape, grid: GridOrLambda, num_warps=4,
   return tree_util.tree_unflatten(out_tree, out_flat)
 
 def triton_kernel_call(*args, name, asm, shared_mem, out_shape,
-                       grid: GridOrLambda, num_warps: int = 4,
+                       grid: Union[int, GridOrLambda], num_warps: int = 4,
                        input_output_aliases: Dict[int, int] = {},
                        **metaparams):
+  if isinstance(grid, int):
+    grid = (grid,)
   out_shape = tree_util.tree_map(
       lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), out_shape)
   flat_args, in_tree = tree_util.tree_flatten(args)
@@ -243,3 +251,14 @@ def triton_kernel_call(*args, name, asm, shared_mem, out_shape,
       input_output_aliases=tuple(input_output_aliases.items()),
       **metaparams)
   return tree_util.tree_unflatten(out_tree, out_flat)
+
+def cdiv(a, b):
+  return triton.cdiv(a, b)
+
+def strides_from_shape(shape: Tuple[int]) -> Tuple[int]:
+  size = np.prod(shape)
+  strides = []
+  for s in shape:
+    size = size // s
+    strides.append(int(size))
+  return tuple(strides)

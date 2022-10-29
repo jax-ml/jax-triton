@@ -32,7 +32,15 @@ except ModuleNotFoundError:
 import jax_triton as jt
 
 config.parse_flags_with_absl()
-config.update("jax_enable_x64", True)
+
+
+def setUpModule():
+  config.update("jax_enable_x64", True)
+
+
+def tearDownModule():
+  config.update("jax_enable_x64", False)
+
 
 @triton.jit
 def add_kernel(x_ptr, y_ptr, output_ptr,
@@ -50,8 +58,8 @@ def add_kernel(x_ptr, y_ptr, output_ptr,
 @triton.jit
 def matmul_kernel(
     a_ptr, b_ptr, c_ptr, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr):
+    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr, GROUP_SIZE_M: tl.constexpr):
     stride_am = K
     stride_ak = 1
     stride_bk = N

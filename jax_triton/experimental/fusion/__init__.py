@@ -12,23 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""setup.py for jax-triton."""
-import pybind11
-from setuptools import Extension
-from setuptools import find_packages
-from setuptools import setup
+"""Module for an experimental fusion library."""
+import jax
+sigmoid = jax.nn.sigmoid
+import oryx
+jax.nn.sigmoid = sigmoid
+del sigmoid, oryx, jax
 
-setup(
-    packages=find_packages(),
-    ext_modules=[
-        Extension(
-            name="jax_triton.triton_kernel_call",
-            sources=["lib/triton_kernel_call.cc"],
-            include_dirs=["/usr/local/cuda/include",
-                          pybind11.get_include()],
-            libraries=["cuda"],
-            library_dirs=[
-                "/usr/local/cuda/lib64", "/usr/local/cuda/lib64/stubs"
-            ],
-        )
-    ])
+from jax_triton.experimental.fusion.lowering import jit
