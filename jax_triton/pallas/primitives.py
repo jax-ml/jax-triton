@@ -21,7 +21,8 @@ import jax
 from jax import core as jax_core
 from jax import lax
 from jax._src import ad_util
-from jax._src.util import safe_map, safe_zip, split_list
+from jax._src.util import (safe_map, safe_zip, split_list, merge_lists,
+                           partition_list)
 from jax._src.state import primitives as state_primitives
 from jax.interpreters import ad
 import jax.numpy as jnp
@@ -109,8 +110,26 @@ def _swap_transpose(g, ref, *idx_and_rest, **params):
   raise NotImplementedError
 ad.primitive_transposes[swap_p] = _swap_transpose
 
+def _process_idx(idx, ref_shape):
+  if any(isinstance(i, slice) and i != slice(None) for i in idx):
+    raise NotImplementedError("Non-`slice(None)` slices not supported yet.")
+  if len(idx) != len(ref_shape):
+    raise ValueError("Must provide indexer for each dimension of `Ref`.")
+  is_int_indexing = [isinstance(i, (jnp.ndarray, int)) for i in idx]
+  other_indexers, int_indexers = partition_list(is_int_indexing, idx)
+  indexer_shapes = [jnp.shape(i) for i in int_indexers]
+  bcast_shape = tuple(s for i in indexer_shapes for s in i)
+  idx_iter = iter(range(len(bcast_shape)))
+  int_indexers = [
+      lax.broadcast_in_dim(i, bcast_shape, tuple(next(idx_iter) for _ in
+                                                 range(len(i.shape))))
+      for i in int_indexers
+  ]
+  return merge_lists(is_int_indexing, other_indexers, int_indexers)
+
 def load(x_ref, idx, *, mask=None, other=None, cache_modifier="",
          eviction_poicy="", volatile=False):
+  idx = _process_idx(idx, x_ref.shape)
   idx, indexed_dims = state_primitives._unpack_idx(idx, x_ref.ndim)
   args = idx
   if mask is not None:
@@ -118,19 +137,22 @@ def load(x_ref, idx, *, mask=None, other=None, cache_modifier="",
   if other is not None:
     assert mask is not None
     args = (*args, other)
-  return load_p.bind(x_ref, *args, masked=True, cache_modifier=cache_modifier,
+  return load_p.bind(x_ref, *args, masked=mask is not None, cache_modifier=cache_modifier,
                      eviction_policy=eviction_poicy, is_volatile=volatile,
                      indexed_dims=indexed_dims)
 
 
-def store(x_ref, idx, val, *, mask=None, eviction_policy="") -> None:
+def swap(x_ref, idx, val, *, mask=None, eviction_policy="") -> Any:
+  idx = _process_idx(idx, x_ref.shape)
   idx, indexed_dims = state_primitives._unpack_idx(idx, x_ref.ndim)
   args = idx
   if mask is not None:
     args = (*args, mask)
-  _ = swap_p.bind(x_ref, val, *args, masked=True, eviction_policy=eviction_policy,
-                  indexed_dims=indexed_dims)
-  return
+  return swap_p.bind(x_ref, val, *args, masked=mask is not None,
+                     eviction_policy=eviction_policy, indexed_dims=indexed_dims)
+
+def store(x_ref, idx, val, *, mask=None, eviction_policy="") -> None:
+  _ = swap(x_ref, idx, val, mask=mask, eviction_policy=eviction_policy)
 
 def dot(a, b, trans_a=False, trans_b=False, allow_tf32=True):
   rhs_contract_dim = int(trans_b)

@@ -36,12 +36,7 @@ def mha_kernel(
    # Each thread block processes a block of block_q queries.
   span_q = start_q * block_q + jnp.arange(block_q)
   # Model dimension is read in one op. Model dimension must be power of 2.
-  span_d = jnp.arange(0, block_d)  # block_d == head_dim.
-
-  tmp_idxs = (
-      lax.broadcast_in_dim(off_b, (block_q,), ()),
-      lax.broadcast_in_dim(off_h, (block_q,), ()),
-      span_q)
+  span_d = jnp.arange(block_d)  # block_d == head_dim.
 
   # acc is the buffer where we accumulate the output on sram.
   # m_i and l_i (see FlashAttention paper) are updated during the k,v loop.
@@ -53,12 +48,7 @@ def mha_kernel(
   # Load q: it will stay in L1 throughout. Indices form a matrix because we
   # read, compute, and write all in 2d chunks. 1 element ~= 1 CUDA thread index.
   # q tile has shape [block_q, block_d], block_d == head_dim.
-  q_idxs = (
-      lax.broadcast_in_dim(off_b, (block_q, block_d), ()),
-      lax.broadcast_in_dim(span_q, (block_q, block_d), (0,)),
-      lax.broadcast_in_dim(off_h, (block_q, block_d), ()),
-      lax.broadcast_in_dim(span_d, (block_q, block_d), (1,)))
-  q = q_ref[q_idxs]
+  q = pl.load(q_ref, (off_b, span_q, off_h, span_d))
   # In FlashAttention algorithm 1 there are 2 loops: slow over tiles of kv (size
   # (Bc == block_k here), and fast over blocks of q (size Br == block_q here).
   # Here we only loop over blocks of kv to process entire seq_len, the loop over
@@ -68,12 +58,7 @@ def mha_kernel(
     acc, m_i, l_i = acc_ref[:], m_i_ref[:], l_i_ref[:]
     start_k = pl.multiple_of(i * block_k, block_k)
     span_k = start_k + jnp.arange(0, block_k)
-    k_idxs = (
-        lax.broadcast_in_dim(off_b, (block_k, block_d), ()),
-        lax.broadcast_in_dim(span_k, (block_k, block_d), (0,)),
-        lax.broadcast_in_dim(off_h, (block_k, block_d), ()),
-        lax.broadcast_in_dim(span_d, (block_k, block_d), (1,)))
-    k = k_ref[k_idxs]
+    k = pl.load(k_ref, (off_b, span_k, off_h, span_d))
     p_ij = jnp.zeros([block_q, block_k], dtype=jnp.float32)
     if sm_scale == 1.0:
       p_ij += pl.dot(q, k, trans_b=True)   # [block_q, block_k]
@@ -100,8 +85,9 @@ def mha_kernel(
     # Update the scaling of the output buffer acc.
     acc_scale = l_i / l_i_new * alpha  # Shape [block_q].
     # Compiler bug! Use tmp real quck
-    tmp_ref[tmp_idxs] =  acc_scale
-    acc_scale = tmp_ref[tmp_idxs]
+
+    pl.store(tmp_ref, (off_b, off_h, span_q), acc_scale)
+    acc_scale = pl.load(tmp_ref, (off_b, off_h, span_q))
 
     acc = acc * acc_scale[:, None]
     l_i_ref[:] = l_i_new  # Update m_i and l_i for the next block_k.
@@ -109,7 +95,7 @@ def mha_kernel(
     # # NOTE: Flash attention ends.
 
     # Add the new block of attention weights.
-    v = v_ref[k_idxs]
+    v = pl.load(v_ref, (off_b, span_k, off_h, span_d))
     acc_ref[()] = acc + jnp.dot(p_ij.astype(q_ref.dtype), v)
 
   acc, m_i, l_i = for_loop(seq_len // block_k, body, (acc, m_i, l_i))
@@ -118,12 +104,7 @@ def mha_kernel(
   # Write output to dram.
   span_d = jnp.arange(block_d)
   acc = acc.astype(o_ref.dtype)
-  o_idxs = (
-      lax.broadcast_in_dim(off_b, (block_q, block_d), ()),
-      lax.broadcast_in_dim(span_q, (block_q, block_d), (0,)),
-      lax.broadcast_in_dim(off_h, (block_q, block_d), ()),
-      lax.broadcast_in_dim(span_d, (block_q, block_d), (1,)))
-  o_ref[o_idxs] = acc
+  pl.store(o_ref, (off_b, span_q, off_h, span_d), acc)
 
 def mha(q, k, v, *,
         sm_scale: float = 1.0,
@@ -149,7 +130,7 @@ def mha(q, k, v, *,
                            dtype=jnp.float32)
   ]
   out, _ = pl.pallas_call(kernel, num_warps=num_warps, num_stages=num_stages,
-                          grid=grid, out_shapes=out_shape, debug=True)(q, k, v)
+                          grid=grid, out_shape=out_shape, debug=True)(q, k, v)
   return out
 
 @functools.partial(jax.jit, static_argnames=['sm_scale'])
