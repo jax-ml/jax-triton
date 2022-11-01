@@ -70,6 +70,7 @@ class TritonLoweringResult:
 triton_lowering_rules = {}
 
 def lower_jaxpr_to_triton_module(jaxpr: jax_core.Jaxpr, name: str) -> tl_ir.module:
+  jaxpr, _ = pe.dce_jaxpr(jaxpr, [True] * len(jaxpr.outvars))
   ir_context = tl_ir.context()
   builder = tl_ir.builder(ir_context)
   module = tl_ir.module("", builder)
@@ -200,6 +201,8 @@ triton_lowering_rules[jax.lax.min_p] = _min_lowering_rule
 
 def _convert_element_type_lowering_rule(ctx: TritonLoweringRuleContext, a, *,
                                         new_dtype, weak_type):
+  if new_dtype == ctx.avals_in[0].dtype:
+    return a
   if new_dtype == jnp.float32:
     new_dtype = tl.float32
   elif new_dtype == jnp.float16:

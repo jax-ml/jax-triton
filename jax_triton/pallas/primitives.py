@@ -26,6 +26,7 @@ from jax._src.util import (safe_map, safe_zip, split_list, merge_lists,
 from jax._src.state import primitives as state_primitives
 from jax.interpreters import ad
 import jax.numpy as jnp
+import numpy as np
 
 map, unsafe_map = safe_map, map
 zip, unsafe_zip = safe_zip, zip
@@ -117,6 +118,8 @@ def _process_idx(idx, ref_shape):
     raise ValueError("Must provide indexer for each dimension of `Ref`.")
   is_int_indexing = [isinstance(i, (jnp.ndarray, int)) for i in idx]
   other_indexers, int_indexers = partition_list(is_int_indexing, idx)
+  int_indexers = [np.array(i, np.int32) if isinstance(i, int) else i for i in
+                  int_indexers]
   indexer_shapes = [jnp.shape(i) for i in int_indexers]
   bcast_shape = tuple(s for i in indexer_shapes for s in i)
   idx_iter = iter(range(len(bcast_shape)))
