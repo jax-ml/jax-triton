@@ -15,6 +15,7 @@
 """Module for calling pallas functions from JAX."""
 from functools import partial
 
+import jax
 from jax import api_util
 from jax import core as jax_core
 from jax import linear_util as lu
@@ -123,6 +124,8 @@ def pallas_call(f, out_shape, grid, *, debug=False, num_warps=4, num_stages=3,
     grid = (grid,)
   name = f.__name__ if hasattr(f, "__name__") and f.__name__ else"func"
   flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
+  flat_out_shapes = [jax.ShapeDtypeStruct(x.shape, x.dtype) for x in
+                     flat_out_shapes]
   def wrapped(*args, **kwargs):
     flat_args, _ = tree_util.tree_flatten((args, kwargs))
     in_tree = tree_util.tree_structure((*args, *flat_out_shapes))
