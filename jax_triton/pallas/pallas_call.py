@@ -135,6 +135,8 @@ def pallas_call(f, out_shape, grid, *, debug=False, num_warps=4, num_stages=3,
     flat_fun, _ = api_util.flatten_fun_nokwargs(lu.wrap_init(f), in_tree)
     jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(flat_fun, [*ptr_avals, *out_ptr_avals])
     jaxpr = for_loop._hoist_consts_to_refs(jaxpr)
+    if debug:
+      print(jaxpr)
 
     which_linear = (False,) * len(flat_args)
     out_flat = pallas_call_p.bind(*consts, *flat_args, jaxpr=jaxpr, name=name,
