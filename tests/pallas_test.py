@@ -192,9 +192,7 @@ class PallasCallTest(parameterized.TestCase):
     def softmax(x_ref, o_ref):
       row_idx = pl.program_id(0)
       x_idx = jnp.arange(block_size)
-      row_idxs = (
-          lax.broadcast_in_dim(row_idx, (block_size,), ()),
-          x_idx)
+      row_idxs = (row_idx, x_idx)
       mask = x_idx < x_ref.shape[1]
       row = pl.load(x_ref, row_idxs, mask=mask, other=-float("inf"))
       row_minus_max = row - jnp.max(row, axis=0)
@@ -228,6 +226,21 @@ class PallasCallTest(parameterized.TestCase):
     key = random.PRNGKey(0)
     x = random.normal(key, (size,))
     np.testing.assert_allclose(add_one(x), x + 1., atol=1e-5, rtol=1e-5)
+
+  def test_broadcasted_load_store(self):
+    m, n = 16, 32
+    @functools.partial(
+        pl.pallas_call,
+        out_shape=(
+          jax.ShapeDtypeStruct((m, n), jnp.float32)
+          ), grid=1)
+    def load(x_ref, o_ref):
+      x = pl.load(x_ref, (jnp.arange(m), jnp.arange(n)))
+      pl.store(o_ref, (jnp.arange(m), jnp.arange(n)), x + 1.)
+
+    key = random.PRNGKey(0)
+    x = random.normal(key, (m, n))
+    np.testing.assert_allclose(load(x), x + 1., atol=1e-5, rtol=1e-5)
 
 if __name__ == "__main__":
   absltest.main()

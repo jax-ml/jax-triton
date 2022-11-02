@@ -20,3 +20,4 @@ from jax_triton.pallas.primitives import max_contiguous
 from jax_triton.pallas.primitives import multiple_of
 from jax_triton.pallas.primitives import program_id
 from jax_triton.pallas.primitives import store
+from jax_triton.pallas.primitives import swap
