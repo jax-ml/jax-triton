@@ -62,9 +62,22 @@ def get_triton_type(obj: Any) -> str:
       jnp.dtype("float64"): "fp64",
       jnp.dtype("float32"): "fp32",
       jnp.dtype("float16"): "fp16",
-      jnp.dtype("int32"): "i32",
+      # Triton has 'fp8' as well which Jax doesn't support yet.
+
       jnp.dtype("int64"): "i64",
+      jnp.dtype("int32"): "i32",
+      jnp.dtype("int16"): "i16",
+      jnp.dtype("int8"): "i8",
+
+      jnp.dtype("uint64"): "u64",
+      jnp.dtype("uint32"): "u32",
+      jnp.dtype("uint16"): "u16",
+      jnp.dtype("uint8"): "u8",
+
+      # Triton defines a 'B' type, which is an alias for both i1 and bool.
+      jnp.dtype("bool"): "B",
   }
+
   if isinstance(obj, (jax.core.ShapedArray, state.ShapedArrayRef)):
     return f"*{type_map[obj.dtype]}"
   if isinstance(obj, tl.constexpr):
