@@ -28,6 +28,7 @@ from jax._src import util
 from jax._src.lax.control_flow import for_loop
 from jax.interpreters import partial_eval as pe
 from jax.interpreters import xla
+from jax._src import state
 from jax._src.state import primitives as sp
 from jax._src.state import discharge
 from jax._src.state import ShapedArrayRef
@@ -70,7 +71,7 @@ class TritonLoweringResult:
 triton_lowering_rules = {}
 
 def lower_jaxpr_to_triton_module(jaxpr: jax_core.Jaxpr, name: str) -> tl_ir.module:
-  jaxpr, _ = pe.dce_jaxpr(jaxpr, [True] * len(jaxpr.outvars))
+  jaxpr, _ = pe.dce_jaxpr(jaxpr, [True] * len(jaxpr.outvars), instantiate=True)
   ir_context = tl_ir.context()
   builder = tl_ir.builder(ir_context)
   module = tl_ir.module("", builder)
@@ -408,8 +409,9 @@ def _for_lowering_rule(ctx: TritonLoweringRuleContext, *args, jaxpr,
   # Populate phi args for loop block (loop counter and values)
   should_discharge = [not isinstance(a, ShapedArrayRef) for a in ctx.avals_in]
   loop_counter = ctx.builder.create_phi(tl.int32.to_ir(ctx.builder), 2)
+  ref_avals = [v.aval for v in jaxpr.invars][1:]
   read_only = [for_loop._is_read_only(eff) for eff in
-               for_loop._get_ref_state_effects(jaxpr)[1:]]
+               state.get_ref_state_effects(ref_avals, jaxpr.effects)]
   lowering_args = []
   for arg, sd, ro in zip(args, should_discharge, read_only):
     if not sd or ro:

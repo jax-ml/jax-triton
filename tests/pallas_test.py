@@ -242,5 +242,19 @@ class PallasCallTest(parameterized.TestCase):
     x = random.normal(key, (m, n))
     np.testing.assert_allclose(load(x), x + 1., atol=1e-5, rtol=1e-5)
 
+  def test_unused_ref(self):
+    m, n = 16, 32
+    @functools.partial(
+        pl.pallas_call,
+        out_shape=(
+          jax.ShapeDtypeStruct((m, n), jnp.float32)
+          ), grid=1)
+    def dummy(_, o_ref):
+      pl.store(o_ref, (jnp.arange(m), jnp.arange(n)), jnp.ones_like(o_ref))
+
+    key = random.PRNGKey(0)
+    x = random.normal(key, (m, n))
+    np.testing.assert_allclose(dummy(x), jnp.ones_like(x), atol=1e-5, rtol=1e-5)
+
 if __name__ == "__main__":
   absltest.main()
