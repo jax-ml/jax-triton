@@ -256,5 +256,31 @@ class PallasCallTest(parameterized.TestCase):
     x = random.normal(key, (m, n))
     np.testing.assert_allclose(dummy(x), jnp.ones_like(x), atol=1e-5, rtol=1e-5)
 
+  def test_pallas_call_with_input_output_aliasing(self):
+
+    def add_inplace_kernel(_, o_ref, *, block_size):
+      pid = pl.program_id(axis=0)  # we use a 1d launch grid so axis is 0
+      block_start = pid * block_size
+      offsets = block_start + jnp.arange(block_size)
+      mask = offsets < o_ref.shape[0]
+      x = pl.load(o_ref, (offsets,), mask=mask)
+      output = x + 1
+      pl.store(o_ref, (offsets,), output, mask=mask)
+
+    grid = (8,)
+    size = 8
+    dtype = "float32"
+    k1 = random.PRNGKey(0)
+    block_size = 1
+    x = random.normal(k1, [size], dtype=dtype)
+    kernel = functools.partial(add_inplace_kernel, block_size=block_size)
+    out = pl.pallas_call(
+        kernel,
+        out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+        grid=grid, input_output_aliases={0: 0})(x)
+    expected = x + 1
+    np.testing.assert_allclose(out, expected)
+
+
 if __name__ == "__main__":
   absltest.main()

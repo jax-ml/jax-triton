@@ -15,6 +15,8 @@
 """Module for calling pallas functions from JAX."""
 from functools import partial
 
+from typing import Dict, Tuple
+
 from jax import api_util
 from jax import core as jax_core
 from jax import linear_util as lu
@@ -49,7 +51,10 @@ def _pallas_call_abstract_eval(*avals, out_shapes, **_):
 pallas_call_p.def_abstract_eval(_pallas_call_abstract_eval)
 
 def _pallas_call_jvp_rule(primals, tangents, *, jaxpr, name, which_linear,
+    input_output_aliases: Tuple[Tuple[int, int], ...],
     out_shapes, grid, debug, **metaparams):
+  if input_output_aliases:
+    raise NotImplementedError("JVP with aliasing not supported.")
   nonzero_tangents = [not isinstance(t, ad_util.Zero) for t in tangents]
   tangents = [ad.instantiate_zeros(t) if inst else t
               for t, inst in zip(tangents, nonzero_tangents)]
@@ -86,7 +91,9 @@ ad.primitive_jvps[pallas_call_p] = _pallas_call_jvp_rule
 
 def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes, jaxpr, name,
                          out_shapes, which_linear, grid, num_warps, num_stages,
-                         debug, **metaparams):
+                         debug: bool,
+                         input_output_aliases: Tuple[Tuple[int, int], ...],
+                         **metaparams):
   del which_linear
   lowering_result = lowering.lower_jaxpr_to_triton_module(jaxpr, name)
   if debug:
@@ -103,6 +110,13 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes, jaxpr, name,
       ctx, name, asm, shared_mem, num_warps=num_warps, grid=grid,
       metaparams=metaparams, dump_binary_path=None)
   ctx.module_context.add_keepalive(keepalive)
+  output_operand_aliases = ir.ArrayAttr.get([
+          mhlo.OutputOperandAlias.get(
+              output_tuple_indices=[output],
+              operand_index=input,
+              operand_tuple_indices=[])
+          for input, output in input_output_aliases
+      ])
   out = mhlo.CustomCallOp(
             [out_type], in_nodes,
             call_target_name=ir.StringAttr.get("triton_kernel_call"),
@@ -111,13 +125,16 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes, jaxpr, name,
             api_version=ir.IntegerAttr.get(i32_type, 1),
             called_computations=ir.ArrayAttr.get([]),
             operand_layouts=avals_to_layouts(ctx.avals_in),
-            result_layouts=avals_to_layouts(ctx.avals_out))
+            result_layouts=avals_to_layouts(ctx.avals_out),
+            output_operand_aliases=output_operand_aliases)
   results = [mhlo.GetTupleElementOp(out, mlir.i32_attr(i)).result
              for i in range(len(out_shapes))]
   return results
 mlir.register_lowering(pallas_call_p, pallas_call_lowering)
 
-def pallas_call(f, out_shape, grid, *, debug=False, num_warps=4, num_stages=3,
+def pallas_call(f, out_shape, grid, *, debug: bool = False,
+                num_warps: int = 4, num_stages: int = 3,
+                input_output_aliases: Dict[int, int] = {},
                 **metaparams):
   if isinstance(grid, int):
     grid = (grid,)
@@ -139,10 +156,11 @@ def pallas_call(f, out_shape, grid, *, debug=False, num_warps=4, num_stages=3,
       print(jaxpr)
 
     which_linear = (False,) * len(flat_args)
-    out_flat = pallas_call_p.bind(*consts, *flat_args, jaxpr=jaxpr, name=name,
-                                  which_linear=which_linear,
-                                  out_shapes=tuple(flat_out_shapes),
-                                  grid=grid, debug=debug, num_warps=num_warps,
-                                  num_stages=num_stages, **metaparams)
+    out_flat = pallas_call_p.bind(
+        *consts, *flat_args, jaxpr=jaxpr, name=name, which_linear=which_linear,
+        out_shapes=tuple(flat_out_shapes), grid=grid, debug=debug,
+        num_warps=num_warps,
+        input_output_aliases=tuple(input_output_aliases.items()),
+        num_stages=num_stages, **metaparams)
     return tree_util.tree_unflatten(out_tree, out_flat)
   return wrapped
