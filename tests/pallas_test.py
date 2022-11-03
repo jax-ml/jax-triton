@@ -281,6 +281,72 @@ class PallasCallTest(parameterized.TestCase):
     expected = x + 1
     np.testing.assert_allclose(out, expected)
 
+  @parameterized.named_parameters(*[
+    ("add_i32", pl.atomic_add, np.array([1, 2, 3, 4], np.int32), np.sum),
+    ("max_i32", pl.atomic_max, np.array([1, 2, 3, 4], np.int32), np.max),
+    ("min_i32", pl.atomic_min, np.array([1, 2, 3, 4], np.int32), np.min),
+    ("add_f16", pl.atomic_add, np.array([1, 2, 3, 4], np.float16), np.sum),
+    ("add_f32", pl.atomic_add, np.array([1, 2, 3, 4], np.float32), np.sum),
+    ("max_f32", pl.atomic_max, np.array([1, 2, 3, 4], np.float32), np.max),
+    ("min_f32", pl.atomic_min, np.array([1, 2, 3, 4], np.float32), np.min),
+  ])
+  def test_scalar_atomic(self, op, value, numpy_op):
+    # TODO(sharadmv): expose this information in `jaxlib`
+    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+      raise unittest.SkipTest(
+          "Atomic ops onl works on GPUs with capability >= sm70")
+
+    @functools.partial(
+        pl.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((), value.dtype),
+        grid=value.shape[0],
+        input_output_aliases={1: 0})
+    def atomic_kernel(x_ref, _, o_ref):
+      pid = pl.program_id(axis=0)
+      op(o_ref, (), x_ref[pid])
+    if op == pl.atomic_add:
+      neutral = np.array(0, dtype=value.dtype)
+    elif op == pl.atomic_max:
+      if np.issubdtype(value.dtype, np.integer):
+        neutral = np.array(np.iinfo(value.dtype).min, value.dtype)
+      else:
+        neutral = np.array(-float('inf'), value.dtype)
+    elif op == pl.atomic_min:
+      if np.issubdtype(value.dtype, np.integer):
+        neutral = np.array(np.iinfo(value.dtype).max, value.dtype)
+      else:
+        neutral = np.array(float('inf'), value.dtype)
+    elif op == pl.atomic_or:
+      neutral = np.array(False, value.dtype)
+    else:
+      raise NotImplementedError()
+    out = atomic_kernel(value, neutral)
+    np.testing.assert_allclose(out, numpy_op(value))
+
+  @parameterized.parameters(*[(0,), (1,)])
+  def test_array_atomic_add(self, axis):
+    # TODO(sharadmv): expose this information in `jaxlib`
+    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+      raise unittest.SkipTest(
+          "Atomic ops onl works on GPUs with capability >= sm70")
+
+    m, n = 32, 8
+    out_shape = jax.ShapeDtypeStruct((n if axis == 0 else m,), jnp.float32)
+    @functools.partial(
+        pl.pallas_call,
+        out_shape=out_shape,
+        grid=1,
+        input_output_aliases={1: 0})
+    def reduce(x_ref, _, y_ref):
+      x = pl.load(x_ref, (jnp.arange(m), jnp.arange(n)))
+      y = jnp.sum(x, axis=axis)
+      pl.atomic_add(y_ref, (jnp.arange(y.shape[0]),), y)
+    x = random.normal(random.PRNGKey(0), (m, n))
+    y = jnp.zeros(out_shape.shape, out_shape.dtype)
+    y = reduce(x, y)
+    y_ref = np.sum(x, axis=axis)
+    np.testing.assert_allclose(y, y_ref, atol=1e-2, rtol=1e-2)
+
 
 if __name__ == "__main__":
   absltest.main()

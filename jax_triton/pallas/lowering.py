@@ -15,7 +15,7 @@
 """Module for lowering JAX primitives to Triton IR."""
 import dataclasses
 
-from typing import Any, Set
+from typing import Any, Sequence
 
 import jax
 from jax import api_util
@@ -44,6 +44,8 @@ from jax_triton.pallas import primitives
 
 map, unsafe_map = util.safe_map, map
 zip, unsafe_zip = util.safe_zip, zip
+
+# # General lowering logic
 
 @dataclasses.dataclass
 class TritonModuleContext:
@@ -127,9 +129,44 @@ def lower_jaxpr_to_triton_ir(ctx: TritonModuleContext, jaxpr: jax_core.Jaxpr,
       write_env(eqn.outvars[0], outvals)
   return map(read_env, jaxpr.outvars)
 
+# # Primitive lowering rules
+
+# ## Programming model primitives
+
 def _program_id_lowering_rule(ctx: TritonLoweringRuleContext, *, axis):
   return tl.program_id(axis, _builder=ctx.builder)
 triton_lowering_rules[primitives.program_id_p] = _program_id_lowering_rule
+
+# ## Atomic op primitives
+
+_ATOMIC_OP_MAPPING = {
+    primitives.AtomicOpType.XCHG: tl.core.atomic_xchg,
+    primitives.AtomicOpType.ADD: tl.core.atomic_add,
+    primitives.AtomicOpType.MAX: tl.core.atomic_max,
+    primitives.AtomicOpType.MIN: tl.core.atomic_min,
+    primitives.AtomicOpType.AND: tl.core.atomic_and,
+    primitives.AtomicOpType.OR: tl.core.atomic_or,
+    primitives.AtomicOpType.XOR: tl.core.atomic_xor,
+}
+
+def _atomic_lowering_rule(ctx: TritonLoweringRuleContext, ptr, value,
+                          *non_slice_idx,
+                          indexed_dims: Sequence[bool], masked: bool,
+                          atomic_type: primitives.AtomicOpType):
+  non_slice_idx, mask_rest = util.split_list(non_slice_idx, [sum(indexed_dims)])
+  idx = _pack_indices(non_slice_idx, indexed_dims)
+  avals_in = ctx.avals_in
+  avals_out = ctx.avals_out
+  ptr = _offset_ptr(ptr, idx, avals_in[0].shape, avals_out[0].shape, ctx.builder)
+  mask = None
+  if masked:
+    assert len(mask_rest) == 1
+    mask, = mask_rest
+  if atomic_type not in _ATOMIC_OP_MAPPING:
+    raise NotImplementedError(atomic_type)
+  op = _ATOMIC_OP_MAPPING[atomic_type]
+  return op(ptr, value, mask=mask, _builder=ctx.builder)
+triton_lowering_rules[primitives.atomic_rmw_p] = _atomic_lowering_rule
 
 def _max_contiguous_lowering_rule(ctx: TritonLoweringRuleContext, x, *, values):
   values = [tl.constexpr(v) for v in values]
