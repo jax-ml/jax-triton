@@ -14,6 +14,7 @@
 
 """Module for lowering JAX primitives to Triton IR."""
 import dataclasses
+import functools
 
 from typing import Any, Sequence
 
@@ -409,17 +410,34 @@ def _dot_general_lowering(ctx: TritonLoweringRuleContext, a, b, *,
                 allow_tf32=allow_tf32)
 triton_lowering_rules[jax.lax.dot_general_p] = _dot_general_lowering
 
-def _reduce_max_lowering(ctx: TritonLoweringRuleContext, a, *, axes):
-  assert len(axes) == 1
+def _reduce_lowering(triton_op, ctx: TritonLoweringRuleContext, a, *, axes):
+  if len(axes) != 1:
+    raise ValueError("`pallas` reduce operations only support one reduce axis.")
   axis, = axes
-  return tl.max(a, axis=axis, _builder=ctx.builder)
-triton_lowering_rules[jax.lax.reduce_max_p] = _reduce_max_lowering
+  return triton_op(a, axis=axis, _builder=ctx.builder)
+triton_lowering_rules[lax.reduce_max_p] = functools.partial(_reduce_lowering, tl.max)
+triton_lowering_rules[lax.reduce_min_p] = functools.partial(_reduce_lowering, tl.min)
+triton_lowering_rules[lax.reduce_sum_p] = functools.partial(_reduce_lowering, tl.sum)
 
-def _reduce_sum_lowering(ctx: TritonLoweringRuleContext, a, *, axes):
-  assert len(axes) == 1
+def _reduce_argmax_lowering(ctx: TritonLoweringRuleContext, a, *, axes,
+                            index_dtype):
+  if index_dtype != jnp.int32:
+    raise ValueError("`index_type` must be f32.")
+  if len(axes) != 1:
+    raise ValueError("`pallas` reduce operations only support one reduce axis.")
   axis, = axes
-  return tl.sum(a, axis=axis, _builder=ctx.builder)
-triton_lowering_rules[jax.lax.reduce_sum_p] = _reduce_sum_lowering
+  return tl.argmax(a, axis=axis, _builder=ctx.builder)
+triton_lowering_rules[lax.argmax_p] = _reduce_argmax_lowering
+
+def _reduce_argmin_lowering(ctx: TritonLoweringRuleContext, a, *, axes,
+                            index_dtype):
+  if index_dtype != jnp.int32:
+    raise ValueError("`index_type` must be f32.")
+  if len(axes) != 1:
+    raise ValueError("`pallas` reduce operations only support one reduce axis.")
+  axis, = axes
+  return tl.argmin(a, axis=axis, _builder=ctx.builder)
+triton_lowering_rules[lax.argmin_p] = _reduce_argmin_lowering
 
 def _xla_call_lowering_rule(ctx: TritonLoweringRuleContext, *args, call_jaxpr, **_):
   return lower_jaxpr_to_triton_ir(ctx.context, call_jaxpr, *args)
