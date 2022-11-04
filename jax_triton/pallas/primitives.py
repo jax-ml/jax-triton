@@ -14,8 +14,10 @@
 
 """Module for pallas-specific JAX primitives and functions."""
 from __future__ import annotations
+import enum
+import functools
 
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 import jax
 from jax import core as jax_core
@@ -31,6 +33,25 @@ import numpy as np
 map, unsafe_map = safe_map, map
 zip, unsafe_zip = safe_zip, zip
 
+def _process_idx(idx, ref_shape):
+  if any(isinstance(i, slice) and i != slice(None) for i in idx):
+    raise NotImplementedError("Non-`slice(None)` slices not supported yet.")
+  if len(idx) != len(ref_shape):
+    raise ValueError("Must provide indexer for each dimension of `Ref`.")
+  is_int_indexing = [isinstance(i, (jnp.ndarray, int)) for i in idx]
+  other_indexers, int_indexers = partition_list(is_int_indexing, idx)
+  int_indexers = [np.array(i, np.int32) if isinstance(i, int) else i for i in
+                  int_indexers]
+  indexer_shapes = [jnp.shape(i) for i in int_indexers]
+  bcast_shape = tuple(s for i in indexer_shapes for s in i)
+  idx_iter = iter(range(len(bcast_shape)))
+  int_indexers = [
+      lax.broadcast_in_dim(i, bcast_shape, tuple(next(idx_iter) for _ in
+                                                 range(len(i.shape))))
+      for i in int_indexers
+  ]
+  return merge_lists(is_int_indexing, other_indexers, int_indexers)
+
 program_id_p = jax_core.Primitive("program_id")
 
 def program_id(axis):
@@ -39,6 +60,47 @@ def program_id(axis):
 def _program_id_abstract_eval(**_):
   return jax_core.ShapedArray((), jnp.int32)
 program_id_p.def_abstract_eval(_program_id_abstract_eval)
+
+class AtomicOpType(enum.Enum):
+  XCHG = "xchg"
+  ADD = "add"
+  MAX = "max"
+  MIN = "min"
+  AND = "and"
+  OR = "or"
+  XOR = "xor"
+
+atomic_rmw_p = jax_core.Primitive("atomic_rmw")
+
+def _atomic_abstract_eval(ref_aval, val_aval, *all_avals,
+                          indexed_dims: Tuple[bool], atomic_type: AtomicOpType,
+                          **_: Any):
+  if ref_aval.dtype == jnp.dtype("float16") and atomic_type != AtomicOpType.ADD:
+    raise ValueError(f"`atomic_{atomic_type.value}` does not support f16.")
+  if ref_aval.dtype in {jnp.dtype("bool"), jnp.dtype("int8"),
+                        jnp.dtype("int16"), jnp.bfloat16}:
+    raise ValueError(f"`atomic_{atomic_type.value}` does not support {ref_aval.dtype}.")
+  idx_avals, _ = split_list(all_avals, [sum(indexed_dims)])
+  return state_primitives._swap_abstract_eval(
+      ref_aval, val_aval, *idx_avals, indexed_dims=indexed_dims)
+atomic_rmw_p.def_effectful_abstract_eval(_atomic_abstract_eval)
+
+def atomic_rmw(x_ref, idx, val, *, mask: Optional[Any] = None, atomic_type: AtomicOpType):
+  idx = _process_idx(idx, x_ref.shape)
+  idx, indexed_dims = state_primitives._unpack_idx(idx, x_ref.ndim)
+  args = idx
+  if mask is not None:
+    args = (*args, mask)
+  return atomic_rmw_p.bind(x_ref, val, *args, indexed_dims=indexed_dims,
+                           atomic_type=atomic_type, masked=mask is not None)
+
+atomic_xchg = functools.partial(atomic_rmw, atomic_type=AtomicOpType.XCHG)
+atomic_add = functools.partial(atomic_rmw, atomic_type=AtomicOpType.ADD)
+atomic_max = functools.partial(atomic_rmw, atomic_type=AtomicOpType.MAX)
+atomic_min = functools.partial(atomic_rmw, atomic_type=AtomicOpType.MIN)
+atomic_and = functools.partial(atomic_rmw, atomic_type=AtomicOpType.AND)
+atomic_or = functools.partial(atomic_rmw, atomic_type=AtomicOpType.OR)
+atomic_xor = functools.partial(atomic_rmw, atomic_type=AtomicOpType.XOR)
 
 max_contiguous_p = jax_core.Primitive("max_contiguous")
 
@@ -110,25 +172,6 @@ ad.primitive_jvps[swap_p] = _swap_jvp
 def _swap_transpose(g, ref, *idx_and_rest, **params):
   raise NotImplementedError
 ad.primitive_transposes[swap_p] = _swap_transpose
-
-def _process_idx(idx, ref_shape):
-  if any(isinstance(i, slice) and i != slice(None) for i in idx):
-    raise NotImplementedError("Non-`slice(None)` slices not supported yet.")
-  if len(idx) != len(ref_shape):
-    raise ValueError("Must provide indexer for each dimension of `Ref`.")
-  is_int_indexing = [isinstance(i, (jnp.ndarray, int)) for i in idx]
-  other_indexers, int_indexers = partition_list(is_int_indexing, idx)
-  int_indexers = [np.array(i, np.int32) if isinstance(i, int) else i for i in
-                  int_indexers]
-  indexer_shapes = [jnp.shape(i) for i in int_indexers]
-  bcast_shape = tuple(s for i in indexer_shapes for s in i)
-  idx_iter = iter(range(len(bcast_shape)))
-  int_indexers = [
-      lax.broadcast_in_dim(i, bcast_shape, tuple(next(idx_iter) for _ in
-                                                 range(len(i.shape))))
-      for i in int_indexers
-  ]
-  return merge_lists(is_int_indexing, other_indexers, int_indexers)
 
 def load(x_ref, idx, *, mask=None, other=None, cache_modifier="",
          eviction_poicy="", volatile=False):
