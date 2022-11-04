@@ -347,6 +347,39 @@ class PallasCallTest(parameterized.TestCase):
     y_ref = np.sum(x, axis=axis)
     np.testing.assert_allclose(y, y_ref, atol=1e-2, rtol=1e-2)
 
+  @parameterized.named_parameters(*[
+    (f"{op_name}_{dtype}_{axis}", op, dtype, axis)
+    for op_name, op in [
+      ("add", jnp.sum),
+      ("max", jnp.max),
+      ("min", jnp.min),
+      ("argmax", jnp.argmax),
+      ("argmin", jnp.argmin),
+    ]
+    for axis in [0, 1]
+    for dtype in ["float16", "float32", "int32"]
+    ])
+  def test_array_reduce(self, op, dtype, axis):
+    m, n = 32, 8
+    out_dtype = dtype
+    if op in {jnp.argmin, jnp.argmax}:
+      out_dtype = jnp.int32
+    out_shape = jax.ShapeDtypeStruct((n if axis == 0 else m,), out_dtype)
+    @functools.partial(
+        pl.pallas_call,
+        out_shape=out_shape,
+        grid=1)
+    def reduce(x_ref, y_ref):
+      x = pl.load(x_ref, (jnp.arange(m), jnp.arange(n)))
+      y = op(x, axis=axis)
+      pl.store(y_ref, (jnp.arange(y.shape[0]),), y)
+    if jnp.issubdtype(dtype, jnp.integer):
+      x = jnp.arange(m * n, dtype=dtype).reshape((m, n))
+    else:
+      x = random.normal(random.PRNGKey(0), (m, n), dtype=dtype)
+    y = reduce(x)
+    y_ref = op(x, axis=axis)
+    np.testing.assert_allclose(y, y_ref, atol=1e-2, rtol=1e-2)
 
 if __name__ == "__main__":
   absltest.main()
