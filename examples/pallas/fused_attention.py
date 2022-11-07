@@ -44,7 +44,7 @@ def mha_kernel(
   # Load q: it will stay in L1 throughout. Indices form a matrix because we
   # read, compute, and write all in 2d chunks. 1 element ~= 1 CUDA thread index.
   # q tile has shape [block_q, block_d], block_d == head_dim.
-  q = pl.load(q_ref, (off_b, pl.dslice(start_q * block_q, block_q), off_h, slice(None)))
+  q = pl.load(q_ref, (off_b, pl.dslice(start_q * block_q, block_q), off_h, pl.dslice(None)))
   # In FlashAttention algorithm 1 there are 2 loops: slow over tiles of kv (size
   # (Bc == block_k here), and fast over blocks of q (size Br == block_q here).
   # Here we only loop over blocks of kv to process entire seq_len, the loop over
@@ -98,7 +98,7 @@ def mha_kernel(
   # Write output to dram.
   acc = acc.astype(o_ref.dtype)
   pl.store(o_ref, (off_b, pl.dslice(start_q * block_q, block_q), off_h,
-                   slice(None)), acc)
+                   pl.dslice(None)), acc)
 
 @functools.partial(jax.jit, static_argnames=["sm_scale", "block_q", "block_k",
                                              "num_warps", "num_stages", "grid"])
