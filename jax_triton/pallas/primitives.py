@@ -174,7 +174,7 @@ def _swap_transpose(g, ref, *idx_and_rest, **params):
 ad.primitive_transposes[swap_p] = _swap_transpose
 
 def load(x_ref, idx, *, mask=None, other=None, cache_modifier="",
-         eviction_poicy="", volatile=False):
+         eviction_policy="", volatile=False):
   idx = _process_idx(idx, x_ref.shape)
   idx, indexed_dims = state_primitives._unpack_idx(idx, x_ref.ndim)
   args = idx
@@ -184,7 +184,7 @@ def load(x_ref, idx, *, mask=None, other=None, cache_modifier="",
     assert mask is not None
     args = (*args, other)
   return load_p.bind(x_ref, *args, masked=mask is not None, cache_modifier=cache_modifier,
-                     eviction_policy=eviction_poicy, is_volatile=volatile,
+                     eviction_policy=eviction_policy, is_volatile=volatile,
                      indexed_dims=indexed_dims)
 
 
