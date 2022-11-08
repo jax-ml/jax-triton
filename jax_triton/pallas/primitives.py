@@ -151,7 +151,9 @@ class Slice:
     stop = size if stop is None else stop
     return Slice(start, stop - start)
 
-def dslice(start: Union[int, Array], stop: Optional[int] = None):
+def dslice(start: Optional[Union[int, Array]], stop: Optional[int] = None):
+  if start is None:
+    return slice(None)
   if stop is None:
     if not isinstance(start, int):
       raise ValueError("Non-static `dslice`")
