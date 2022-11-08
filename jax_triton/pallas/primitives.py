@@ -14,18 +14,22 @@
 
 """Module for pallas-specific JAX primitives and functions."""
 from __future__ import annotations
+import dataclasses
 import enum
 import functools
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 import jax
 from jax import core as jax_core
 from jax import lax
+from jax import tree_util
 from jax._src import ad_util
+from jax._src import state
 from jax._src.util import (safe_map, safe_zip, split_list, merge_lists,
                            partition_list)
 from jax._src.state import primitives as state_primitives
+from jax._src.typing import Array
 from jax.interpreters import ad
 import jax.numpy as jnp
 import numpy as np
@@ -73,25 +77,24 @@ class AtomicOpType(enum.Enum):
 atomic_rmw_p = jax_core.Primitive("atomic_rmw")
 
 def _atomic_abstract_eval(ref_aval, val_aval, *all_avals,
-                          indexed_dims: Tuple[bool], atomic_type: AtomicOpType,
+                          args_tree, atomic_type: AtomicOpType,
                           **_: Any):
   if ref_aval.dtype == jnp.dtype("float16") and atomic_type != AtomicOpType.ADD:
     raise ValueError(f"`atomic_{atomic_type.value}` does not support f16.")
   if ref_aval.dtype in {jnp.dtype("bool"), jnp.dtype("int8"),
                         jnp.dtype("int16"), jnp.bfloat16}:
     raise ValueError(f"`atomic_{atomic_type.value}` does not support {ref_aval.dtype}.")
-  idx_avals, _ = split_list(all_avals, [sum(indexed_dims)])
-  return state_primitives._swap_abstract_eval(
-      ref_aval, val_aval, *idx_avals, indexed_dims=indexed_dims)
+  return _swap_abstract_eval(ref_aval, val_aval, *all_avals,
+                             args_tree=args_tree)
 atomic_rmw_p.def_effectful_abstract_eval(_atomic_abstract_eval)
 
 def atomic_rmw(x_ref, idx, val, *, mask: Optional[Any] = None, atomic_type: AtomicOpType):
-  idx = _process_idx(idx, x_ref.shape)
-  idx, indexed_dims = state_primitives._unpack_idx(idx, x_ref.ndim)
-  args = idx
+  idx = NDIndexer.from_indices_shape(idx, x_ref.shape)
+  args = (idx,)
   if mask is not None:
     args = (*args, mask)
-  return atomic_rmw_p.bind(x_ref, val, *args, indexed_dims=indexed_dims,
+  flat_args, args_tree = tree_util.tree_flatten(args)
+  return atomic_rmw_p.bind(x_ref, val, *flat_args, args_tree=args_tree,
                            atomic_type=atomic_type, masked=mask is not None)
 
 atomic_xchg = functools.partial(atomic_rmw, atomic_type=AtomicOpType.XCHG)
@@ -124,78 +127,141 @@ def _multiple_of_abstract_eval(aval, **_):
   return aval
 multiple_of_p.def_abstract_eval(_multiple_of_abstract_eval)
 
+@tree_util.register_pytree_node_class
+@dataclasses.dataclass
+class Slice:
+  start: Any
+  size: int
+
+  def tree_flatten(self):
+    if isinstance(self.start, int):
+      return (), (True, self.start, self.size)
+    return (self.start,), (False, self.size)
+
+  @classmethod
+  def tree_unflatten(cls, data, xs):
+    if data[0]:
+      return Slice(data[1], data[2])
+    return Slice(xs[0], data[1])
+
+  @classmethod
+  def from_slice(cls, slc: slice, size: int) -> Slice:
+    start, stop = slc.start, slc.stop
+    start = 0 if start is None else start
+    stop = size if stop is None else stop
+    return Slice(start, stop - start)
+
+def dslice(start: Union[int, Array], stop: Optional[int] = None):
+  if stop is None:
+    if not isinstance(start, int):
+      raise ValueError("Non-static `dslice`")
+    return Slice(0, start)
+  return Slice(start, stop)
+
+@tree_util.register_pytree_node_class
+@dataclasses.dataclass
+class NDIndexer:
+  indices: Tuple[Union[int, Slice, Array]]
+  shape: Tuple[int, ...]
+  int_indexer_shape: Tuple[int, ...]
+
+  def __post_init__(self):
+    if len(self.indices) != len(self.shape):
+      raise ValueError("`indices` must be the same length as `Ref` shape.")
+
+  def tree_flatten(self):
+    indexed_dims = [not isinstance(idx, slice) for idx in self.indices]
+    slice_idx, non_slice_idx = partition_list(indexed_dims, self.indices)
+    flat_idx, idx_tree = tree_util.tree_flatten(non_slice_idx)
+    return flat_idx, (slice_idx, idx_tree, indexed_dims, self.shape,
+                      self.int_indexer_shape)
+
+  @classmethod
+  def tree_unflatten(cls, data, flat_idx):
+    slice_idx, idx_tree, indexed_dims, shape, int_indexer_shape = data
+    non_slice_idx = tree_util.tree_unflatten(idx_tree, flat_idx)
+    indices = merge_lists(indexed_dims, slice_idx, non_slice_idx)
+    return NDIndexer(tuple(indices), shape, int_indexer_shape)
+
+  @classmethod
+  def from_indices_shape(cls, indices, shape) -> NDIndexer:
+    indices = tuple(Slice.from_slice(i, s) if isinstance(i, slice)
+                    else i for i, s in zip(indices, shape))
+    if any(isinstance(i, slice) and i != slice(None) for i in indices):
+      raise NotImplementedError("Non-`slice(None)` slices not supported yet.")
+    if len(indices) != len(shape):
+      raise ValueError("Must provide indexer for each dimension of `Ref`.")
+    is_int_indexing = [isinstance(i, (Array, int)) for i in indices]
+    other_indexers, int_indexers = partition_list(is_int_indexing, indices)
+    int_indexers = [np.array(i, np.int32) if isinstance(i, int) else i for i in
+                    int_indexers]
+    indexer_shapes = [i.shape for i in int_indexers]
+    bcast_shape = tuple(s for i in indexer_shapes for s in i)
+    idx_iter = iter(range(len(bcast_shape)))
+    int_indexers = [
+        lax.broadcast_in_dim(i, bcast_shape, tuple(next(idx_iter) for _ in
+                                                   range(len(i.shape))))
+        for i in int_indexers
+    ]
+    indices = merge_lists(is_int_indexing, other_indexers, int_indexers)
+    return NDIndexer(tuple(indices), shape, bcast_shape)
+
+  def get_indexer_shape(self) -> Tuple[int, ...]:
+    is_int_indexing = [not isinstance(i, Slice) for i in self.indices]
+    other_indexers, _ = partition_list(is_int_indexing, self.indices)
+    other_shape = [s.size for s in other_indexers]
+    return tuple((*self.int_indexer_shape, *other_shape))
+
 load_p = jax_core.Primitive('masked_load')
 
-def _load_abstract_eval(ref_aval, *all_avals, indexed_dims: Tuple[bool],
+def _load_abstract_eval(ref_aval, *all_avals, args_tree,
                         **params: Any):
-  idx_avals, _ = split_list(all_avals, [sum(indexed_dims)])
-  return state_primitives._get_abstract_eval(
-      ref_aval, *idx_avals, indexed_dims=indexed_dims)
+  idx_aval, *_ = tree_util.tree_unflatten(args_tree, all_avals)
+  return (jax_core.ShapedArray(idx_aval.get_indexer_shape(), ref_aval.dtype),
+          {state.ReadEffect(ref_aval)})
 load_p.def_effectful_abstract_eval(_load_abstract_eval)
-
-def _load_jvp(primals: List[Any], tangents: List[Any], *, indexed_dims, **params):
-  ref_primal, *idx_and_rest_primals = primals
-  ref_tangent, *idx_and_rest_tangents = tangents
-  idx_primals, _ = split_list(idx_and_rest_primals, [sum(indexed_dims)])
-  _, rest_tangents = split_list(idx_and_rest_tangents, [sum(indexed_dims)])
-  return (load_p.bind(ref_primal, *idx_and_rest_primals,
-                      indexed_dims=indexed_dims, **params),
-          load_p.bind(ref_tangent, *idx_primals, *rest_tangents,
-                      indexed_dims=indexed_dims, **params))
-ad.primitive_jvps[load_p] = _load_jvp
-
-def _load_transpose(g, ref, *idx_and_rest, **params):
-  raise NotImplementedError
-ad.primitive_transposes[load_p] = _load_transpose
 
 swap_p = jax_core.Primitive('masked_swap')
 
-def _swap_abstract_eval(ref_aval, val_aval, *all_avals, indexed_dims: Tuple[bool],
+def _swap_abstract_eval(ref_aval, val_aval, *all_avals, args_tree,
                         **_: Any):
-  idx_avals, _ = split_list(all_avals, [sum(indexed_dims)])
-  return state_primitives._swap_abstract_eval(
-      ref_aval, val_aval, *idx_avals, indexed_dims=indexed_dims)
+  idx_aval, *_ = tree_util.tree_unflatten(args_tree, all_avals)
+  expected_output_shape = idx_aval.get_indexer_shape()
+  if expected_output_shape != val_aval.shape:
+    raise ValueError("Invalid shape for `swap`. "
+                     f"Ref shape: {ref_aval.shape}. "
+                     f"Value shape: {val_aval.shape}. "
+                     f"Indices: {idx_aval}. ")
+  if ref_aval.dtype != val_aval.dtype:
+    raise ValueError("Invalid dtype for `swap`. "
+                     f"Ref dtype: {ref_aval.dtype}. "
+                     f"Value shape: {val_aval.dtype}. ")
+  return (jax_core.ShapedArray(expected_output_shape, ref_aval.dtype),
+          {state.WriteEffect(ref_aval)})
 swap_p.def_effectful_abstract_eval(_swap_abstract_eval)
-
-def _swap_jvp(primals: List[Any], tangents: List[Any], *, indexed_dims, **params):
-  ref_primal, val_primal, *idx_and_rest_primals = primals
-  ref_tangent, val_tangent, *idx_and_rest_tangents = tangents
-  idx_primals, _ = split_list(idx_and_rest_primals, [sum(indexed_dims)])
-  _, rest_tangents = split_list(idx_and_rest_tangents, [sum(indexed_dims)])
-  val_tangent = ad_util.instantiate(val_tangent)
-  return (swap_p.bind(ref_primal, val_primal, *idx_and_rest_primals,
-                      indexed_dims=indexed_dims, **params),
-          swap_p.bind(ref_tangent, val_tangent, *idx_primals, *rest_tangents,
-                      indexed_dims=indexed_dims, **params))
-ad.primitive_jvps[swap_p] = _swap_jvp
-
-def _swap_transpose(g, ref, *idx_and_rest, **params):
-  raise NotImplementedError
-ad.primitive_transposes[swap_p] = _swap_transpose
 
 def load(x_ref, idx, *, mask=None, other=None, cache_modifier="",
          eviction_policy="", volatile=False):
-  idx = _process_idx(idx, x_ref.shape)
-  idx, indexed_dims = state_primitives._unpack_idx(idx, x_ref.ndim)
-  args = idx
+  idx = NDIndexer.from_indices_shape(idx, x_ref.shape)
+  args = (idx,)
   if mask is not None:
     args = (*args, mask)
   if other is not None:
     assert mask is not None
     args = (*args, other)
-  return load_p.bind(x_ref, *args, masked=mask is not None, cache_modifier=cache_modifier,
+  flat_args, args_tree = tree_util.tree_flatten(args)
+  return load_p.bind(x_ref, *flat_args, masked=mask is not None, cache_modifier=cache_modifier,
                      eviction_policy=eviction_policy, is_volatile=volatile,
-                     indexed_dims=indexed_dims)
-
+                     args_tree=args_tree)
 
 def swap(x_ref, idx, val, *, mask=None, eviction_policy="") -> Any:
-  idx = _process_idx(idx, x_ref.shape)
-  idx, indexed_dims = state_primitives._unpack_idx(idx, x_ref.ndim)
-  args = idx
+  idx = NDIndexer.from_indices_shape(idx, x_ref.shape)
+  args = (idx,)
   if mask is not None:
     args = (*args, mask)
-  return swap_p.bind(x_ref, val, *args, masked=mask is not None,
-                     eviction_policy=eviction_policy, indexed_dims=indexed_dims)
+  flat_args, args_tree = tree_util.tree_flatten(args)
+  return swap_p.bind(x_ref, val, *flat_args, masked=mask is not None,
+                     eviction_policy=eviction_policy, args_tree=args_tree)
 
 def store(x_ref, idx, val, *, mask=None, eviction_policy="") -> None:
   _ = swap(x_ref, idx, val, mask=mask, eviction_policy=eviction_policy)

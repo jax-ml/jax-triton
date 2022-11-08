@@ -347,6 +347,7 @@ class PallasCallTest(parameterized.TestCase):
     y_ref = np.sum(x, axis=axis)
     np.testing.assert_allclose(y, y_ref, atol=1e-2, rtol=1e-2)
 
+
   @parameterized.named_parameters(*[
     (f"{op_name}_{dtype}_{axis}", op, dtype, axis)
     for op_name, op in [
@@ -379,6 +380,21 @@ class PallasCallTest(parameterized.TestCase):
       x = random.normal(random.PRNGKey(0), (m, n), dtype=dtype)
     y = reduce(x)
     y_ref = op(x, axis=axis)
+    np.testing.assert_allclose(y, y_ref, atol=1e-2, rtol=1e-2)
+
+  def test_using_pallas_slice(self):
+    m, n = 32, 4
+    out_shape = jax.ShapeDtypeStruct((4, n), jnp.float32)
+    @functools.partial(
+        pl.pallas_call,
+        out_shape=out_shape,
+        grid=1)
+    def slice_kernel(x_ref, y_ref):
+      x = pl.load(x_ref, (pl.dslice(0, 4), pl.dslice(0, 4)))
+      pl.store(y_ref, (pl.dslice(4), pl.dslice(4)), x)
+    x = random.normal(random.PRNGKey(0), (m, n))
+    y = slice_kernel(x)
+    y_ref = x[:4]
     np.testing.assert_allclose(y, y_ref, atol=1e-2, rtol=1e-2)
 
 if __name__ == "__main__":

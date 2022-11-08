@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import timeit
 
 from typing import Optional
 
@@ -20,10 +21,10 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 from jax._src.lax.control_flow.for_loop import for_loop
+import numpy as np
+
 import jax_triton as jt
-
 from jax_triton import pallas as pl
-
 
 def mha_kernel(
     q_ref, k_ref, v_ref,  # Input arrays
@@ -32,11 +33,6 @@ def mha_kernel(
   start_q = pl.program_id(0)
   off_h = pl.program_id(1)  # int in [0, num_heads)
   off_b = pl.program_id(2)  # int in [0, batch_size)
-
-   # Each thread block processes a block of block_q queries.
-  span_q = start_q * block_q + jnp.arange(block_q)
-  # Model dimension is read in one op. Model dimension must be power of 2.
-  span_d = jnp.arange(block_d)  # block_d == head_dim.
 
   # acc is the buffer where we accumulate the output on sram.
   # m_i and l_i (see FlashAttention paper) are updated during the k,v loop.
@@ -48,7 +44,7 @@ def mha_kernel(
   # Load q: it will stay in L1 throughout. Indices form a matrix because we
   # read, compute, and write all in 2d chunks. 1 element ~= 1 CUDA thread index.
   # q tile has shape [block_q, block_d], block_d == head_dim.
-  q = pl.load(q_ref, (off_b, span_q, off_h, span_d))
+  q = pl.load(q_ref, (off_b, pl.dslice(start_q * block_q, block_q), off_h, slice(None)))
   # In FlashAttention algorithm 1 there are 2 loops: slow over tiles of kv (size
   # (Bc == block_k here), and fast over blocks of q (size Br == block_q here).
   # Here we only loop over blocks of kv to process entire seq_len, the loop over
@@ -57,8 +53,7 @@ def mha_kernel(
     acc_ref, m_i_ref, l_i_ref = refs
     acc, m_i, l_i = acc_ref[:], m_i_ref[:], l_i_ref[:]
     start_k = pl.multiple_of(i * block_k, block_k)
-    span_k = start_k + jnp.arange(0, block_k)
-    k = pl.load(k_ref, (off_b, span_k, off_h, span_d))
+    k = pl.load(k_ref, (off_b, pl.dslice(start_k, block_k), off_h, pl.dslice(block_d)))
     p_ij = jnp.zeros([block_q, block_k], dtype=jnp.float32)
     if sm_scale == 1.0:
       p_ij += pl.dot(q, k, trans_b=True)   # [block_q, block_k]
@@ -86,8 +81,9 @@ def mha_kernel(
     acc_scale = l_i / l_i_new * alpha  # Shape [block_q].
     # Compiler bug! Use tmp real quck
 
-    pl.store(tmp_ref, (off_b, off_h, span_q), acc_scale)
-    acc_scale = pl.load(tmp_ref, (off_b, off_h, span_q))
+    tmp_idx = (off_b, off_h, pl.dslice(start_q * block_q, block_q))
+    pl.store(tmp_ref, tmp_idx, acc_scale)
+    acc_scale = pl.load(tmp_ref, tmp_idx)
 
     acc = acc * acc_scale[:, None]
     l_i_ref[:] = l_i_new  # Update m_i and l_i for the next block_k.
@@ -95,17 +91,17 @@ def mha_kernel(
     # # NOTE: Flash attention ends.
 
     # Add the new block of attention weights.
-    v = pl.load(v_ref, (off_b, span_k, off_h, span_d))
+    v = pl.load(v_ref, (off_b, pl.dslice(start_k, block_k), off_h, pl.dslice(block_d)))
     acc_ref[()] = acc + jnp.dot(p_ij.astype(q_ref.dtype), v)
 
   acc, m_i, l_i = for_loop(seq_len // block_k, body, (acc, m_i, l_i))
-  start_q = pl.program_id(0)
-  span_q = start_q * block_q + jnp.arange(block_q)
   # Write output to dram.
-  span_d = jnp.arange(block_d)
   acc = acc.astype(o_ref.dtype)
-  pl.store(o_ref, (off_b, span_q, off_h, span_d), acc)
+  pl.store(o_ref, (off_b, pl.dslice(start_q * block_q, block_q), off_h,
+                   slice(None)), acc)
 
+@functools.partial(jax.jit, static_argnames=["sm_scale", "block_q", "block_k",
+                                             "num_warps", "num_stages", "grid"])
 def mha(q, k, v, *,
         sm_scale: float = 1.0,
         block_q: int = 128,
@@ -130,7 +126,7 @@ def mha(q, k, v, *,
                            dtype=jnp.float32)
   ]
   out, _ = pl.pallas_call(kernel, num_warps=num_warps, num_stages=num_stages,
-                          grid=grid, out_shape=out_shape, debug=True)(q, k, v)
+                          grid=grid, out_shape=out_shape, debug=False)(q, k, v)
   return out
 
 @functools.partial(jax.jit, static_argnames=['sm_scale'])
@@ -152,4 +148,12 @@ if __name__ == "__main__":
   o = mha(q, k, v)
   o.block_until_ready()
   o_ref = mha_reference(q, k, v)
-  print(o.block_until_ready())
+  np.testing.assert_allclose(o, o_ref, atol=0.01, rtol=0.01)
+
+  n_trials = 1000
+  duration = timeit.timeit(lambda: mha(q, k, v).block_until_ready(),
+                           number=n_trials)
+  print(f"Fused Attention: {duration / n_trials * 1000:.2f}ms")
+  duration = timeit.timeit(lambda: mha_reference(q, k, v).block_until_ready(),
+                           number=n_trials)
+  print(f"Reference Attention: {duration / n_trials * 1000:.2f}ms")

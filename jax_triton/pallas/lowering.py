@@ -41,6 +41,7 @@ import numpy as np
 from triton.language import ir as tl_ir
 import triton._C.libtriton.triton as _triton
 
+import jax_triton as jt
 from jax_triton.pallas import primitives
 
 map, unsafe_map = util.safe_map, map
@@ -151,14 +152,15 @@ _ATOMIC_OP_MAPPING = {
 }
 
 def _atomic_lowering_rule(ctx: TritonLoweringRuleContext, ptr, value,
-                          *non_slice_idx,
-                          indexed_dims: Sequence[bool], masked: bool,
+                          *args,
+                          args_tree, masked: bool,
                           atomic_type: primitives.AtomicOpType):
-  non_slice_idx, mask_rest = util.split_list(non_slice_idx, [sum(indexed_dims)])
-  idx = _pack_indices(non_slice_idx, indexed_dims)
+  idx, *mask_rest = tree_util.tree_unflatten(args_tree, args)
   avals_in = ctx.avals_in
-  avals_out = ctx.avals_out
-  ptr = _offset_ptr(ptr, idx, avals_in[0].shape, avals_out[0].shape, ctx.builder)
+  idx_avals, *_ = tree_util.tree_unflatten(args_tree, avals_in[2:])
+  is_scalar = [hasattr(a, "shape") and a.shape == () for a in
+               idx_avals.indices]
+  ptr = _offset_ptr(ptr, idx, avals_in[0].shape, ctx.builder, is_scalar)
   mask = None
   if masked:
     assert len(mask_rest) == 1
@@ -292,30 +294,53 @@ def _squeeze_lowering_rule(ctx: TritonLoweringRuleContext, a, *, dimensions):
   return tl.reshape(a, shape, _builder=ctx.builder)
 triton_lowering_rules[jax.lax.squeeze_p] = _squeeze_lowering_rule
 
-def _offset_ptr(ptr, indices, shape, out_shape, builder):
-  strides = np.cumprod([1, *shape[::-1]])[:-1][::-1]
-  offset = None
-  for i, (idx, s, dim) in enumerate(zip(indices, strides, shape)):
-    size = tl.core._to_tensor(int(s), builder)
-    if isinstance(idx, slice):
-      if idx != slice(None):
-        raise NotImplementedError
-      idx = tl.arange(0, dim, _builder=builder)
-      if i > 0 and offset.shape != [1]:
-        idx = tl.reshape(idx, (*([tl.constexpr(1)] *
-          len(ptr.shape)), tl.constexpr(dim)), _builder=builder)
-        dst_shape = [*offset.shape, tl.constexpr(1)]
-        ret_ty = tl.block_type(offset.type.scalar, dst_shape)
-        offset = tl.tensor(builder.create_reshape(offset.handle, dst_shape), ret_ty)
-    idx = idx.__mul__(size, _builder=builder)
-    if offset is None:
-      offset = idx
+def _offset_ptr(ptr, idx: primitives.NDIndexer, shape, builder, is_scalar):
+  strides = jt.strides_from_shape(shape)
+  indexer_shape = idx.get_indexer_shape()
+  indices = idx.indices
+  other_shape = indexer_shape[len(idx.int_indexer_shape):]
+  bcast_indices = []
+  other_shape_idx = 0
+  for stride, index, dim_size, is_sc in zip(strides, indices, shape, is_scalar):
+    if isinstance(index, primitives.Slice):
+      index_size = index.size
+      if isinstance(index.start, int):
+        index = tl.arange(index.start, index.start + index.size,
+                          _builder=builder)
+      else:
+        index = index.start.__add__(tl.arange(0, index.size, _builder=builder),
+                                    _builder=builder)
+      desired_shape = ([tl.constexpr(1)] * other_shape_idx + [tl.constexpr(index_size)] +
+                       [tl.constexpr(1)] * (len(other_shape) - other_shape_idx - 1))
+      desired_shape = [tl.constexpr(1)] * len(idx.int_indexer_shape) + desired_shape
+      other_shape_idx += 1
+    elif isinstance(index, slice):
+      if index != slice(None):
+        raise NotImplementedError("Only `slice(None)` allowed.")
+      index = tl.arange(0, dim_size, _builder=builder)
+      desired_shape = ([tl.constexpr(1)] * other_shape_idx + [tl.constexpr(dim_size)] +
+                       [tl.constexpr(1)] * (len(other_shape) - other_shape_idx - 1))
+      desired_shape = [tl.constexpr(1)] * len(idx.int_indexer_shape) + desired_shape
+      other_shape_idx += 1
     else:
-      offset = offset.__add__(idx, _builder=builder)
-  if offset is not None:
-    ptr = ptr.__add__(offset, _builder=builder)
-  if ptr.shape != [1] and ptr.shape == [1, *out_shape]:
-    ptr = tl.reshape(ptr, map(tl.constexpr, out_shape), _builder=builder)
+      if is_sc:
+        desired_shape = [tl.constexpr(1)] * len(other_shape)
+      else:
+        desired_shape = index.shape + [tl.constexpr(1)] * len(other_shape)
+    if index.shape != desired_shape:
+      if is_sc:
+        # Need special handling for reshaping a scalar
+        index = tl.broadcast_to(index, desired_shape, _builder=builder)
+      else:
+        index = tl.reshape(index, desired_shape, _builder=builder)
+    stride_size = tl.core._to_tensor(int(stride), builder)
+    bcast_indices.append(index.__mul__(stride_size, _builder=builder))
+  dest_shape = map(tl.constexpr, idx.get_indexer_shape())
+  bcast_indices = [
+      tl.broadcast_to(index, dest_shape, _builder=builder) if dest_shape != index.shape
+      else index for index in bcast_indices]
+  for bcast_idx in bcast_indices:
+    ptr = ptr.__add__(bcast_idx, _builder=builder)
   return ptr
 
 def _pack_indices(non_slice_idx, indexed_dims):
@@ -330,21 +355,33 @@ def _get_lowering_rule(ctx: TritonLoweringRuleContext, ptr, *non_slice_idx, inde
   if not isinstance(ptr.type, tl.pointer_type):
     assert len(avals_in) == 1
     return ptr
-  ptr = _offset_ptr(ptr, idx, avals_in[0].shape, avals_out[0].shape, ctx.builder)
+  if non_slice_idx:
+    int_indexer_shape, = {tuple(map(lambda x: x.value, i.shape)) for i in
+                          non_slice_idx}
+  else:
+    int_indexer_shape = ()
+  is_scalar = [i.shape == () if not isinstance(i, slice) else False for i in
+               idx]
+  idx = tuple(primitives.Slice.from_slice(slc, s) if isinstance(slc, slice)
+              else slc for s, slc in zip(avals_in[0].shape, idx))
+  idx = primitives.NDIndexer(idx, avals_in[0].shape, int_indexer_shape)
+  ptr = _offset_ptr(ptr, idx, avals_in[0].shape, ctx.builder, is_scalar)
   return tl.load(ptr, _builder=ctx.builder)
 triton_lowering_rules[sp.get_p] = _get_lowering_rule
 
 def _masked_load_lowering_rule(ctx: TritonLoweringRuleContext, ptr,
-                               *non_slice_idx, indexed_dims, masked,
+                               *args, args_tree, masked,
                                eviction_policy, cache_modifier, is_volatile):
-  non_slice_idx, mask_other = util.split_list(non_slice_idx, [sum(indexed_dims)])
-  idx = _pack_indices(non_slice_idx, indexed_dims)
+  idx, *mask_other = tree_util.tree_unflatten(args_tree, args)
   avals_in = ctx.avals_in
   avals_out = ctx.avals_out
   if not isinstance(ptr.type, tl.pointer_type):
     assert len(avals_in) == 1
     return ptr
-  ptr = _offset_ptr(ptr, idx, avals_in[0].shape, avals_out[0].shape, ctx.builder)
+  idx_avals, *_ = tree_util.tree_unflatten(args_tree, avals_in[1:])
+  is_scalar = [hasattr(a, "shape") and a.shape == () for a in
+               idx_avals.indices]
+  ptr = _offset_ptr(ptr, idx, avals_in[0].shape, ctx.builder, is_scalar)
   mask, other = None, None
   if masked:
     assert 0 < len(mask_other) <= 2
@@ -359,9 +396,18 @@ triton_lowering_rules[primitives.load_p] = _masked_load_lowering_rule
 
 def _swap_lowering_rule(ctx: TritonLoweringRuleContext, ptr, value, *non_slice_idx, indexed_dims):
   avals_in = ctx.avals_in
-  avals_out = ctx.avals_out
   idx = _pack_indices(non_slice_idx, indexed_dims)
-  ptr = _offset_ptr(ptr, idx, avals_in[0].shape, avals_out[0].shape, ctx.builder)
+  if non_slice_idx:
+    int_indexer_shape, = {tuple(map(lambda x: x.value, i.shape)) for i in
+                          non_slice_idx}
+  else:
+    int_indexer_shape = ()
+  is_scalar = [i.shape == () if not isinstance(i, slice) else False for i in
+               idx]
+  idx = tuple(primitives.Slice.from_slice(slc, s) if isinstance(slc, slice)
+              else slc for s, slc in zip(avals_in[0].shape, idx))
+  idx = primitives.NDIndexer(idx, avals_in[0].shape, int_indexer_shape)
+  ptr = _offset_ptr(ptr, idx, avals_in[0].shape, ctx.builder, is_scalar)
   mask = None
   old_value = tl.load(ptr, mask=mask, _builder=ctx.builder)
   tl.store(ptr, value, mask=mask, _builder=ctx.builder)
@@ -369,13 +415,14 @@ def _swap_lowering_rule(ctx: TritonLoweringRuleContext, ptr, value, *non_slice_i
 triton_lowering_rules[sp.swap_p] = _swap_lowering_rule
 
 def _masked_swap_lowering_rule(ctx: TritonLoweringRuleContext, ptr, value,
-                               *non_slice_idx, indexed_dims, masked,
+                               *args, args_tree, masked,
                                eviction_policy):
-  non_slice_idx, mask_other = util.split_list(non_slice_idx, [sum(indexed_dims)])
-  idx = _pack_indices(non_slice_idx, indexed_dims)
+  idx, *mask_other = tree_util.tree_unflatten(args_tree, args)
   avals_in = ctx.avals_in
-  avals_out = ctx.avals_out
-  ptr = _offset_ptr(ptr, idx, avals_in[0].shape, avals_out[0].shape, ctx.builder)
+  idx_avals, *_ = tree_util.tree_unflatten(args_tree, avals_in[2:])
+  is_scalar = [hasattr(a, "shape") and a.shape == () for a in
+               idx_avals.indices]
+  ptr = _offset_ptr(ptr, idx, avals_in[0].shape, ctx.builder, is_scalar)
   mask = None
   if masked:
     assert len(mask_other) == 1
@@ -386,11 +433,20 @@ triton_lowering_rules[primitives.swap_p] = _masked_swap_lowering_rule
 
 def _addupdate_lowering_rule(ctx: TritonLoweringRuleContext, ptr, value,
     *non_slice_idx, indexed_dims):
-  idx = _pack_indices(non_slice_idx, indexed_dims)
   avals_in = ctx.avals_in
-  avals_out = ctx.avals_out
   mask = None
-  ptr = _offset_ptr(ptr, idx, avals_in[0].shape, avals_out[0].shape, ctx.builder)
+  idx = _pack_indices(non_slice_idx, indexed_dims)
+  if non_slice_idx:
+    int_indexer_shape, = {tuple(map(lambda x: x.value, i.shape)) for i in
+                          non_slice_idx}
+  else:
+    int_indexer_shape = ()
+  is_scalar = [i.shape == () if not isinstance(i, slice) else False for i in
+               idx]
+  idx = tuple(primitives.Slice.from_slice(slc, s) if isinstance(slc, slice)
+              else slc for s, slc in zip(avals_in[0].shape, idx))
+  idx = primitives.NDIndexer(idx, avals_in[0].shape, int_indexer_shape)
+  ptr = _offset_ptr(ptr, idx, avals_in[0].shape, ctx.builder, is_scalar)
   old_value = tl.load(ptr, mask=mask, _builder=ctx.builder)
   tl.store(ptr, old_value.__add__(value, _builder=ctx.builder),
            mask=mask, _builder=ctx.builder)
