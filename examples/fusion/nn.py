@@ -64,8 +64,10 @@ if __name__ == "__main__":
   ji_jit_net(x).block_until_ready()
   xla_jit_net(x).block_until_ready()
 
-  t = timeit.timeit(lambda: ji_jit_net(x).block_until_ready(), number=5000)
+  n_trials = 5000
+
+  t = timeit.timeit(lambda: ji_jit_net(x).block_until_ready(), number=n_trials)
   print(f"jax-inductor: {t:.4}ms")
 
-  t = timeit.timeit(lambda: xla_jit_net(x).block_until_ready(), number=5000)
+  t = timeit.timeit(lambda: xla_jit_net(x).block_until_ready(), number=n_trials)
   print(f"XLA: {t:.4}ms")

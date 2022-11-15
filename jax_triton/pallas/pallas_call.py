@@ -60,6 +60,8 @@ def _pallas_call_impl(*args, jaxpr, name, out_shapes, which_linear, grid,
     # discharged jaxpr. This should reproduce exactly what compiling to Triton
     # will do.
     discharged_jaxpr, consts = state.discharge_state(jaxpr, ())
+    if debug:
+      print(discharged_jaxpr)
     loop_indices = jnp.array(list(it.product(*(range(g) for g in grid))))
     grid_sizes = grid
     oi_map = {v: k for k, v in input_output_aliases}
@@ -109,20 +111,25 @@ def _pallas_call_jvp_rule(primals, tangents, *, jaxpr, name, which_linear,
   jvp_jaxpr, () = jvp_jaxpr_.jaxpr, jvp_jaxpr_.consts  # TODO consts
   jvp_which_linear = which_linear + (True,) * len(tangents)
   jvp_outshapes = (*out_shapes, *out_shapes)
-  invars, outvars = [], []
-  inputs = []
-  for i in range(len(jvp_jaxpr.invars)):
-    if i % 2 == 0:
-      # Primal
-      invars.append(jvp_jaxpr.invars[i])
-    else:
-      # Tangent
-      outvars.append(jvp_jaxpr.invars[i])
-  for i in range(len(primals)):
-    inputs.append(primals[i])
-  jvp_jaxpr = jvp_jaxpr.replace(invars=[*invars, *outvars])
   if input_output_aliases:
     raise NotImplementedError("`input_output_aliases` jvp not supported.")
+  # `pallas_call` takes in inputs and returns outputs but its jaxpr *does not*.
+  # `pallas_call` takes in a stateful jaxpr, meaning the jaxpr accepts input
+  # `Ref`s that are read from followed by output `Ref`s that are written to.
+  # This means that when we do `jvp_jaxpr` on the `jaxpr`, we get out a new
+  # jaxpr that has tangents following primals. In order for this jaxpr to be
+  # compatible w/ `pallas_call` (inputs then outputs), we need to shuffle around
+  # the jaxpr's invars.
+  logical_primals, logical_tangents = split_list(
+      jvp_jaxpr.invars, [len(primals) + len(out_shapes)])
+  logical_primal_inputs, logical_primal_outputs = split_list(logical_primals, [len(primals)])
+  logical_tangent_inputs, logical_tangent_outputs = split_list(logical_tangents, [len(tangents)])
+  jvp_jaxpr = jvp_jaxpr.replace(invars=[*logical_primal_inputs,
+                                        *logical_tangent_inputs,
+                                        *logical_primal_outputs,
+                                        *logical_tangent_outputs])
+  if debug:
+    print(jvp_jaxpr)
   out_flat = pallas_call_p.bind(*primals, *tangents, jaxpr=jvp_jaxpr,
                                 name=f"{name}_jvp",
                                 out_shapes=jvp_outshapes,
@@ -130,8 +137,6 @@ def _pallas_call_jvp_rule(primals, tangents, *, jaxpr, name, which_linear,
                                 interpret=interpret,
                                 grid=grid, debug=debug,
                                 input_output_aliases=(), **metaparams)
-  # `out_flat` includes constant inputs into the `for_loop` which are converted
-  # into outputs as well. We don't care about these in AD so we throw them out.
   out_primals, out_tangents = split_list(out_flat, [len(out_flat) // 2])
   return out_primals, out_tangents
 ad.primitive_jvps[pallas_call_p] = _pallas_call_jvp_rule
@@ -190,7 +195,7 @@ mlir.register_lowering(pallas_call_p, pallas_call_lowering)
 def pallas_call(f, out_shape, grid, *, debug: bool = False,
                 num_warps: int = 4, num_stages: int = 3,
                 input_output_aliases: Dict[int, int] = {},
-                interpret: bool = True,
+                interpret: bool = False,
                 **metaparams):
   if isinstance(grid, int):
     grid = (grid,)
