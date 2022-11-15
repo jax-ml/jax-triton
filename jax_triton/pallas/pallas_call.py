@@ -14,6 +14,7 @@
 
 """Module for calling pallas functions from JAX."""
 from functools import partial
+import itertools as it
 
 from typing import Dict, Tuple
 
@@ -22,6 +23,7 @@ from jax import api_util
 from jax import core as jax_core
 from jax import linear_util as lu
 from jax import tree_util
+from jax import lax
 from jax.interpreters import ad
 from jax.interpreters import partial_eval as pe
 from jax.interpreters import mlir
@@ -33,11 +35,13 @@ from jax._src import state
 from jax._src.util import (
     split_list, safe_map, safe_zip)
 from jax._src.lax.control_flow import for_loop
+import jax.numpy as jnp
 
 from triton._C.libtriton import triton as tc
 
 from jax_triton.triton_call import emit_triton_kernel_call, avals_to_layouts
 from jax_triton.pallas import lowering
+from jax_triton.pallas import core as pallas_core
 
 map, unsafe_map = safe_map, map
 zip, unsafe_zip = safe_zip, zip
@@ -47,13 +51,52 @@ pallas_call_p.multiple_results = True
 
 pallas_call_p.def_impl(partial(xla.apply_primitive, pallas_call_p))
 
+def _pallas_call_impl(*args, jaxpr, name, out_shapes, which_linear, grid,
+                      num_warps, num_stages, interpret, debug: bool,
+                      input_output_aliases: Tuple[Tuple[int, int], ...],
+                      **metaparams):
+  if interpret:
+    # If we're in interpreter mode, we *scan* over the grid and eval the
+    # discharged jaxpr. This should reproduce exactly what compiling to Triton
+    # will do.
+    discharged_jaxpr, consts = state.discharge_state(jaxpr, ())
+    loop_indices = jnp.array(list(it.product(*(range(g) for g in grid))))
+    grid_sizes = grid
+    oi_map = {v: k for k, v in input_output_aliases}
+    out = []
+    for i, out_shape in enumerate(out_shapes):
+      if i in oi_map:
+        out.append(args[oi_map[i]])
+      else:
+        out.append(jnp.zeros(out_shape.shape, out_shape.dtype))
+    carry = [*args, *out]
+    def cond(carry):
+      return carry[0] < loop_indices.shape[0]
+    def body(carry):
+      i, *carry = carry
+      loop_idx = loop_indices[i]
+      with pallas_core.grid_env(tuple(zip(loop_idx, grid_sizes))):
+        carry = jax.core.eval_jaxpr(discharged_jaxpr, consts, *carry)
+      return (i + 1, *carry)
+    (_, *carry) = lax.while_loop(cond, body, (0, *carry))
+    _, out = split_list(carry, [len(args)])
+    return out
+  return xla.apply_primitive(pallas_call_p, *args, jaxpr=jaxpr, name=name,
+                             out_shapes=out_shapes, which_linear=which_linear,
+                             grid=grid, num_warps=num_warps,
+                             num_stages=num_stages, interpret=interpret,
+                             debug=debug,
+                             input_output_aliases=input_output_aliases,
+                             **metaparams)
+pallas_call_p.def_impl(_pallas_call_impl)
+
 def _pallas_call_abstract_eval(*avals, out_shapes, **_):
   return map(lambda x: jax_core.ShapedArray(x.shape, x.dtype), out_shapes)
 pallas_call_p.def_abstract_eval(_pallas_call_abstract_eval)
 
 def _pallas_call_jvp_rule(primals, tangents, *, jaxpr, name, which_linear,
     input_output_aliases: Tuple[Tuple[int, int], ...],
-    out_shapes, grid, debug, **metaparams):
+    out_shapes, grid, debug, interpret, **metaparams):
   if input_output_aliases:
     raise NotImplementedError("JVP with aliasing not supported.")
   nonzero_tangents = [not isinstance(t, ad_util.Zero) for t in tangents]
@@ -82,6 +125,7 @@ def _pallas_call_jvp_rule(primals, tangents, *, jaxpr, name, which_linear,
                                 name=f"{name}_jvp",
                                 out_shapes=jvp_outshapes,
                                 which_linear=jvp_which_linear,
+                                interpret=interpret,
                                 grid=grid, debug=debug, **metaparams)
   # `out_flat` includes constant inputs into the `for_loop` which are converted
   # into outputs as well. We don't care about these in AD so we throw them out.
@@ -92,10 +136,17 @@ ad.primitive_jvps[pallas_call_p] = _pallas_call_jvp_rule
 
 def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes, jaxpr, name,
                          out_shapes, which_linear, grid, num_warps, num_stages,
+                         interpret,
                          debug: bool,
                          input_output_aliases: Tuple[Tuple[int, int], ...],
                          **metaparams):
-  del which_linear
+  if interpret:
+    return mlir.lower_fun(_pallas_call_impl, multiple_results=True)(
+        ctx, *in_nodes, jaxpr=jaxpr, name=name, out_shapes=out_shapes,
+        which_linear=which_linear, grid=grid, num_warps=num_warps,
+        num_stages=num_stages, interpret=interpret, debug=debug,
+        input_output_aliases=input_output_aliases,
+        **metaparams)
   lowering_result = lowering.lower_jaxpr_to_triton_module(jaxpr, name)
   if debug:
     lowering_result.module.print()
@@ -136,6 +187,7 @@ mlir.register_lowering(pallas_call_p, pallas_call_lowering)
 def pallas_call(f, out_shape, grid, *, debug: bool = False,
                 num_warps: int = 4, num_stages: int = 3,
                 input_output_aliases: Dict[int, int] = {},
+                interpret: bool = True,
                 **metaparams):
   if isinstance(grid, int):
     grid = (grid,)
@@ -162,6 +214,7 @@ def pallas_call(f, out_shape, grid, *, debug: bool = False,
     out_flat = pallas_call_p.bind(
         *consts, *flat_args, jaxpr=jaxpr, name=name, which_linear=which_linear,
         out_shapes=tuple(flat_out_shapes), grid=grid, debug=debug,
+        interpret=interpret,
         num_warps=num_warps,
         input_output_aliases=tuple(input_output_aliases.items()),
         num_stages=num_stages, **metaparams)

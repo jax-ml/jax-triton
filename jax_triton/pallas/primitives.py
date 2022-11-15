@@ -29,10 +29,15 @@ from jax._src import state
 from jax._src.util import (safe_map, safe_zip, split_list, merge_lists,
                            partition_list)
 from jax._src.state import primitives as state_primitives
+from jax._src.state import discharge as state_discharge
 from jax._src.typing import Array
 from jax.interpreters import ad
+from jax.interpreters import mlir
+from jax.interpreters import xla
 import jax.numpy as jnp
 import numpy as np
+
+from jax_triton.pallas import core as pallas_core
 
 map, unsafe_map = safe_map, map
 zip, unsafe_zip = safe_zip, zip
@@ -61,6 +66,21 @@ program_id_p = jax_core.Primitive("program_id")
 def program_id(axis):
   return program_id_p.bind(axis=axis)
 
+def program_id_bind(*, axis: int):
+  grid_env = pallas_core.current_grid_env()
+  if grid_env:
+    return grid_env[axis].axis_index
+  return jax_core.Primitive.bind(program_id_p, axis=axis)
+program_id_p.def_custom_bind(program_id_bind)
+
+def _program_id_impl(*, axis: int):
+  grid_env = pallas_core.current_grid_env()
+  return grid_env[axis].axis_index
+program_id_p.def_impl(_program_id_impl)
+
+mlir.register_lowering(program_id_p, functools.partial(xla.apply_primitive,
+                                                       program_id_p))
+
 def _program_id_abstract_eval(**_):
   return jax_core.ShapedArray((), jnp.int32)
 program_id_p.def_abstract_eval(_program_id_abstract_eval)
@@ -75,6 +95,45 @@ class AtomicOpType(enum.Enum):
   XOR = "xor"
 
 atomic_rmw_p = jax_core.Primitive("atomic_rmw")
+
+def _atomic_rmw_discharge_rule(in_avals, out_avals, ref, val, *args, args_tree,
+                               masked, atomic_type: AtomicOpType):
+  if masked: raise NotImplementedError
+  ref_aval, val_aval, *in_avals = in_avals
+  idx_aval, *_ = tree_util.tree_unflatten(args_tree, in_avals)
+  idx, *_ = tree_util.tree_unflatten(args_tree, args)
+  if atomic_type == AtomicOpType.ADD:
+    monoid = lambda x, y: x + y
+  elif atomic_type == AtomicOpType.MAX:
+    monoid = jnp.maximum
+  elif atomic_type == AtomicOpType.MIN:
+    monoid = jnp.minimum
+  else:
+    raise NotImplementedError(atomic_type)
+
+  if all(isinstance(s, Slice) or s.shape == () for s in idx.indices):
+    indices = idx.indices
+    scalar_dims = [not isinstance(s, Slice) and s.shape == () for s in indices]
+    slice_starts = [s.start if isinstance(s, Slice) else s for s in indices]
+    slice_sizes = tuple(s.size if isinstance(s, Slice) else 1 for s in indices)
+    out_ones = lax.dynamic_slice(ref, slice_starts, slice_sizes=slice_sizes)
+    val_indexer = tuple(None if scalar else slice(None) for scalar in scalar_dims)
+    val = val[val_indexer]
+    val = monoid(val, out_ones)
+    x_new = lax.dynamic_update_slice(ref, val, start_indices=slice_starts)
+    out_indexer = tuple(0 if scalar else slice(None) for scalar in scalar_dims)
+    out = out_ones[out_indexer]
+  elif all(not isinstance(s, Slice) for s in idx.indices):
+    out = ref[idx.indices]
+    x_new = ref.at[idx.indices].set(monoid(out, val))
+  else:
+    raise NotImplementedError
+  return (x_new,) + (None,) * (len(in_avals) + 1), out
+  (new_ref_val, *_), out = state_discharge._discharge_rules[state_primitives.swap_p](
+      [ref_aval, val_aval, *non_slice_idx_avals], out_avals, ref, val, *non_slice_idx,
+      indexed_dims=indexed_dims)
+  return (new_ref_val, None, *((None,) * len(in_avals))), out
+state_discharge.register_discharge_rule(atomic_rmw_p)(_atomic_rmw_discharge_rule)
 
 def _atomic_abstract_eval(ref_aval, val_aval, *all_avals,
                           args_tree, atomic_type: AtomicOpType,
@@ -107,6 +166,9 @@ atomic_xor = functools.partial(atomic_rmw, atomic_type=AtomicOpType.XOR)
 
 max_contiguous_p = jax_core.Primitive("max_contiguous")
 
+max_contiguous_p.def_impl(lambda x, **_: x)
+mlir.register_lowering(max_contiguous_p, lambda _, x, **__: [x])
+
 def max_contiguous(x, values):
   if not isinstance(values, list):
     values = [values]
@@ -117,6 +179,9 @@ def _max_contiguous_abstract_eval(aval, **_):
 max_contiguous_p.def_abstract_eval(_max_contiguous_abstract_eval)
 
 multiple_of_p = jax_core.Primitive("multiple_of")
+
+multiple_of_p.def_impl(lambda x, **_: x)
+mlir.register_lowering(multiple_of_p, lambda _, x, **__: [x])
 
 def multiple_of(x, values):
   if not isinstance(values, list):
@@ -223,6 +288,27 @@ def _load_abstract_eval(ref_aval, *all_avals, args_tree,
           {state.ReadEffect(ref_aval)})
 load_p.def_effectful_abstract_eval(_load_abstract_eval)
 
+def _load_discharge_rule(in_avals, out_avals, ref, *args, args_tree,
+                         masked, eviction_policy, cache_modifier, is_volatile):
+  idx, *masked_other = tree_util.tree_unflatten(args_tree, args)
+  if all(isinstance(s, Slice) or s.shape == () for s in idx.indices):
+    indices = idx.indices
+    scalar_dims = [not isinstance(s, Slice) and s.shape == () for s in indices]
+    slice_starts = [s.start if isinstance(s, Slice) else s for s in indices]
+    slice_sizes = tuple(s.size if isinstance(s, Slice) else 1 for s in indices)
+    out_ones = lax.dynamic_slice(ref, slice_starts, slice_sizes=slice_sizes)
+    out_indexer = tuple(0 if scalar else slice(None) for scalar in scalar_dims)
+    out = out_ones[out_indexer]
+  elif all(not isinstance(s, Slice) for s in idx.indices):
+    out = ref[idx.indices]
+  else:
+    raise NotImplementedError
+  if masked and len(masked_other) == 2:
+    mask, other = masked_other
+    out = jnp.where(mask, out, other)
+  return (None,) * len(in_avals), out
+state.register_discharge_rule(load_p)(_load_discharge_rule)
+
 swap_p = jax_core.Primitive('masked_swap')
 
 def _swap_abstract_eval(ref_aval, val_aval, *all_avals, args_tree,
@@ -241,6 +327,29 @@ def _swap_abstract_eval(ref_aval, val_aval, *all_avals, args_tree,
   return (jax_core.ShapedArray(expected_output_shape, ref_aval.dtype),
           {state.WriteEffect(ref_aval)})
 swap_p.def_effectful_abstract_eval(_swap_abstract_eval)
+
+def _swap_discharge_rule(in_avals, out_avals, ref, val, *args, args_tree,
+                         masked, eviction_policy):
+  idx, *_ = tree_util.tree_unflatten(args_tree, args)
+  if all(isinstance(s, Slice) or s.shape == () for s in idx.indices):
+    indices = idx.indices
+    scalar_dims = [not isinstance(s, Slice) and s.shape == () for s in indices]
+    slice_starts = [s.start if isinstance(s, Slice) else s for s in indices]
+    slice_sizes = tuple(s.size if isinstance(s, Slice) else 1 for s in indices)
+    val_indexer = tuple(None if scalar else slice(None) for scalar in scalar_dims)
+    val = val[val_indexer]
+    x_new = lax.dynamic_update_slice(ref, val, start_indices=slice_starts)
+    out_ones = lax.dynamic_slice(ref, slice_starts, slice_sizes=slice_sizes)
+    out_indexer = tuple(0 if scalar else slice(None) for scalar in scalar_dims)
+    out = out_ones[out_indexer]
+  elif all(not isinstance(s, Slice) for s in idx.indices):
+    out = ref[idx.indices]
+    x_new = ref.at[idx.indices].set(val)
+  else:
+    raise NotImplementedError
+  return (x_new,) + (None,) * (len(in_avals) - 1), out
+state.register_discharge_rule(swap_p)(_swap_discharge_rule)
+
 
 def load(x_ref, idx, *, mask=None, other=None, cache_modifier="",
          eviction_policy="", volatile=False):

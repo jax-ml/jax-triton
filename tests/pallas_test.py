@@ -51,10 +51,14 @@ except ModuleNotFoundError:
 config.parse_flags_with_absl()
 
 class PallasCallTest(parameterized.TestCase):
+  INTERPRET = False
+
+  def pallas_call(self, *args, **kwargs):
+    return pl.pallas_call(*args, **kwargs, interpret=self.INTERPRET)
 
   def test_add_one(self):
     @functools.partial(
-        pl.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.float32),
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.float32),
         grid=1)
     def add_one(x_ref, o_ref):
       o_ref[()] = x_ref[()] + 1.
@@ -64,7 +68,7 @@ class PallasCallTest(parameterized.TestCase):
 
   def test_vector_indexing(self):
     @functools.partial(
-        pl.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.float32),
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.float32),
         grid=1)
     def index(x_ref, i_ref, o_ref):
       o_ref[()] = x_ref[i_ref[()]]
@@ -75,7 +79,7 @@ class PallasCallTest(parameterized.TestCase):
 
   def test_vector_slicing(self):
     @functools.partial(
-        pl.pallas_call, out_shape=jax.ShapeDtypeStruct((2,), jnp.float32),
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((2,), jnp.float32),
         grid=1)
     def index(x_ref, idx_ref, o_ref):
       idx = idx_ref[()]
@@ -109,7 +113,7 @@ class PallasCallTest(parameterized.TestCase):
           "Matmul only works on GPUs with capability >= sm70")
 
     @functools.partial(
-        pl.pallas_call, out_shape=jax.ShapeDtypeStruct((m, n), jnp.float32),
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((m, n), jnp.float32),
         grid=jt.cdiv(m, bm) * jt.cdiv(n, bn))
     def matmul(x_ref, y_ref, o_ref):
       pid = pl.program_id(axis=0)
@@ -162,7 +166,7 @@ class PallasCallTest(parameterized.TestCase):
           "Matmul only works on GPUs with capability >= sm70")
 
     @functools.partial(
-        pl.pallas_call,
+        self.pallas_call,
         out_shape=jax.ShapeDtypeStruct((size, size), dtype),
         grid=1)
     def dot(x_ref, y_ref, o_ref):
@@ -186,7 +190,7 @@ class PallasCallTest(parameterized.TestCase):
       if size < block_size
   ))
   def test_softmax(self, batch_size, size, block_size, dtype):
-    @functools.partial(pl.pallas_call,
+    @functools.partial(self.pallas_call,
         out_shape=jax.ShapeDtypeStruct((batch_size, size), dtype),
         grid=batch_size)
     def softmax(x_ref, o_ref):
@@ -212,7 +216,7 @@ class PallasCallTest(parameterized.TestCase):
       for block_size in [1, 2, 32, 64, 128]
   ))
   def test_masked_load_store(self, size, block_size):
-    @functools.partial(pl.pallas_call,
+    @functools.partial(self.pallas_call,
         out_shape=(
           jax.ShapeDtypeStruct((size,), jnp.float32)
           ),
@@ -230,7 +234,7 @@ class PallasCallTest(parameterized.TestCase):
   def test_broadcasted_load_store(self):
     m, n = 16, 32
     @functools.partial(
-        pl.pallas_call,
+        self.pallas_call,
         out_shape=(
           jax.ShapeDtypeStruct((m, n), jnp.float32)
           ), grid=1)
@@ -245,7 +249,7 @@ class PallasCallTest(parameterized.TestCase):
   def test_unused_ref(self):
     m, n = 16, 32
     @functools.partial(
-        pl.pallas_call,
+        self.pallas_call,
         out_shape=(
           jax.ShapeDtypeStruct((m, n), jnp.float32)
           ), grid=1)
@@ -274,7 +278,7 @@ class PallasCallTest(parameterized.TestCase):
     block_size = 1
     x = random.normal(k1, [size], dtype=dtype)
     kernel = functools.partial(add_inplace_kernel, block_size=block_size)
-    out = pl.pallas_call(
+    out = self.pallas_call(
         kernel,
         out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
         grid=grid, input_output_aliases={0: 0})(x)
@@ -297,7 +301,7 @@ class PallasCallTest(parameterized.TestCase):
           "Atomic ops onl works on GPUs with capability >= sm70")
 
     @functools.partial(
-        pl.pallas_call,
+        self.pallas_call,
         out_shape=jax.ShapeDtypeStruct((), value.dtype),
         grid=value.shape[0],
         input_output_aliases={1: 0})
@@ -333,7 +337,7 @@ class PallasCallTest(parameterized.TestCase):
     m, n = 32, 8
     out_shape = jax.ShapeDtypeStruct((n if axis == 0 else m,), jnp.float32)
     @functools.partial(
-        pl.pallas_call,
+        self.pallas_call,
         out_shape=out_shape,
         grid=1,
         input_output_aliases={1: 0})
@@ -367,7 +371,7 @@ class PallasCallTest(parameterized.TestCase):
       out_dtype = jnp.int32
     out_shape = jax.ShapeDtypeStruct((n if axis == 0 else m,), out_dtype)
     @functools.partial(
-        pl.pallas_call,
+        self.pallas_call,
         out_shape=out_shape,
         grid=1)
     def reduce(x_ref, y_ref):
@@ -386,7 +390,7 @@ class PallasCallTest(parameterized.TestCase):
     m, n = 32, 4
     out_shape = jax.ShapeDtypeStruct((4, n), jnp.float32)
     @functools.partial(
-        pl.pallas_call,
+        self.pallas_call,
         out_shape=out_shape,
         grid=1)
     def slice_kernel(x_ref, y_ref):
@@ -396,6 +400,10 @@ class PallasCallTest(parameterized.TestCase):
     y = slice_kernel(x)
     y_ref = x[:4]
     np.testing.assert_allclose(y, y_ref, atol=1e-2, rtol=1e-2)
+
+class PallasCallInterpreterTest(PallasCallTest):
+  INTERPRET = True
+
 
 if __name__ == "__main__":
   absltest.main()
