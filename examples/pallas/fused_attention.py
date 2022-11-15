@@ -100,7 +100,8 @@ def mha_kernel(
                    pl.dslice(None)), acc)
 
 @functools.partial(jax.jit, static_argnames=["sm_scale", "block_q", "block_k",
-                                             "num_warps", "num_stages", "grid"])
+                                             "num_warps", "num_stages", "grid",
+                                             "interpret"])
 def mha(q, k, v, *,
         sm_scale: float = 1.0,
         block_q: int = 128,
@@ -108,6 +109,7 @@ def mha(q, k, v, *,
         num_warps: Optional[int] = None,
         num_stages: int = 1,
         grid=None,
+        interpret: bool = False,
         ):
   batch_size, seq_len, num_heads, head_dim = q.shape
   # Heuristics.
@@ -125,7 +127,8 @@ def mha(q, k, v, *,
                            dtype=jnp.float32)
   ]
   out, _ = pl.pallas_call(kernel, num_warps=num_warps, num_stages=num_stages,
-                          grid=grid, out_shape=out_shape, debug=False)(q, k, v)
+                          grid=grid, out_shape=out_shape, debug=False,
+                          interpret=interpret)(q, k, v)
   return out
 
 @functools.partial(jax.jit, static_argnames=['sm_scale'])
@@ -144,8 +147,14 @@ if __name__ == "__main__":
   k = jax.random.normal(k_key, shape, dtype=dtype)
   v = jax.random.normal(v_key, shape, dtype=dtype)
 
+
   o = mha(q, k, v)
   o.block_until_ready()
+
+  mha_interpret = functools.partial(mha, interpret=True)
+  o_ref = mha_interpret(q, k, v)
+  np.testing.assert_allclose(o, o_ref, atol=0.01, rtol=0.01)
+
   o_ref = mha_reference(q, k, v)
   np.testing.assert_allclose(o, o_ref, atol=0.01, rtol=0.01)
 
