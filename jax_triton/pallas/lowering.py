@@ -228,6 +228,9 @@ def _integer_pow_lowering_rule(ctx: TritonLoweringRuleContext, a, *, y):
     return a.__mul__(a, _builder=ctx.builder)
   if y == 3:
     return a.__mul__(a.__mul__(a, _builder=ctx.builder), _builder=ctx.builder)
+  if y == -2:
+    one = tl.core._to_tensor(np.array(1.).tolist(), builder=ctx.builder)
+    return one.__truediv__(tl.sqrt(a, _builder=ctx.builder), _builder=ctx.builder)
   return tl.libdevice.pow(a, y, _builder=ctx.builder)
 triton_lowering_rules[jax.lax.integer_pow_p] = _integer_pow_lowering_rule
 
@@ -263,7 +266,7 @@ def ge_lowering_rule(ctx: TritonLoweringRuleContext, a, b):
 triton_lowering_rules[jax.lax.ge_p] = ge_lowering_rule
 
 def select_n_lowering_rule(ctx: TritonLoweringRuleContext, pred, a, b):
-  return tl.semantic.where(pred, a, b, ctx.builder)
+  return tl.semantic.where(pred, b, a, ctx.builder)
 triton_lowering_rules[jax.lax.select_n_p] = select_n_lowering_rule
 
 def _rem_lowering_rule(ctx: TritonLoweringRuleContext, a, b):
@@ -277,6 +280,14 @@ triton_lowering_rules[jax.lax.sub_p] = _sub_lowering_rule
 def _lt_lowering_rule(ctx: TritonLoweringRuleContext, a, b):
   return a.__lt__(b, _builder=ctx.builder)
 triton_lowering_rules[jax.lax.lt_p] = _lt_lowering_rule
+
+def _sqrt_lowering_rule(ctx: TritonLoweringRuleContext, a):
+  return tl.sqrt(a, _builder=ctx.builder)
+triton_lowering_rules[jax.lax.sqrt_p] = _sqrt_lowering_rule
+
+def _neg_lowering_rule(ctx: TritonLoweringRuleContext, a):
+  return a.__neg__(_builder=ctx.builder)
+triton_lowering_rules[jax.lax.neg_p] = _neg_lowering_rule
 
 def _broadcast_in_dim_lowering_rule(ctx: TritonLoweringRuleContext, a, *, broadcast_dimensions, shape):
   # Add dummy dimensions
