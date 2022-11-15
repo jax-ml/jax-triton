@@ -121,12 +121,15 @@ def _pallas_call_jvp_rule(primals, tangents, *, jaxpr, name, which_linear,
   for i in range(len(primals)):
     inputs.append(primals[i])
   jvp_jaxpr = jvp_jaxpr.replace(invars=[*invars, *outvars])
+  if input_output_aliases:
+    raise NotImplementedError("`input_output_aliases` jvp not supported.")
   out_flat = pallas_call_p.bind(*primals, *tangents, jaxpr=jvp_jaxpr,
                                 name=f"{name}_jvp",
                                 out_shapes=jvp_outshapes,
                                 which_linear=jvp_which_linear,
                                 interpret=interpret,
-                                grid=grid, debug=debug, **metaparams)
+                                grid=grid, debug=debug,
+                                input_output_aliases=(), **metaparams)
   # `out_flat` includes constant inputs into the `for_loop` which are converted
   # into outputs as well. We don't care about these in AD so we throw them out.
   out_primals, out_tangents = split_list(out_flat, [len(out_flat) // 2])

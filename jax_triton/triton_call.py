@@ -16,6 +16,7 @@
 import collections
 import os
 import functools
+import math
 import pickle
 
 from typing import Any, Callable, Dict, Optional, Tuple, Union
@@ -275,3 +276,8 @@ def strides_from_shape(shape: Tuple[int]) -> Tuple[int]:
     size = size // s
     strides.append(int(size))
   return tuple(strides)
+
+def next_power_of_2(x: int) -> int:
+  if x == 0:
+    return 1
+  return 2 ** math.ceil(math.log2(x))
