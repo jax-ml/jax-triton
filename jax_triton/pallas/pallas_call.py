@@ -16,7 +16,7 @@
 from functools import partial
 import itertools as it
 
-from typing import Dict, Tuple
+from typing import Callable, Dict, NamedTuple, Optional, Tuple
 
 import jax
 from jax import api_util
@@ -33,7 +33,7 @@ from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import mhlo
 from jax._src import state
 from jax._src.util import (
-    split_list, safe_map, safe_zip)
+    split_list, safe_map, safe_zip, weakref_lru_cache)
 from jax._src.lax.control_flow import for_loop
 import jax.numpy as jnp
 
@@ -133,6 +133,22 @@ def _pallas_call_jvp_rule(primals, tangents, *, jaxpr, name, which_linear,
   return out_primals, out_tangents
 ad.primitive_jvps[pallas_call_p] = _pallas_call_jvp_rule
 
+class TritonCompilationResult(NamedTuple):
+  name: str
+  asm: Dict[str, str]
+  shared_mem: int
+  lowering_result: lowering.TritonLoweringResult
+
+@weakref_lru_cache
+def _compile_jaxpr(jaxpr: jax_core.Jaxpr, name: str, num_warps: int,
+                   num_stages: int) -> TritonCompilationResult:
+  lowering_result = lowering.lower_jaxpr_to_triton_module(jaxpr, name)
+  backend = tc.runtime.backend.CUDA
+  device = 0
+  name, asm, shared_mem = tc.code_gen.compile_ttir(backend, lowering_result.module, device,
+      num_warps, num_stages, {}, 0)
+  return TritonCompilationResult(name, asm, shared_mem, lowering_result)
+
 
 def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes, jaxpr, name,
                          out_shapes, which_linear, grid, num_warps, num_stages,
@@ -147,13 +163,13 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes, jaxpr, name,
         num_stages=num_stages, interpret=interpret, debug=debug,
         input_output_aliases=input_output_aliases,
         **metaparams)
-  lowering_result = lowering.lower_jaxpr_to_triton_module(jaxpr, name)
+  compilation_result = _compile_jaxpr(jaxpr, name, num_warps, num_stages)
+  name = compilation_result.name
+  asm = compilation_result.asm
+  shared_mem = compilation_result.shared_mem
+  lowering_result = compilation_result.lowering_result
   if debug:
     lowering_result.module.print()
-  backend = tc.runtime.backend.CUDA
-  device = 0
-  name, asm, shared_mem = tc.code_gen.compile_ttir(backend, lowering_result.module, device,
-      num_warps, num_stages, {}, 0)
   out_type = ir.TupleType.get_tuple([
       ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
       for out_shape in ctx.avals_out])
@@ -184,6 +200,19 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes, jaxpr, name,
   return results
 mlir.register_lowering(pallas_call_p, pallas_call_lowering)
 
+@weakref_lru_cache
+def _initial_style_open_jaxpr(fun: Callable, in_tree, in_avals,
+                              primitive_name: Optional[str] = None):
+  wrapped_fun, out_tree = api_util.flatten_fun_nokwargs(lu.wrap_init(fun), in_tree)
+  debug = pe.debug_info(fun, in_tree, False, primitive_name or "<unknown>")
+  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(wrapped_fun, in_avals, debug)
+  jaxpr = for_loop._hoist_consts_to_refs(jaxpr)
+  return jaxpr, consts, out_tree()
+
+def clear_caches():
+  _initial_style_open_jaxpr.cache_clear()
+  _compile_jaxpr.cache_clear()
+
 def pallas_call(f, out_shape, grid, *, debug: bool = False,
                 num_warps: int = 4, num_stages: int = 3,
                 input_output_aliases: Dict[int, int] = {},
@@ -204,9 +233,8 @@ def pallas_call(f, out_shape, grid, *, debug: bool = False,
         for out_shape in flat_out_shapes]
     ptr_avals = [state.ShapedArrayRef(aval.shape, aval.dtype) for aval in flat_avals]
     out_ptr_avals = [state.ShapedArrayRef(aval.shape, aval.dtype) for aval in flat_output_avals]
-    flat_fun, _ = api_util.flatten_fun_nokwargs(lu.wrap_init(f), in_tree)
-    jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(flat_fun, [*ptr_avals, *out_ptr_avals])
-    jaxpr = for_loop._hoist_consts_to_refs(jaxpr)
+    jaxpr, consts, _ = _initial_style_open_jaxpr(
+        f, in_tree, tuple((*ptr_avals, *out_ptr_avals)), primitive_name="pallas_call")
     if debug:
       print(jaxpr)
 

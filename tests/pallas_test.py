@@ -42,6 +42,7 @@ from jax._src.lax.control_flow.for_loop import for_loop
 import jax.numpy as jnp
 import jax_triton as jt
 from jax_triton import pallas as pl
+from jax_triton.pallas.pallas_call import _compile_jaxpr
 import numpy as np
 try:
   import torch
@@ -52,6 +53,10 @@ config.parse_flags_with_absl()
 
 class PallasCallTest(parameterized.TestCase):
   INTERPRET = False
+
+  def setUp(self):
+    super().setUp()
+    pl.clear_caches()
 
   def pallas_call(self, *args, **kwargs):
     return pl.pallas_call(*args, **kwargs, interpret=self.INTERPRET)
@@ -400,6 +405,40 @@ class PallasCallTest(parameterized.TestCase):
     y = slice_kernel(x)
     y_ref = x[:4]
     np.testing.assert_allclose(y, y_ref, atol=1e-2, rtol=1e-2)
+
+  def test_pallas_trace_cache(self):
+    trace_count = 0
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.float32),
+        grid=1)
+    def add_one(x_ref, o_ref):
+      nonlocal trace_count
+      o_ref[()] = x_ref[()] + 1.
+      trace_count += 1
+
+    @jax.jit
+    def f(x):
+      return add_one(add_one(x))
+
+    self.assertEqual(f(0.), 2.)
+    self.assertEqual(trace_count, 1)
+
+  def test_pallas_compilation_cache(self):
+    if self.INTERPRET:
+      raise unittest.SkipTest("No Triton compilation in interpreter mode.")
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.float32),
+        grid=1)
+    def add_one(x_ref, o_ref):
+      o_ref[()] = x_ref[()] + 1.
+
+    @jax.jit
+    def f(x):
+      return add_one(add_one(x))
+
+    self.assertEqual(f(0.), 2.)
+    num_misses = _compile_jaxpr.cache_info().misses
+    self.assertEqual(num_misses, 1)
 
 class PallasCallInterpreterTest(PallasCallTest):
   INTERPRET = True
