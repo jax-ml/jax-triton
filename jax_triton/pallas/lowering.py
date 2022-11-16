@@ -33,7 +33,6 @@ from jax._src import state
 from jax._src.state import primitives as sp
 from jax._src.state import discharge
 from jax._src.state import ShapedArrayRef
-from jax_triton.triton_call import get_triton_python_ir
 import jax.numpy as jnp
 import triton
 import triton.language as tl
@@ -42,6 +41,8 @@ from triton.language import ir as tl_ir
 import triton._C.libtriton.triton as _triton
 
 import jax_triton as jt
+from jax_triton.triton_call import get_triton_python_ir
+from jax_triton.triton_call import get_triton_element_type
 from jax_triton.pallas import primitives
 
 map, unsafe_map = util.safe_map, map
@@ -247,13 +248,8 @@ def _convert_element_type_lowering_rule(ctx: TritonLoweringRuleContext, a, *,
                                         new_dtype, weak_type):
   if new_dtype == ctx.avals_in[0].dtype:
     return a
-  if new_dtype == jnp.float32:
-    new_dtype = tl.float32
-  elif new_dtype == jnp.float16:
-    new_dtype = tl.float16
-  elif new_dtype == jnp.bfloat16:
-    new_dtype = tl.bfloat16
-  return tl.semantic.cast(a, new_dtype, ctx.builder)
+  triton_eltype = get_triton_element_type(ctx.avals_in[0].dtype)
+  return tl.semantic.cast(a, triton_eltype, ctx.builder)
 triton_lowering_rules[jax.lax.convert_element_type_p] = _convert_element_type_lowering_rule
 
 def max_lowering_rule(ctx: TritonLoweringRuleContext, a, b):
@@ -312,6 +308,7 @@ def _offset_ptr(ptr, idx: primitives.NDIndexer, shape, builder, is_scalar):
   other_shape = indexer_shape[len(idx.int_indexer_shape):]
   bcast_indices = []
   other_shape_idx = 0
+  dest_shape = map(tl.constexpr, idx.get_indexer_shape())
   for stride, index, dim_size, is_sc in zip(strides, indices, shape, is_scalar):
     if isinstance(index, primitives.Slice):
       index_size = index.size
@@ -344,12 +341,10 @@ def _offset_ptr(ptr, idx: primitives.NDIndexer, shape, builder, is_scalar):
         index = tl.broadcast_to(index, desired_shape, _builder=builder)
       else:
         index = tl.reshape(index, desired_shape, _builder=builder)
+    if dest_shape != index.shape:
+      index = tl.broadcast_to(index, dest_shape, _builder=builder)
     stride_size = tl.core._to_tensor(int(stride), builder)
     bcast_indices.append(index.__mul__(stride_size, _builder=builder))
-  dest_shape = map(tl.constexpr, idx.get_indexer_shape())
-  bcast_indices = [
-      tl.broadcast_to(index, dest_shape, _builder=builder) if dest_shape != index.shape
-      else index for index in bcast_indices]
   for bcast_idx in bcast_indices:
     ptr = ptr.__add__(bcast_idx, _builder=builder)
   return ptr
@@ -466,15 +461,26 @@ triton_lowering_rules[sp.addupdate_p] = _addupdate_lowering_rule
 
 def _dot_general_lowering(ctx: TritonLoweringRuleContext, a, b, *,
     dimension_numbers, precision, preferred_element_type):
+  if preferred_element_type is None:
+    preferred_element_type = ctx.avals_out[0].dtype
   contract_dims, batch_dims = dimension_numbers
-  assert batch_dims == ((), ())
+  if batch_dims != ((), ()):
+    raise NotImplementedError("`batch_dims` currently unsupported.")
+  if len(contract_dims[0]) != 1 or len(contract_dims[1]) != 1:
+    raise NotImplementedError("Multiple contraction dimensions currently unsupported.")
   a_contract_dim, = contract_dims[0]
   b_contract_dim, = contract_dims[1]
   trans_a = a_contract_dim == 0
   trans_b = b_contract_dim == 1
   allow_tf32 = precision == lax.Precision.HIGH or precision == lax.Precision.DEFAULT
-  return tl.dot(a, b, _builder=ctx.builder, trans_a=trans_a, trans_b=trans_b,
-                allow_tf32=allow_tf32)
+  out = tl.dot(a, b, _builder=ctx.builder, trans_a=trans_a, trans_b=trans_b,
+               allow_tf32=allow_tf32)
+  out_eltype = get_triton_element_type(preferred_element_type)
+  if out_eltype != out.dtype:
+    # `tl.dot` by default outputs f32 accumulation. We cast it to the dtype JAX
+    # wants.
+    out = tl.semantic.cast(out, out_eltype, ctx.builder)
+  return out
 triton_lowering_rules[jax.lax.dot_general_p] = _dot_general_lowering
 
 def _reduce_lowering(triton_op, ctx: TritonLoweringRuleContext, a, *, axes):

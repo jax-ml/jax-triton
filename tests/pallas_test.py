@@ -144,7 +144,7 @@ class PallasCallTest(parameterized.TestCase):
             jax.lax.broadcast_in_dim(idx_k, (bk, bn), (0,)),
             jax.lax.broadcast_in_dim(idx_n, (bk, bn), (1,)))
         x_block, y_block = x_ref[x_idx], y_ref[y_idx]
-        out = jnp.dot(x_block, y_block)
+        out = pl.dot(x_block, y_block)
         acc_ref[:, :] += out
       acc = for_loop(k // bk, body, acc).astype(o_ref.dtype)
       o_idx = (
@@ -157,7 +157,7 @@ class PallasCallTest(parameterized.TestCase):
     x = random.normal(k1, (m, k), dtype=dtype)
     y = random.normal(k2, (k, n), dtype=dtype)
     out, expected = matmul(x, y), jnp.matmul(x, y)
-    np.testing.assert_allclose(out, expected, atol=0.05, rtol=0.05)
+    np.testing.assert_allclose(out, expected, atol=0.03, rtol=0.03)
 
   @parameterized.named_parameters(*(
       dict(testcase_name=f"{size}_{dtype}", size=size, dtype=dtype)
@@ -177,13 +177,13 @@ class PallasCallTest(parameterized.TestCase):
     def dot(x_ref, y_ref, o_ref):
       x = x_ref[:, :]
       y = y_ref[:, :]
-      o_ref[:, :] = pl.dot(x, y)
+      o_ref[:, :] = pl.dot(x, y).astype(o_ref.dtype)
 
     k1, k2 = random.split(random.PRNGKey(0))
     x = random.normal(k1, (size, size), dtype=dtype)
     y = random.normal(k2, (size, size), dtype=dtype)
     out, expected = dot(x, y), jnp.dot(x, y)
-    np.testing.assert_allclose(out, expected, atol=0.05, rtol=0.05)
+    np.testing.assert_allclose(out, expected, atol=0.02, rtol=0.02)
 
   @parameterized.named_parameters(*(
       dict(testcase_name=f"{batch_size}_{size}_{block_size}_{dtype}",

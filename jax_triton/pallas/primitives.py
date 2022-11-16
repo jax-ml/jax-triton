@@ -380,7 +380,11 @@ def store(x_ref, idx, val, *, mask=None, eviction_policy="") -> None:
 def dot(a, b, trans_a=False, trans_b=False, allow_tf32=True):
   rhs_contract_dim = int(trans_b)
   lhs_contract_dim = int(not trans_a)
+  # `pl.dot`, like `tl.dot` does accumulation in f32.
+  preferred_element_type = None
+  if jnp.issubdtype(a.dtype, jnp.floating):
+    preferred_element_type = jnp.dtype("float32")
   return jax.lax.dot_general(
       a, b, dimension_numbers=(((lhs_contract_dim,), (rhs_contract_dim,)), ((), ())),
       precision=lax.Precision.HIGH if allow_tf32 else lax.Precision.HIGHEST,
-      preferred_element_type=None)
+      preferred_element_type=preferred_element_type)
