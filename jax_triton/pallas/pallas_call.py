@@ -219,7 +219,7 @@ def clear_caches():
 def pallas_call(f, out_shape, grid, *, debug: bool = False,
                 num_warps: int = 4, num_stages: int = 3,
                 input_output_aliases: Dict[int, int] = {},
-                interpret: bool = True,
+                interpret: bool = False,
                 **metaparams):
   if isinstance(grid, int):
     grid = (grid,)
