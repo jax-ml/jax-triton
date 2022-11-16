@@ -14,6 +14,7 @@
 
 """Module for pallas, a jaxpr "dialect" for Triton."""
 from jax_triton.pallas.pallas_call import pallas_call
+from jax_triton.pallas.pallas_call import clear_caches
 from jax_triton.pallas.primitives import atomic_add
 from jax_triton.pallas.primitives import atomic_and
 from jax_triton.pallas.primitives import atomic_max
