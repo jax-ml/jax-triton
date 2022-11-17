@@ -574,7 +574,7 @@ def _for_lowering_rule(ctx: TritonLoweringRuleContext, *args, jaxpr,
     phi_arg.handle.add_incoming(old_arg.handle, prec_bb)
     phi_arg.handle.add_incoming(new_arg.handle, next_bb)
 
-  # Start populating post loop arrgs
+  # Start populating post loop args
   ctx.builder.set_insert_block(postloop_bb)
 
   # Set up phi nodes and populate
@@ -590,3 +590,53 @@ def _for_lowering_rule(ctx: TritonLoweringRuleContext, *args, jaxpr,
     post_args.append(phi_arg)
   return post_args
 triton_lowering_rules[for_loop.for_p] = _for_lowering_rule
+
+def _while_lowering_rule(ctx: TritonLoweringRuleContext, *args, cond_nconsts,
+                         cond_jaxpr, body_nconsts, body_jaxpr):
+  cond_consts, body_consts, carry = util.split_list(args, [cond_nconsts, body_nconsts])
+  current_bb = ctx.builder.get_insert_block()
+  loop_bb = _triton.ir.basic_block.create(ctx.builder.context, "loop", current_bb.parent)
+  postloop_bb = _triton.ir.basic_block.create(ctx.builder.context, "postloop", current_bb.parent)
+
+  pred, = lower_jaxpr_to_triton_ir(ctx.context, cond_jaxpr.jaxpr, *cond_consts, *carry)
+
+  # If pred, we loop otherwise postloop
+  ctx.builder.cond_br(pred.handle, loop_bb, postloop_bb)
+
+  # Start populating the loop block
+  ctx.builder.set_insert_block(loop_bb)
+
+  instr = loop_bb.get_first_non_phi()
+  ctx.builder.set_insert_point((loop_bb, instr))
+
+  old_carry = carry
+  lowering_args = []
+  for arg in carry:
+    lowering_args.append(tl.tensor(ctx.builder.create_phi(arg.type.to_ir(ctx.builder),
+                                                          2), arg.type))
+
+  carry = lower_jaxpr_to_triton_ir(ctx.context, body_jaxpr.jaxpr,
+                                   *body_consts, *lowering_args)
+  pred, = lower_jaxpr_to_triton_ir(ctx.context, cond_jaxpr.jaxpr, *cond_consts, *carry)
+  ctx.builder.cond_br(pred.handle, loop_bb, postloop_bb)
+
+  # Update phi nodes to point to outputs of loop block
+  bb = lowering_args[0].handle.get_parent()
+  prec_bb, next_bb = bb.get_predecessors()
+  for old_arg, new_arg, phi_arg in zip(old_carry, carry, lowering_args):
+    phi_arg.handle.add_incoming(old_arg.handle, prec_bb)
+    phi_arg.handle.add_incoming(new_arg.handle, next_bb)
+
+  # Start populating post loop args
+  ctx.builder.set_insert_block(postloop_bb)
+
+  # Set up phi nodes and populate
+  post_args = []
+  for old_arg, new_arg in zip(old_carry, carry):
+    phi_arg = tl.tensor(ctx.builder.create_phi(new_arg.type.to_ir(ctx.builder), 2),
+                        new_arg.type)
+    phi_arg.handle.add_incoming(old_arg.handle, prec_bb)
+    phi_arg.handle.add_incoming(new_arg.handle, next_bb)
+    post_args.append(phi_arg)
+  return post_args
+triton_lowering_rules[lax.while_p] = _while_lowering_rule
