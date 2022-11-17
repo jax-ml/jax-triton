@@ -288,6 +288,25 @@ def _load_abstract_eval(ref_aval, *all_avals, args_tree,
           {state.ReadEffect(ref_aval)})
 load_p.def_effectful_abstract_eval(_load_abstract_eval)
 
+def _load_jvp(primals, tangents, *, args_tree, masked, **params: Any):
+  ref_primal, *rest_primals = primals
+  ref_tangent, *rest_tangents = tangents
+  idx_primal, *masked_other_primals = tree_util.tree_unflatten(args_tree, rest_primals)
+  flat_idx_primals = tree_util.tree_leaves(idx_primal)
+  _, *masked_other_tangents = tree_util.tree_unflatten(args_tree, rest_tangents)
+  tangent_args = flat_idx_primals
+  if masked:
+    tangent_args = [*tangent_args, masked_other_primals[0]]
+    if len(masked_other_tangents) == 2:
+      _, other_tangent = masked_other_tangents
+      other_tangent = ad_util.instantiate(other_tangent)
+      tangent_args = [*tangent_args, other_tangent]
+  return (
+      load_p.bind(ref_primal, *rest_primals, args_tree=args_tree, masked=masked, **params),
+      load_p.bind(ref_tangent, *tangent_args, args_tree=args_tree,
+                  masked=masked, **params))
+ad.primitive_jvps[load_p] = _load_jvp
+
 def _load_discharge_rule(in_avals, out_avals, ref, *args, args_tree,
                          masked, eviction_policy, cache_modifier, is_volatile):
   idx, *masked_other = tree_util.tree_unflatten(args_tree, args)
@@ -327,6 +346,26 @@ def _swap_abstract_eval(ref_aval, val_aval, *all_avals, args_tree,
   return (jax_core.ShapedArray(expected_output_shape, ref_aval.dtype),
           {state.WriteEffect(ref_aval)})
 swap_p.def_effectful_abstract_eval(_swap_abstract_eval)
+
+def _swap_jvp(primals, tangents, *, args_tree, masked, **params: Any):
+  ref_primal, val_primal, *rest_primals = primals
+  ref_tangent, val_tangent, *rest_tangents = tangents
+  val_tangent = ad_util.instantiate(val_tangent)
+  idx_primal, *masked_other_primals = tree_util.tree_unflatten(args_tree, rest_primals)
+  flat_idx_primals = tree_util.tree_leaves(idx_primal)
+  _, *masked_other_tangents = tree_util.tree_unflatten(args_tree, rest_tangents)
+  tangent_args = flat_idx_primals
+  if masked:
+    tangent_args = [*tangent_args, masked_other_primals[0]]
+    if len(masked_other_tangents) == 2:
+      _, other_tangent = masked_other_tangents
+      other_tangent = ad_util.instantiate(other_tangent)
+      tangent_args = [*tangent_args, other_tangent]
+  return (
+      swap_p.bind(ref_primal, val_primal, *rest_primals, args_tree=args_tree, masked=masked, **params),
+      swap_p.bind(ref_tangent, val_tangent, *tangent_args, args_tree=args_tree,
+                  masked=masked, **params))
+ad.primitive_jvps[swap_p] = _swap_jvp
 
 def _swap_discharge_rule(in_avals, out_avals, ref, val, *args, args_tree,
                          masked, eviction_policy):

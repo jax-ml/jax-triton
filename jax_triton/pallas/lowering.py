@@ -185,6 +185,14 @@ def _exp_lowering_rule(ctx: TritonLoweringRuleContext, a):
   return tl.exp(a, _builder=ctx.builder)
 triton_lowering_rules[jax.lax.exp_p] = _exp_lowering_rule
 
+def _log_lowering_rule(ctx: TritonLoweringRuleContext, a):
+  return tl.log(a, _builder=ctx.builder)
+triton_lowering_rules[jax.lax.log_p] = _log_lowering_rule
+
+def _log1p_lowering_rule(ctx: TritonLoweringRuleContext, a):
+  return tl.libdevice.log1p(a, _builder=ctx.builder)
+triton_lowering_rules[jax.lax.log1p_p] = _log1p_lowering_rule
+
 def _logistic_lowering_rule(ctx: TritonLoweringRuleContext, a):
   one_= tl.core._to_tensor(1., ctx.builder)
   x = tl.exp(a.__neg__(_builder=ctx.builder), _builder=ctx.builder)
@@ -229,8 +237,7 @@ def _integer_pow_lowering_rule(ctx: TritonLoweringRuleContext, a, *, y):
   if y == 3:
     return a.__mul__(a.__mul__(a, _builder=ctx.builder), _builder=ctx.builder)
   if y == -2:
-    one = tl.core._to_tensor(np.array(1.).tolist(), builder=ctx.builder)
-    return one.__truediv__(tl.sqrt(a, _builder=ctx.builder), _builder=ctx.builder)
+    return tl.libdevice.rsqrt(a, _builder=ctx.builder)
   return tl.libdevice.pow(a, y, _builder=ctx.builder)
 triton_lowering_rules[jax.lax.integer_pow_p] = _integer_pow_lowering_rule
 

@@ -41,6 +41,7 @@ from jax.config import config
 from jax._src.lax.control_flow.for_loop import for_loop
 import jax.numpy as jnp
 import jax_triton as jt
+from jax._src import test_util as jtu
 from jax_triton import pallas as pl
 from jax_triton.pallas.pallas_call import _compile_jaxpr
 import numpy as np
@@ -51,7 +52,51 @@ except ModuleNotFoundError:
 
 config.parse_flags_with_absl()
 
-class PallasCallTest(parameterized.TestCase):
+@functools.partial(jax.jit, static_argnames=["bm", "bn", "gm", "bk",
+                                             "interpret", "debug"])
+def matmul(x, y, *, bm, bn, gm, bk, interpret, debug=False):
+  m, n, k = x.shape[0], y.shape[1], x.shape[1]
+  @functools.partial(
+      pl.pallas_call, out_shape=jax.ShapeDtypeStruct((m, n), jnp.float32),
+      interpret=interpret,
+      debug=debug,
+      grid=jt.cdiv(m, bm) * jt.cdiv(n, bn))
+  def matmul_kernel(x_ref, y_ref, o_ref):
+    pid = pl.program_id(axis=0)
+    num_pid_m = m // bm
+    num_pid_n = n // bn
+    num_pid_in_group = gm * num_pid_n
+    group_id = lax.div(pid, num_pid_in_group)
+    first_pid_m = group_id * gm
+    group_size_m = jnp.minimum(num_pid_m - first_pid_m, gm)
+    pid_m = first_pid_m + lax.rem(pid, group_size_m)
+    pid_n = lax.div(lax.rem(pid, num_pid_in_group), group_size_m)
+    idx_m = pid_m * bm + jnp.arange(bm)
+    idx_n = pid_n * bn + jnp.arange(bn)
+    idx_m = pl.max_contiguous(pl.multiple_of(idx_m, bm), bm)
+    idx_n = pl.max_contiguous(pl.multiple_of(idx_n, bn), bn)
+    acc = jnp.zeros((bm, bn), dtype=jnp.float32)
+    def body(i, acc_ref):
+      idx_k = i * bk + jnp.arange(bk)
+      x_idx = (
+          jax.lax.broadcast_in_dim(idx_m, (bm, bk), (0,)),
+          jax.lax.broadcast_in_dim(idx_k, (bm, bk), (1,)))
+      y_idx = (
+          jax.lax.broadcast_in_dim(idx_k, (bk, bn), (0,)),
+          jax.lax.broadcast_in_dim(idx_n, (bk, bn), (1,)))
+      x_block, y_block = x_ref[x_idx], y_ref[y_idx]
+      out = jnp.dot(x_block, y_block)
+      acc_ref[:, :] += out
+    acc = for_loop(k // bk, body, acc).astype(o_ref.dtype)
+    o_idx = (
+        jax.lax.broadcast_in_dim(idx_m, (bm, bn), (0,)),
+        jax.lax.broadcast_in_dim(idx_n, (bm, bn), (1,)),
+        )
+    o_ref[o_idx] = acc
+  return matmul_kernel(x, y)
+
+
+class PallasTest(parameterized.TestCase):
   INTERPRET = False
 
   def setUp(self):
@@ -60,6 +105,8 @@ class PallasCallTest(parameterized.TestCase):
 
   def pallas_call(self, *args, **kwargs):
     return pl.pallas_call(*args, **kwargs, interpret=self.INTERPRET)
+
+class PallasCallTest(PallasTest):
 
   def test_add_one(self):
     @functools.partial(
@@ -117,46 +164,11 @@ class PallasCallTest(parameterized.TestCase):
       raise unittest.SkipTest(
           "Matmul only works on GPUs with capability >= sm70")
 
-    @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((m, n), jnp.float32),
-        grid=jt.cdiv(m, bm) * jt.cdiv(n, bn))
-    def matmul(x_ref, y_ref, o_ref):
-      pid = pl.program_id(axis=0)
-      num_pid_m = m // bm
-      num_pid_n = n // bn
-      num_pid_in_group = gm * num_pid_n
-      group_id = lax.div(pid, num_pid_in_group)
-      first_pid_m = group_id * gm
-      group_size_m = jnp.minimum(num_pid_m - first_pid_m, gm)
-      pid_m = first_pid_m + lax.rem(pid, group_size_m)
-      pid_n = lax.div(lax.rem(pid, num_pid_in_group), group_size_m)
-      idx_m = pid_m * bm + jnp.arange(bm)
-      idx_n = pid_n * bn + jnp.arange(bn)
-      idx_m = pl.max_contiguous(pl.multiple_of(idx_m, bm), bm)
-      idx_n = pl.max_contiguous(pl.multiple_of(idx_n, bn), bn)
-      acc = jnp.zeros((bm, bn), dtype=jnp.float32)
-      def body(i, acc_ref):
-        idx_k = i * bk + jnp.arange(bk)
-        x_idx = (
-            jax.lax.broadcast_in_dim(idx_m, (bm, bk), (0,)),
-            jax.lax.broadcast_in_dim(idx_k, (bm, bk), (1,)))
-        y_idx = (
-            jax.lax.broadcast_in_dim(idx_k, (bk, bn), (0,)),
-            jax.lax.broadcast_in_dim(idx_n, (bk, bn), (1,)))
-        x_block, y_block = x_ref[x_idx], y_ref[y_idx]
-        out = jnp.dot(x_block, y_block)
-        acc_ref[:, :] += out
-      acc = for_loop(k // bk, body, acc).astype(o_ref.dtype)
-      o_idx = (
-          jax.lax.broadcast_in_dim(idx_m, (bm, bn), (0,)),
-          jax.lax.broadcast_in_dim(idx_n, (bm, bn), (1,)),
-          )
-      o_ref[o_idx] = acc
-
     k1, k2 = random.split(random.PRNGKey(0))
     x = random.normal(k1, (m, k), dtype=dtype)
     y = random.normal(k2, (k, n), dtype=dtype)
-    out, expected = matmul(x, y), jnp.matmul(x, y)
+    out, expected = matmul(x, y, bm=bm, bn=bn, bk=bk, gm=gm,
+                           interpret=self.INTERPRET), jnp.matmul(x, y)
     np.testing.assert_allclose(out, expected, atol=0.05, rtol=0.05)
 
   @parameterized.named_parameters(*(
@@ -442,6 +454,72 @@ class PallasCallTest(parameterized.TestCase):
 
 class PallasCallInterpreterTest(PallasCallTest):
   INTERPRET = True
+
+class PallasCallTransformationTest(PallasTest):
+
+  @parameterized.named_parameters(*[
+    ("square", lambda x: x * x),
+    ("add_one", lambda x: x + 1.),
+    ("exp", jnp.exp),
+    # ("tanh", jnp.tanh),  TODO(sharadmv): re-enable this case when libdevice is
+    # updated
+    ])
+  def test_jvp(self, impl):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.float32),
+        debug=False,
+        grid=1)
+    def pallas_impl(x_ref, o_ref):
+      x = x_ref[()]
+      o_ref[()] = impl(x)
+
+    k1, k2 = random.split(random.PRNGKey(0))
+    x = random.normal(k1)
+    t = random.normal(k2)
+    out_primal, out_tangent = jax.jvp(pallas_impl, (x,), (t,))
+    out_primal_ref, out_tangent_ref = jax.jvp(impl, (x,), (t,))
+    np.testing.assert_allclose(out_primal, out_primal_ref, atol=1e-5, rtol=1e-5)
+    np.testing.assert_allclose(out_tangent, out_tangent_ref, atol=1e-5,
+                               rtol=1e-5)
+    jtu.check_grads(pallas_impl, (x,), modes=["fwd"], order=2)
+
+  @parameterized.named_parameters(*[
+    ("square", lambda x: x * x),
+    ("add_one", lambda x: x + 1.),
+    ("exp", jnp.exp),
+    # ("tanh", jnp.tanh),  TODO(sharadmv): re-enable this case when libdevice is
+    # updated
+    ])
+  def test_jvp_slice(self, impl):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((4,), jnp.float32),
+        debug=False,
+        grid=1)
+    def pallas_impl(x_ref, o_ref):
+      x = x_ref[jnp.arange(2)]
+      o_ref[jnp.arange(2)] = jnp.zeros(2)
+      o_ref[2 + jnp.arange(2)] = impl(x)
+
+    k1, k2 = random.split(random.PRNGKey(0))
+    x = random.normal(k1, (8,))
+    t = random.normal(k2, (8,))
+    out_primal, out_tangent = jax.jvp(pallas_impl, (x,), (t,))
+    out_primal_ref, out_tangent_ref = jax.jvp(
+        lambda x: jnp.concatenate([jnp.zeros(2), impl(x[:2])]), (x,), (t,))
+    np.testing.assert_allclose(out_primal, out_primal_ref, atol=1e-5, rtol=1e-5)
+    np.testing.assert_allclose(out_tangent, out_tangent_ref, atol=1e-5,
+                               rtol=1e-5)
+    jtu.check_grads(pallas_impl, (x,), modes=["fwd"], order=2)
+
+  # TODO(sharadmv): enable this when we update Triton
+  # def test_jvp_matmul(self):
+  #   k1, k2 = random.split(random.PRNGKey(0))
+  #   x = random.normal(k1, (256, 128))
+  #   y = random.normal(k2, (128, 64))
+  #   bm, bn, bk, gm = 64, 128, 32, 8
+  #   mm = functools.partial(matmul, bm=bm, bn=bn, bk=bk, gm=gm,
+  #                          interpret=self.INTERPRET)
+  #   jtu.check_grads(mm, (x, y), modes=["fwd"], order=1)
 
 
 if __name__ == "__main__":

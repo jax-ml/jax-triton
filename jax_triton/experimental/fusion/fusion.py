@@ -28,7 +28,7 @@ from jax.interpreters import xla
 from jax._src import util
 from jax._src.lax.control_flow import for_loop
 import jax.numpy as jnp
-# import jax_triton as jt
+import jax_triton as jt
 from jax_triton import pallas as pl
 
 from jax_triton.experimental.fusion import jaxpr_rewriter
