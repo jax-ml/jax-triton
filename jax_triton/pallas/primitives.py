@@ -86,6 +86,7 @@ def _program_id_abstract_eval(**_):
 program_id_p.def_abstract_eval(_program_id_abstract_eval)
 
 class AtomicOpType(enum.Enum):
+  CAS = 'cas'
   XCHG = "xchg"
   ADD = "add"
   MAX = "max"
@@ -156,6 +157,7 @@ def atomic_rmw(x_ref, idx, val, *, mask: Optional[Any] = None, atomic_type: Atom
   return atomic_rmw_p.bind(x_ref, val, *flat_args, args_tree=args_tree,
                            atomic_type=atomic_type, masked=mask is not None)
 
+atomic_cas = functools.partial(atomic_rmw, atomic_type=AtomicOpType.CAS)
 atomic_xchg = functools.partial(atomic_rmw, atomic_type=AtomicOpType.XCHG)
 atomic_add = functools.partial(atomic_rmw, atomic_type=AtomicOpType.ADD)
 atomic_max = functools.partial(atomic_rmw, atomic_type=AtomicOpType.MAX)
