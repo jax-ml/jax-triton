@@ -160,8 +160,10 @@ def sample_sparse_matrix(key, m, n, bm, bn, *, sparse_prob=0.2,
   blocks = random.normal(k3, (num_blocks, bm, bn), dtype=dtype)
   return BlockELL(blocks, blocks_per_row, indices, shape=(m, n))
 
-@functools.partial(jax.jit, static_argnames=["bn", "num_warps", "num_stages"])
-def sdd_matmul(x_ell, y, num_warps: int = 8, num_stages: int = 3, bn: int = 64):
+@functools.partial(jax.jit, static_argnames=["bn", "num_warps", "num_stages",
+                                             "debug"])
+def sdd_matmul(x_ell, y, num_warps: int = 8, num_stages: int = 3, bn: int = 64,
+               debug: bool = False):
   m, n = x_ell.shape[0], y.shape[1]
   _, bm, _ = x_ell.blocks.shape
   grid = (jt.cdiv(m, bm), jt.cdiv(n, bn))
@@ -170,7 +172,7 @@ def sdd_matmul(x_ell, y, num_warps: int = 8, num_stages: int = 3, bn: int = 64):
   out_shape = jax.ShapeDtypeStruct(shape=(m, n), dtype=x.dtype)
   return pl.pallas_call(kernel, num_warps=num_warps, num_stages=num_stages,
                         grid=grid, out_shape=out_shape,
-                        debug=False)(x_ell.blocks, x_ell.indices,
+                        debug=debug)(x_ell.blocks, x_ell.indices,
                                      x_ell.blocks_per_row, y)
 
 if __name__ == "__main__":
@@ -183,6 +185,7 @@ if __name__ == "__main__":
   print(f"Sparsity: {x.num_blocks} / {m // bm * k // bk}")
   x_dense = x.todense()
   y = random.normal(k2, (k, n), dtype=dtype)
+  sdd_matmul(x, y, bn=bn, debug=True).block_until_ready()
   sparse_matmul = jax.jit(functools.partial(sdd_matmul, bn=bn))
   dense_matmul = jax.jit(jnp.matmul)
   out = sparse_matmul(x, y)

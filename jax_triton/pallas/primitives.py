@@ -25,6 +25,7 @@ from jax import core as jax_core
 from jax import lax
 from jax import tree_util
 from jax._src import ad_util
+from jax._src import pretty_printer as pp
 from jax._src import state
 from jax._src.util import (safe_map, safe_zip, split_list, merge_lists,
                            partition_list)
@@ -288,6 +289,47 @@ def _load_abstract_eval(ref_aval, *all_avals, args_tree,
           {state.ReadEffect(ref_aval)})
 load_p.def_effectful_abstract_eval(_load_abstract_eval)
 
+def _pp_dslice(dim: int, slice: Slice, context):
+  size = pp.text(str(slice.size))
+  if isinstance(slice.start, int):
+    if slice.start == 0:
+      start = pp.text("")
+    else:
+      start = pp.text(str(slice.start))
+    if slice.size == dim:
+      end = pp.text("")
+    else:
+      end = pp.text(str(slice.start + slice.size))
+  else:
+    start = pp.text(jax_core.pp_var(slice.start, context))
+    end = pp.concat([start, pp.text("+"), size])
+  return pp.concat([start, pp.text(":"), end])
+
+def _pp_idx(ref_aval, idx: NDIndexer, context):
+  docs = [
+      _pp_dslice(d, s, context) if isinstance(s, Slice)
+      else pp.text(jax_core.pp_var(s, context))
+      for s, d in zip(idx.indices, ref_aval.shape)]
+  if not docs:
+    return pp.text("")
+  doc = [docs[0]]
+  for d in docs[1:]:
+    doc.append(pp.text(","))
+    doc.append(d)
+  return pp.concat(doc)
+
+def _load_pp_rule(eqn, context, settings):
+  # Pretty prints `a = load x i` as `x[i] <- a`
+  y, = eqn.outvars
+  x, *args = eqn.invars
+  idx, *masked_other = tree_util.tree_unflatten(eqn.params["args_tree"], args)
+  idx = _pp_idx(eqn.invars[0].aval, idx, context)
+  lhs = jax_core.pp_vars([y], context, print_shapes=settings.print_shapes)
+  return [lhs, pp.text(' <- '), state_primitives.pp_ref(pp.concat([
+    pp.text(jax_core.pp_var(x, context)), pp.text('['), idx, pp.text(']')
+    ]))]
+jax_core.pp_eqn_rules[load_p] = _load_pp_rule
+
 def _load_jvp(primals, tangents, *, args_tree, masked, **params: Any):
   ref_primal, *rest_primals = primals
   ref_tangent, *rest_tangents = tangents
@@ -346,6 +388,21 @@ def _swap_abstract_eval(ref_aval, val_aval, *all_avals, args_tree,
   return (jax_core.ShapedArray(expected_output_shape, ref_aval.dtype),
           {state.WriteEffect(ref_aval)})
 swap_p.def_effectful_abstract_eval(_swap_abstract_eval)
+
+def _swap_pp_rule(eqn, context, settings):
+  # Pretty prints `a = swap x v i` as `a, x[i] <- x[i], v`
+  # or:
+  # Pretty prints `_ = swap x v i` as `x[i] <- v`
+  y, = eqn.outvars
+  x, val, *args = eqn.invars
+  idx, *masked_other = tree_util.tree_unflatten(eqn.params["args_tree"], args)
+  idx = _pp_idx(eqn.invars[0].aval, idx, context)
+  lhs = jax_core.pp_vars([y], context, print_shapes=settings.print_shapes)
+  if isinstance(y, jax_core.DropVar):
+    return [state_primitives.pp_ref(pp.concat([
+      pp.text(jax_core.pp_var(x, context)), pp.text('['), idx, pp.text(']'),
+      pp.text(" <- "), pp.text(jax_core.pp_var(val, context))]))]
+jax_core.pp_eqn_rules[swap_p] = _swap_pp_rule
 
 def _swap_jvp(primals, tangents, *, args_tree, masked, **params: Any):
   ref_primal, val_primal, *rest_primals = primals

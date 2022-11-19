@@ -36,12 +36,15 @@ from absl.testing import parameterized
 
 import jax
 from jax import lax
+from jax import linear_util as lu
 from jax import random
-from jax.config import config
+from jax._src import test_util as jtu
+from jax._src import state
 from jax._src.lax.control_flow.for_loop import for_loop
+from jax.config import config
+from jax.interpreters import partial_eval as pe
 import jax.numpy as jnp
 import jax_triton as jt
-from jax._src import test_util as jtu
 from jax_triton import pallas as pl
 from jax_triton.pallas.pallas_call import _compile_jaxpr
 import numpy as np
@@ -521,6 +524,37 @@ class PallasCallTransformationTest(PallasTest):
   #                          interpret=self.INTERPRET)
   #   jtu.check_grads(mm, (x, y), modes=["fwd"], order=1)
 
+class PallasPrimitivesTest(parameterized.TestCase):
+
+  @parameterized.parameters(*[
+    (lambda: (pl.dslice(0, 4), slice(None), slice(None)), "<- a[:,:,:]"),
+    (lambda: (pl.dslice(0, 3), slice(None), slice(None)), "<- a[:3,:,:]"),
+    (lambda: (pl.dslice(1, 3), slice(None), pl.dslice(0, 4)), "<- a[1:4,:,:4]"),
+    (lambda: (jnp.arange(5), slice(None), pl.dslice(0, 4)), "<- a[b,:,:4]"),
+    (lambda: (jnp.arange(5), jnp.arange(3), jnp.arange(4)), "<- a[e,f,g]"),
+  ])
+  def test_load_pretty_print(self, expr, expected):
+    def body(x_ref):
+      x = pl.load(x_ref, expr())
+      return [x]
+    jaxpr, _ , _ = pe.trace_to_jaxpr_dynamic(
+        lu.wrap_init(body), [state.ShapedArrayRef((4, 3, 2), jnp.int32)])
+    self.assertIn(expected, jaxpr.pretty_print(use_color=False))
+
+  @parameterized.parameters(*[
+    (lambda: (pl.dslice(0, 4), slice(None), slice(None)), "a[:,:,:] <-"),
+    (lambda: (pl.dslice(0, 3), slice(None), slice(None)), "a[:3,:,:] <-"),
+    (lambda: (pl.dslice(1, 3), slice(None), pl.dslice(0, 4)), "a[1:4,:,:4] <-"),
+    (lambda: (jnp.arange(5), slice(None), pl.dslice(0, 4)), "a[b,:,:4] <-"),
+    (lambda: (jnp.arange(5), jnp.arange(3), jnp.arange(4)), "a[l,m,n] <-"),
+  ])
+  def test_store_pretty_print(self, expr, expected):
+    def body(x_ref):
+      pl.store(x_ref, expr(), pl.load(x_ref, expr()))
+      return []
+    jaxpr, _ , _ = pe.trace_to_jaxpr_dynamic(
+        lu.wrap_init(body), [state.ShapedArrayRef((4, 3, 2), jnp.int32)])
+    self.assertIn(expected, jaxpr.pretty_print(use_color=False))
 
 if __name__ == "__main__":
   absltest.main()
