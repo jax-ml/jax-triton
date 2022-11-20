@@ -225,6 +225,7 @@ def dslice(start: Optional[Union[int, Array]], stop: Optional[int] = None):
       raise ValueError("Non-static `dslice`")
     return Slice(0, start)
   return Slice(start, stop)
+ds = dslice  # Handy alias
 
 @tree_util.register_pytree_node_class
 @dataclasses.dataclass

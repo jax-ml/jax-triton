@@ -15,8 +15,7 @@
 import functools
 import timeit
 
-
-from typing import Optional, Tuple
+from typing import Tuple
 
 import jax.numpy as jnp
 from jax import random

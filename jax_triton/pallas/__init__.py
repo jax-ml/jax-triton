@@ -23,6 +23,7 @@ from jax_triton.pallas.primitives import atomic_or
 from jax_triton.pallas.primitives import atomic_xchg
 from jax_triton.pallas.primitives import atomic_xor
 from jax_triton.pallas.primitives import dot
+from jax_triton.pallas.primitives import ds
 from jax_triton.pallas.primitives import dslice
 from jax_triton.pallas.primitives import load
 from jax_triton.pallas.primitives import max_contiguous

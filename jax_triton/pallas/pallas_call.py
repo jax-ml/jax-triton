@@ -225,10 +225,14 @@ def pallas_call(f, out_shape, grid, *, debug: bool = False,
                 num_warps: int = 4, num_stages: int = 3,
                 input_output_aliases: Dict[int, int] = {},
                 interpret: bool = False,
+                name: Optional[str] = None,
                 **metaparams):
   if isinstance(grid, int):
     grid = (grid,)
-  name = f.__name__ if hasattr(f, "__name__") and f.__name__ else"func"
+  if name is not None:
+    name = name
+  else:
+    name = f.__name__ if hasattr(f, "__name__") and f.__name__ else "func"
   flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
   flat_out_shapes = [jax.ShapeDtypeStruct(x.shape, x.dtype) for x in
                      flat_out_shapes]
