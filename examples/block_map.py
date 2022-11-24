@@ -22,23 +22,7 @@ from jax import lax
 from jax import random
 import jax_triton as jt
 from jax_triton import pallas as pl
-from jax_triton.experimental import grid_map
 from jax._src.lax.control_flow import for_loop
-
-def add_one_tiles(x_tile_ref, o_tile_ref):
-  def rev(i, _):
-    o_tile_ref[i] = x_tile_ref[7 - i]
-  for_loop.for_loop(8, rev, ())
-
-def add_one(x):
-  return grid_map.grid_map(add_one_tiles,
-                           out_shape=x,
-                           input_block_shapes=[(8,)],
-                           output_block_shapes=[(8,)],
-                           grid=x.shape[0] // 8,
-                           input_index_map=[lambda i: i * 8],
-                           output_index_map=[lambda i: i * 8],
-                           debug=True)(x)
 
 def matmul_tile(x_tile_ref, y_tile_ref, o_tile_ref):
   x_tile = x_tile_ref[:]
@@ -47,19 +31,16 @@ def matmul_tile(x_tile_ref, y_tile_ref, o_tile_ref):
 
 def matmul(x, y, *, block_shape):
   l, r = block_shape
-  return grid_map.grid_map(matmul_tile,
-                           out_shape=jax.ShapeDtypeStruct((x.shape[0], y.shape[1]),
-                                                          x.dtype),
-                           input_block_shapes=[(l, x.shape[1]), (y.shape[0], r)],
-                           output_block_shapes=[(l, r)],
-                           grid=(x.shape[0] // l, y.shape[1] // r),
-                           input_index_map=[
-                             lambda i, _: (i * l, 0),
-                             lambda _, j: (0, j * r),
-                           ],
-                           output_index_map=[
-                             lambda i, j: (i * l, j * r),
-                           ], debug=True)(x, y)
+  return pl.pallas_call(matmul_tile,
+                        out_shape=jax.ShapeDtypeStruct((x.shape[0], y.shape[1]),
+                                                       x.dtype),
+                        in_specs=[
+                          pl.BlockSpec(lambda i, j: (i, 0), (l, x.shape[1])),
+                          pl.BlockSpec(lambda i, j: (0, j), (y.shape[0], r))
+                        ],
+                        out_specs=pl.BlockSpec(lambda i, j: (i, j), (l, r)),
+                        grid=(x.shape[0] // l, y.shape[1] // r),
+                        debug=True)(x, y)
 
 
 @functools.partial(jax.jit, static_argnames=['sm_scale'])
@@ -142,24 +123,15 @@ def mha(q, k, v, *,
   if grid is None:
     grid = (jt.cdiv(seq_len, block_q), num_heads, batch_size)
 
-  input_block_shapes = [
-      (1, block_q, 1, head_dim),
-      (1, seq_len, 1, head_dim),
-      (1, seq_len, 1, head_dim),
-  ]
-  output_block_shapes = [
-      (1, block_q, 1, head_dim),
-      (1, 1, block_q),
-  ]
 
   def q_index_map(seq_index, head_index, batch_index):
-    return (batch_index, seq_index * block_q, head_index, 0)
+    return (batch_index, seq_index, head_index, 0)
   def k_index_map(_, head_index, batch_index):
     return (batch_index, 0, head_index, 0)
   def v_index_map(_, head_index, batch_index):
     return (batch_index, 0, head_index, 0)
   def o_index_map(seq_index, head_index, batch_index):
-    return (batch_index, seq_index * block_q, head_index, 0)
+    return (batch_index, seq_index, head_index, 0)
   def tmp_index_map(seq_index, _, __):
     return (0, 0, seq_index * block_q)
 
@@ -172,17 +144,22 @@ def mha(q, k, v, *,
       jax.ShapeDtypeStruct(shape=(batch_size, num_heads, seq_len),
                            dtype=jnp.float32)
   ]
-  out, _ = grid_map.grid_map(kernel, out_shape, input_block_shapes=input_block_shapes,
-                             output_block_shapes=output_block_shapes,
-                             input_index_map=[q_index_map, k_index_map, v_index_map],
-                             output_index_map=[o_index_map, tmp_index_map],
-                             num_warps=num_warps, num_stages=num_stages,
-                             grid=grid, debug=True)(q, k, v)
+  out, _ = pl.pallas_call(
+      kernel, out_shape,
+      in_specs=[
+        pl.BlockSpec(q_index_map, (1, block_q, 1, head_dim)),
+        pl.BlockSpec(k_index_map, (1, seq_len, 1, head_dim)),
+        pl.BlockSpec(v_index_map, (1, seq_len, 1, head_dim)),
+      ],
+      out_specs=[
+        pl.BlockSpec(o_index_map, (1, block_q, 1, head_dim)),
+        pl.BlockSpec(tmp_index_map, (1, 1, block_q)),
+      ],
+      num_warps=num_warps, num_stages=num_stages,
+      grid=grid, debug=True)(q, k, v)
   return out
 
 if __name__ == "__main__":
-  print(add_one(jnp.arange(128.)))
-
   k1, k2 = random.split(random.PRNGKey(0), 2)
   x = random.normal(k1, (1024, 512))
   y = random.normal(k2, (512, 2048))
