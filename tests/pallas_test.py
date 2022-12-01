@@ -98,6 +98,30 @@ def matmul(x, y, *, bm, bn, gm, bk, interpret, debug=False):
     o_ref[o_idx] = acc
   return matmul_kernel(x, y)
 
+@functools.partial(jax.jit, static_argnames=["bm", "bn", "bk",
+                                             "interpret", "debug"])
+def matmul_block_spec(x, y, *, bm, bn, bk, interpret, debug=False):
+  m, n, k = x.shape[0], y.shape[1], x.shape[1]
+  @functools.partial(
+      pl.pallas_call, out_shape=jax.ShapeDtypeStruct((m, n), jnp.float32),
+      interpret=interpret,
+      debug=debug,
+      in_specs=[
+        pl.BlockSpec(lambda i, _: (i, 0), (bm, x.shape[1])),
+        pl.BlockSpec(lambda _, j: (0, j), (y.shape[0], bn))
+      ],
+      out_specs=pl.BlockSpec(lambda i, j: (i, j), (bm, bn)),
+      grid=(jt.cdiv(m, bm), jt.cdiv(n, bn)))
+  def matmul_kernel(x_ref, y_ref, o_ref):
+    acc = jnp.zeros(o_ref.shape, dtype=jnp.float32)
+    def body(i, acc_ref):
+      x_block = pl.load(x_ref, (slice(None), pl.ds(i * bk, bk)))
+      y_block = pl.load(y_ref, (pl.ds(i * bk, bk), slice(None)))
+      acc_ref[:, :] += jnp.dot(x_block, y_block)
+    acc = for_loop(k // bk, body, acc).astype(o_ref.dtype)
+    o_ref[:, :] = acc
+  return matmul_kernel(x, y)
+
 
 class PallasTest(parameterized.TestCase):
   INTERPRET = False
@@ -120,6 +144,39 @@ class PallasCallTest(PallasTest):
 
     x = 0.
     self.assertEqual(add_one(x), 1.)
+
+  def test_add_singleton_vector(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((1,), jnp.float32),
+        grid=1)
+    def add_one(x_ref, o_ref):
+      o_ref[0] = x_ref[0] + 1.
+
+    x = jnp.array([0.], jnp.float32)
+    np.testing.assert_allclose(add_one(x), jnp.array([1.], jnp.float32))
+
+  def test_add_vector_block_spec(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), jnp.int32),
+        in_specs=(pl.BlockSpec(lambda i: i, (1,)),),
+        out_specs=(pl.BlockSpec(lambda i: i, (1,)),),
+        grid=8, debug=False)
+    def add_one(x_ref, o_ref):
+      o_ref[0] = x_ref[0] + 1
+
+    np.testing.assert_allclose(add_one(jnp.arange(8)), jnp.arange(8) + 1)
+
+  def test_add_matrix_block_spec(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8, 8), jnp.int32),
+        in_specs=(pl.BlockSpec(lambda i, j: (i, j), (2, 2)),),
+        out_specs=(pl.BlockSpec(lambda i, j: (i, j), (2, 2)),),
+        grid=(4, 4))
+    def add_one(x_ref, o_ref):
+      o_ref[:, :] = x_ref[:, :] + 1
+
+    x = jnp.arange(64).reshape((8, 8))
+    np.testing.assert_allclose(add_one(x), x + 1)
 
   def test_vector_indexing(self):
     @functools.partial(
@@ -145,7 +202,6 @@ class PallasCallTest(PallasTest):
       idx = jnp.arange(i, i + 2)
       np.testing.assert_allclose(index(x, idx), x[idx])
 
-
   @parameterized.named_parameters(*[
     (f"m_{m}_n_{n}_k_{k}_dtype_{dtype}_bm_{block_size_m}_"
      f"bn_{block_size_n}_bk_{block_size_k}_gm_{group_size_m}", m, n, k, dtype,
@@ -158,7 +214,7 @@ class PallasCallTest(PallasTest):
       for block_size_n in [128, 256]
       for block_size_k in [32]
       for group_size_m in [8]
-      if block_size_m < m and block_size_n < n and block_size_k < k
+      if block_size_m <= m and block_size_n <= n and block_size_k <= k
     ])
   def test_matmul(self, m, n, k, dtype, bm, bn, bk, gm):
 
@@ -172,6 +228,33 @@ class PallasCallTest(PallasTest):
     y = random.normal(k2, (k, n), dtype=dtype)
     out, expected = matmul(x, y, bm=bm, bn=bn, bk=bk, gm=gm,
                            interpret=self.INTERPRET), jnp.matmul(x, y)
+    np.testing.assert_allclose(out, expected, atol=0.05, rtol=0.05)
+
+  @parameterized.named_parameters(*[
+    (f"m_{m}_n_{n}_k_{k}_dtype_{dtype}_bm_{block_size_m}_"
+     f"bn_{block_size_n}_bk_{block_size_k}", m, n, k, dtype,
+     block_size_m, block_size_n, block_size_k)
+      for m in [512, 1024]
+      for k in [512]
+      for n in [512, 1024]
+      for dtype in ["float32", "float16"]
+      for block_size_m in [64, 128]
+      for block_size_n in [128, 256]
+      for block_size_k in [32]
+      if block_size_m <= m and block_size_n <= n and block_size_k <= k
+    ])
+  def test_matmul_block_spec(self, m, n, k, dtype, bm, bn, bk):
+
+    # TODO(sharadmv): expose this information in `jaxlib`
+    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+      raise unittest.SkipTest(
+          "Matmul only works on GPUs with capability >= sm70")
+
+    k1, k2 = random.split(random.PRNGKey(0))
+    x = random.normal(k1, (m, k), dtype=dtype)
+    y = random.normal(k2, (k, n), dtype=dtype)
+    out, expected = matmul_block_spec(x, y, bm=bm, bn=bn, bk=bk,
+                                      interpret=self.INTERPRET), jnp.matmul(x, y)
     np.testing.assert_allclose(out, expected, atol=0.05, rtol=0.05)
 
   @parameterized.named_parameters(*(

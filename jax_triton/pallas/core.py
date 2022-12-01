@@ -16,7 +16,9 @@
 import contextlib
 import dataclasses
 
-from typing import Any, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Iterator, List, Optional, Tuple
+
+from jax import core as jax_core
 
 @dataclasses.dataclass
 class GridEnv:
@@ -36,3 +38,33 @@ def current_grid_env() -> Optional[Tuple[GridEnv, ...]]:
   if not _grid_env_stack:
     return None
   return _grid_env_stack[-1]
+
+@dataclasses.dataclass(frozen=True)
+class BlockSpec:
+  index_map: Callable
+  block_shape: Tuple[int, ...]
+
+  def compute_index(self, *args):
+    out = self.index_map(*args)
+    if not isinstance(out, tuple):
+      out = (out,)
+    return out
+
+@dataclasses.dataclass(frozen=True)
+class BlockMapping:
+  block_shape: Tuple[int, ...]
+  index_map_jaxpr: jax_core.ClosedJaxpr
+
+  def compute_start_indices(self, loop_idx):
+    jaxpr = self.index_map_jaxpr.jaxpr
+    consts = self.index_map_jaxpr.consts
+    block_indices = jax_core.eval_jaxpr(jaxpr, consts, *loop_idx)
+    return tuple(b * i for b, i in zip(self.block_shape, block_indices))
+
+
+@dataclasses.dataclass(frozen=True)
+class GridSpec:
+  grid: Tuple[int, ...]
+  block_mappings: Tuple[Optional[BlockMapping], ...]
+
+  replace = dataclasses.replace
