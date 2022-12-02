@@ -246,7 +246,7 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
   results = [mhlo.GetTupleElementOp(out, mlir.i32_attr(i)).result
              for i in range(len(out_shapes))]
   return results
-mlir.register_lowering(pallas_call_p, pallas_call_lowering)
+mlir.register_lowering(pallas_call_p, pallas_call_lowering, platform="cuda")
 
 @weakref_lru_cache
 def _initial_style_open_jaxpr(fun: Callable, in_tree, in_avals,
