@@ -541,7 +541,7 @@ class PallasCallTest(PallasTest):
 class PallasCallInterpreterTest(PallasCallTest):
   INTERPRET = True
 
-class PallasCallTransformationTest(PallasTest):
+class PallasCallAutodifferentiationTest(PallasTest):
 
   @parameterized.named_parameters(*[
     ("square", lambda x: x * x),
@@ -606,6 +606,96 @@ class PallasCallTransformationTest(PallasTest):
   #   mm = functools.partial(matmul, bm=bm, bn=bn, bk=bk, gm=gm,
   #                          interpret=self.INTERPRET)
   #   jtu.check_grads(mm, (x, y), modes=["fwd"], order=1)
+
+  def test_slicing_block_spec(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((4,), jnp.float32),
+        in_specs=[
+          pl.BlockSpec(lambda _: (0, 0), (None, 4)),
+          pl.BlockSpec(lambda _: (1, 0), (None, 4)),
+        ],
+        out_specs=None,
+        debug=False, grid=1)
+    def add_vectors(x_ref, y_ref, o_ref):
+      o_ref[:] = x_ref[:] + y_ref[:]
+    xy = jnp.arange(8.).reshape((2, 4))
+    out = add_vectors(xy, xy)
+    out_ref = xy[0] + xy[1]
+    np.testing.assert_allclose(out, out_ref)
+
+
+class PallasCallVmapTest(PallasTest):
+
+  def test_vmap_of_simple_kernel(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.int32),
+        debug=False,
+        grid=1)
+    def add_one(x_ref, o_ref):
+      o_ref[()] = x_ref[()] + 1
+    out = jax.vmap(add_one)(jnp.arange(8))
+    out_ref = jnp.arange(1, 9)
+    np.testing.assert_allclose(out, out_ref)
+
+  def test_double_vmap_of_simple_kernel(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.int32),
+        debug=False,
+        grid=1)
+    def add_one(x_ref, o_ref):
+      o_ref[()] = x_ref[()] + 1
+    out = jax.vmap(jax.vmap(add_one))(jnp.arange(8).reshape((4, 2)))
+    out_ref = jnp.arange(1, 9).reshape((4, 2))
+    np.testing.assert_allclose(out, out_ref)
+
+  def test_vmap_of_slicing_kernel(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((2,), jnp.int32),
+        debug=False,
+        grid=(2,))
+    def add_one(x_ref, o_ref):
+      i = pl.program_id(0)
+      o_ref[i] = x_ref[i] + 1
+    out = jax.vmap(add_one)(jnp.arange(8).reshape((4, 2)))
+    out_ref = jnp.arange(1, 9).reshape((4, 2))
+    np.testing.assert_allclose(out, out_ref)
+
+  def test_vmap_of_slicing_kernel_different_axes(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((2,), jnp.int32),
+        debug=False,
+        grid=(2,))
+    def add_one(x_ref, o_ref):
+      i = pl.program_id(0)
+      o_ref[i] = x_ref[i] + 1
+    add_one_ref = lambda x: x + 1
+    x = jnp.arange(8).reshape((2, 4))
+
+    out = jax.vmap(add_one, in_axes=1, out_axes=1)(x)
+    out_ref = jax.vmap(add_one_ref, in_axes=1, out_axes=1)(x)
+    np.testing.assert_allclose(out, out_ref)
+
+    out = jax.vmap(add_one, in_axes=1, out_axes=0)(x)
+    out_ref = jax.vmap(add_one_ref, in_axes=1, out_axes=0)(x)
+    np.testing.assert_allclose(out, out_ref)
+
+  def test_double_vmap_of_slicing_kernel_different_axes(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((4,), jnp.float32),
+        debug=False,
+        grid=(4,))
+    def sin(x_ref, o_ref):
+      i = pl.program_id(0)
+      o_ref[i] = jnp.sin(x_ref[i])
+    sin_ref = jnp.sin
+    x = jnp.arange(64.).reshape((8, 4, 2))
+
+    out = jax.vmap(jax.vmap(sin, in_axes=1), in_axes=0)(x)
+    out_ref = jax.vmap(jax.vmap(sin_ref, in_axes=1), in_axes=0)(x)
+    np.testing.assert_allclose(out, out_ref, atol=1e-3, rtol=1e-3)
+
+class PallasCallInterpreterVmapTest(PallasCallVmapTest):
+  INTERPRET = True
 
 class PallasPrimitivesTest(parameterized.TestCase):
 
