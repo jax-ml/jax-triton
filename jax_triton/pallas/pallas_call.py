@@ -68,10 +68,11 @@ def _maybe_dynamic_update_slice(start_idx, block_shape, value, update):
   return lax.dynamic_update_slice(value, update, start_idx)
 
 def _pallas_call_impl(*args, jaxpr, name, out_shapes, which_linear,
-                      num_warps, num_stages, interpret, debug: bool,
+                      interpret, debug: bool,
                       in_shapes,
                       input_output_aliases: Tuple[Tuple[int, int], ...],
-                      grid_spec: GridSpec):
+                      grid_spec: GridSpec,
+                      **compiler_params: Any):
   if interpret:
     # If we're in interpreter mode, we *scan* over the grid and eval the
     # discharged jaxpr. This should reproduce exactly what compiling to Triton
@@ -111,10 +112,10 @@ def _pallas_call_impl(*args, jaxpr, name, out_shapes, which_linear,
   return xla.apply_primitive(pallas_call_p, *args, jaxpr=jaxpr, name=name,
                              in_shapes=in_shapes,
                              out_shapes=out_shapes, which_linear=which_linear,
-                             grid_spec=grid_spec, num_warps=num_warps,
-                             num_stages=num_stages, interpret=interpret,
+                             grid_spec=grid_spec, interpret=interpret,
                              debug=debug,
-                             input_output_aliases=input_output_aliases)
+                             input_output_aliases=input_output_aliases,
+                             **compiler_params)
 pallas_call_p.def_impl(_pallas_call_impl)
 
 def _pallas_call_abstract_eval(*avals, out_shapes, **_):
@@ -123,7 +124,7 @@ pallas_call_p.def_abstract_eval(_pallas_call_abstract_eval)
 
 def _pallas_call_jvp_rule(primals, tangents, *, jaxpr, name, which_linear,
     input_output_aliases: Tuple[Tuple[int, int], ...],
-    in_shapes, out_shapes, grid_spec, debug, interpret, num_warps, num_stages):
+    in_shapes, out_shapes, grid_spec, debug, interpret, **compiler_params: Any):
   if input_output_aliases:
     raise NotImplementedError("JVP with aliasing not supported.")
   nonzero_tangents = [not isinstance(t, ad_util.Zero) for t in tangents]
@@ -168,8 +169,7 @@ def _pallas_call_jvp_rule(primals, tangents, *, jaxpr, name, which_linear,
                                 interpret=interpret,
                                 debug=debug,
                                 input_output_aliases=(),
-                                num_warps=num_warps,
-                                num_stages=num_stages)
+                                **compiler_params)
   out_primals, out_tangents = split_list(out_flat, [len(out_flat) // 2])
   return out_primals, out_tangents
 ad.primitive_jvps[pallas_call_p] = _pallas_call_jvp_rule
@@ -181,8 +181,9 @@ class TritonCompilationResult(NamedTuple):
   lowering_result: lowering.TritonLoweringResult
 
 @weakref_lru_cache
-def _compile_jaxpr(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: GridSpec, name: str, num_warps: int,
-                   num_stages: int) -> TritonCompilationResult:
+def _compile_jaxpr(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: GridSpec,
+                   name: str, num_warps: int, num_stages: int
+                   ) -> TritonCompilationResult:
   lowering_result = lowering.lower_jaxpr_to_triton_module(jaxpr, in_shapes, grid_spec, name)
   backend = tc.runtime.backend.CUDA
   device = 0
@@ -197,21 +198,23 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
                          in_shapes: Tuple[jax.ShapeDtypeStruct, ...],
                          out_shapes: Tuple[jax.ShapeDtypeStruct, ...],
                          which_linear: Tuple[bool, ...],
-                         num_warps: int,
-                         num_stages: int,
                          interpret: bool,
                          debug: bool,
                          input_output_aliases: Tuple[Tuple[int, int], ...],
-                         grid_spec: GridSpec):
+                         grid_spec: GridSpec,
+                         **compiler_params: Any):
   if interpret:
     return mlir.lower_fun(_pallas_call_impl, multiple_results=True)(
         ctx, *in_nodes, jaxpr=jaxpr, name=name, out_shapes=out_shapes,
         in_shapes=in_shapes,
-        which_linear=which_linear, num_warps=num_warps,
-        num_stages=num_stages, interpret=interpret, debug=debug,
+        which_linear=which_linear,
+        interpret=interpret, debug=debug,
         input_output_aliases=input_output_aliases,
-        grid_spec=grid_spec)
-  compilation_result = _compile_jaxpr(jaxpr, tuple((*in_shapes, *out_shapes)), grid_spec, name, num_warps, num_stages)
+        grid_spec=grid_spec, **compiler_params)
+  num_warps = compiler_params.get("num_warps", 4)
+  num_stages = compiler_params.get("num_stages", 3)
+  compilation_result = _compile_jaxpr(jaxpr, tuple((*in_shapes, *out_shapes)),
+                                      grid_spec, name, num_warps, num_stages)
   name = compilation_result.name
   asm = compilation_result.asm
   shared_mem = compilation_result.shared_mem
@@ -286,10 +289,10 @@ def pallas_call(f: Callable, out_shape: Any, *, debug: bool = False,
                 grid: Optional[Grid] = None,
                 in_specs: Optional[Sequence[Optional[BlockSpec]]] = None,
                 out_specs: Optional[Sequence[Optional[BlockSpec]]] = None,
-                num_warps: int = 4, num_stages: int = 3,
                 input_output_aliases: Dict[int, int] = {},
                 interpret: bool = False,
-                name: Optional[str] = None):
+                name: Optional[str] = None,
+                **compiler_params: Any):
   if grid is None:
     if in_specs is not None:
       raise ValueError("Cannot specify `in_specs` with a `None` grid.")
@@ -361,10 +364,9 @@ def pallas_call(f: Callable, out_shape: Any, *, debug: bool = False,
                         for a in flat_args),
         out_shapes=tuple(flat_out_shapes), debug=debug,
         interpret=interpret,
-        num_warps=num_warps,
         grid_spec=grid_spec,
         input_output_aliases=tuple(input_output_aliases.items()),
-        num_stages=num_stages)
+        **compiler_params)
     out = tree_util.tree_unflatten(out_tree, out_flat)
     if singleton:
       return out[0]
