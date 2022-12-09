@@ -61,6 +61,7 @@ class TritonModuleContext:
   builder: tl_ir.builder
   module: tl_ir.module
   grid_spec: GridSpec
+  program_ids: Sequence[tl.tensor]
 
 @dataclasses.dataclass
 class BlockInfo:
@@ -91,7 +92,7 @@ def _eval_index_map(ctx: TritonModuleContext, idx, block_mapping: Optional[Block
   block_indices = tuple(lower_jaxpr_to_triton_ir(
     ctx, block_mapping.index_map_jaxpr.jaxpr, None, *idx))
   return tuple(
-      i.__mul__(b, _builder=ctx.builder)
+      i if b is pallas_core.mapped else i.__mul__(b, _builder=ctx.builder)
       for i, b in zip(block_indices, block_mapping.block_shape))
 
 triton_lowering_rules = {}
@@ -102,7 +103,6 @@ def lower_jaxpr_to_triton_module(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: Gr
   ir_context = tl_ir.context()
   builder = tl_ir.builder(ir_context)
   module = tl_ir.module("", builder)
-  ctx = TritonModuleContext(name, ir_context, builder, module, grid_spec)
 
   in_avals = [var.aval for var in jaxpr.invars]
   triton_types = [get_triton_python_ir(x) for x in in_avals]
@@ -110,19 +110,23 @@ def lower_jaxpr_to_triton_module(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: Gr
   assert len(jaxpr.outvars) == 0
   ret_type = tl.void
   prototype = tl.function_type(ret_type, arg_types)
-  out = prototype.to_ir(ctx.builder)
-  fn = ctx.module.get_or_insert_function(name, out)
+  out = prototype.to_ir(builder)
+  fn = module.get_or_insert_function(name, out)
   args = []
   for i in range(len(in_avals)):
     fn.add_attr(i + 1, tl_ir.attribute(tl_ir.attribute_kind.aligned, 16))
     ptr = tl.tensor(fn.args[i], prototype.param_types[i])
     args.append(ptr)
   fn.set_is_kernel(True)
-  insert_pt = ctx.builder.get_insert_block()
-  entry = tl_ir.basic_block.create(ctx.builder.context, "entry", fn)
-  ctx.builder.set_insert_block(entry)
-  program_ids = [tl.program_id(axis=i, _builder=ctx.builder)
+  insert_pt = builder.get_insert_block()
+  entry = tl_ir.basic_block.create(builder.context, "entry", fn)
+  builder.set_insert_block(entry)
+  program_ids = [tl.program_id(axis=i, _builder=builder)
                  for i in range(len(grid_spec.grid))]
+  local_program_ids = [pid for i, pid in enumerate(program_ids)
+                       if i not in grid_spec.mapped_dims]
+  ctx = TritonModuleContext(name, ir_context, builder, module, grid_spec,
+                            local_program_ids)
   start_indices = map(partial(_eval_index_map, ctx, program_ids),
                       grid_spec.block_mappings)
   block_infos = [BlockInfo(shape,
@@ -181,7 +185,7 @@ def lower_jaxpr_to_triton_ir(ctx: TritonModuleContext, jaxpr: jax_core.Jaxpr,
 # ## Programming model primitives
 
 def _program_id_lowering_rule(ctx: TritonLoweringRuleContext, *, axis):
-  return tl.program_id(axis, _builder=ctx.builder)
+  return ctx.context.program_ids[axis]
 triton_lowering_rules[primitives.program_id_p] = _program_id_lowering_rule
 
 # ## Atomic op primitives
@@ -362,8 +366,12 @@ def _offset_ptr(ptr, block_info: Optional[BlockInfo], idx: primitives.NDIndexer,
                 is_scalar):
   if block_info is None:
     full_shape = shape
+    num_mapped_dims = 0
+    block_shape = shape
   else:
     full_shape = block_info.full_shape.shape
+    num_mapped_dims = sum(b is pallas_core.mapped for b in block_info.block_shape)
+    block_shape = block_info.block_shape
   strides = jt.strides_from_shape(full_shape)
   indexer_shape = idx.get_indexer_shape()
   indices = idx.indices
@@ -374,8 +382,21 @@ def _offset_ptr(ptr, block_info: Optional[BlockInfo], idx: primitives.NDIndexer,
     start_index_offsets = [None] * len(indices)
   else:
     start_index_offsets = block_info.start_indices
-  for i, (stride, index, dim_size, is_sc, sio) in enumerate(
-      zip(strides, indices, shape, is_scalar, start_index_offsets)):
+  assert len(indices) + num_mapped_dims == len(full_shape)
+  assert len(is_scalar) + num_mapped_dims == len(full_shape)
+  assert len(start_index_offsets) == len(full_shape)
+  indexer_iter = iter(indices)
+  scalar_iter = iter(is_scalar)
+  for i, (stride, block_size, dim_size, sio) in enumerate(zip(strides,
+                                                              block_shape,
+                                                              full_shape,
+                                                              start_index_offsets)):
+    if block_size is pallas_core.mapped:
+      index = tl.core._to_tensor(0, builder)
+      is_sc = True
+    else:
+      index = next(indexer_iter)
+      is_sc = next(scalar_iter)
     if isinstance(index, primitives.Slice):
       index_size = index.size
       if isinstance(index.start, int):
@@ -397,7 +418,10 @@ def _offset_ptr(ptr, block_info: Optional[BlockInfo], idx: primitives.NDIndexer,
       desired_shape = [tl.constexpr(1)] * len(idx.int_indexer_shape) + desired_shape
       other_shape_idx += 1
     else:
-      desired_shape = index.shape + [tl.constexpr(1)] * len(other_shape)
+      if is_sc:
+        desired_shape = [tl.constexpr(1)] * max(len(idx.get_indexer_shape()), 1)
+      else:
+        desired_shape = index.shape + [tl.constexpr(1)] * len(other_shape)
     if index.shape != desired_shape:
       if is_sc:
         # Need special handling for reshaping a scalar
