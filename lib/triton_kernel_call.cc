@@ -125,7 +125,7 @@ pybind11::capsule EncapsulateFunction(T* fn) {
   return pybind11::capsule(reinterpret_cast<void*>(fn), "xla._CUSTOM_CALL_TARGET");
 }
 
-PYBIND11_MODULE(triton_kernel_call, m) {
+PYBIND11_MODULE(triton_kernel_call_lib, m) {
   m.def("make_triton_call_descriptor", &MakeTritonExecutable);
   m.def("get_custom_call", [](){
       return EncapsulateFunction(do_custom_call);

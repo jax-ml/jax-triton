@@ -46,14 +46,11 @@ try:
 except ModuleNotFoundError:
   pass
 
-from jax_triton import triton_kernel_call as triton_kernel_call_lib
+from jax_triton import triton_kernel_call_lib
 
 os.environ["TRITON_CACHE_DIR"] = ""
 map, unsafe_map = util.safe_map, map
 zip, unsafe_zip = util.safe_zip, zip
-
-xc.register_custom_call_target(
-    "triton_kernel_call",triton_kernel_call_lib.get_custom_call(), platform="CUDA")
 
 triton_type_mappings = {}
 
@@ -178,7 +175,7 @@ def emit_triton_kernel_call(ctx, name, asm, shared_mem, *,
       name, asm, shared_mem, grid_0, grid_1, grid_2, num_warps, arity)
   return descriptor, keepalive
 
-def triton_kernel_call_lowering(ctx, *args, name, asm, shared_mem,
+def triton_kernel_call_lowering(ctx, *args, kernel_name, call_name, asm, shared_mem,
                                 out_shapes, grid: GridOrLambda, num_warps: int,
                                 dump_binary_path: Optional[str],
                                 input_output_aliases: Tuple[Tuple[int, int], ...], **metaparams):
@@ -190,7 +187,7 @@ def triton_kernel_call_lowering(ctx, *args, name, asm, shared_mem,
       for out_shape in out_shapes])
   i32_type = ir.IntegerType.get_signless(32)
   descriptor, keepalive = emit_triton_kernel_call(
-      ctx, name, asm.asm_map, shared_mem, dump_binary_path=dump_binary_path,
+      ctx, kernel_name, asm.asm_map, shared_mem, dump_binary_path=dump_binary_path,
       num_warps=num_warps, grid=grid, metaparams=metaparams)
   ctx.module_context.add_keepalive(keepalive)
   output_operand_aliases = ir.ArrayAttr.get([
@@ -202,7 +199,7 @@ def triton_kernel_call_lowering(ctx, *args, name, asm, shared_mem,
       ])
   out = mhlo.CustomCallOp(
             [out_type], args,
-            call_target_name=ir.StringAttr.get("triton_kernel_call"),
+            call_target_name=ir.StringAttr.get(call_name),
             has_side_effect=ir.BoolAttr.get(False),
             backend_config=ir.StringAttr.get(descriptor),
             api_version=ir.IntegerAttr.get(i32_type, 1),
@@ -221,11 +218,14 @@ class Asm:
     self.asm_map = asm_map
 
 def triton_call(*args, kernel, out_shape, grid: Union[int, GridOrLambda],
+                call_name: str = "triton_kernel_call",
                 num_warps=4, num_stages=2, dump_binary_path: Optional[str] = None,
                 input_output_aliases: Dict[int, int] = {},
                 **metaparams):
   if not CAN_USE_TRITON:
     raise ValueError("`triton_call` is only available when `triton` is installed.")
+  xc.register_custom_call_target(
+    call_name, triton_kernel_call_lib.get_custom_call(), platform="CUDA")
   if isinstance(grid, int):
     grid = (grid,)
   out_shape = tree_util.tree_map(
@@ -236,10 +236,11 @@ def triton_call(*args, kernel, out_shape, grid: Union[int, GridOrLambda],
   flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
   avals_in = [core.raise_to_shaped(core.get_aval(a)) for a in flat_args]
   avals_out = [core.ShapedArray(a.shape, a.dtype) for a in flat_out_shapes]
-  name, asm_map, shared_mem = compile_triton_func(
+  kernel_name, asm_map, shared_mem = compile_triton_func(
     avals_in, avals_out, kernel, num_warps, num_stages, metaparams)
   asm = Asm(asm_map)
-  out_flat = triton_kernel_call_p.bind(*flat_args, name=name, asm=asm,
+  out_flat = triton_kernel_call_p.bind(*flat_args, kernel_name=kernel_name,
+      call_name=call_name, asm=asm,
       shared_mem=shared_mem, out_shapes=tuple(flat_out_shapes),
       grid=grid, num_warps=num_warps, num_stages=num_stages,
       dump_binary_path=dump_binary_path,

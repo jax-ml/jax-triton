@@ -29,6 +29,7 @@ from jax.interpreters import batching
 from jax.interpreters import partial_eval as pe
 from jax.interpreters import mlir
 from jax.interpreters import xla
+from jax.lib import xla_client as xc
 from jax._src import ad_util
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import mhlo
@@ -42,6 +43,7 @@ import numpy as np
 
 from triton._C.libtriton import triton as tc
 
+from jax_triton import triton_kernel_call_lib
 from jax_triton.triton_call import emit_triton_kernel_call, avals_to_layouts
 from jax_triton.pallas import lowering
 from jax_triton.pallas import core as pallas_core
@@ -397,6 +399,8 @@ def pallas_call(f: Callable, out_shape: Any, *, debug: bool = False,
                 interpret: bool = False,
                 name: Optional[str] = None,
                 **compiler_params: Any):
+  xc.register_custom_call_target(
+    "triton_kernel_call", triton_kernel_call_lib.get_custom_call(), platform="CUDA")
   if grid is None:
     if in_specs is not None:
       raise ValueError("Cannot specify `in_specs` with a `None` grid.")
