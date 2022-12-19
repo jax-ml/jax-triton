@@ -23,12 +23,12 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import jax
 import jax.dlpack
-from jax import core
 import jax.numpy as jnp
 from jax.lib import xla_client as xc
 from jax.interpreters import mlir
 from jax.interpreters import xla
 from jax import tree_util
+from jax._src import core
 from jax._src import state
 from jax._src import util
 from jax._src.lib import xla_bridge as xb

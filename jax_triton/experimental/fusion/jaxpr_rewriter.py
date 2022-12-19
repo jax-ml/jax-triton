@@ -21,7 +21,7 @@ import itertools as it
 
 from typing import Any, Callable, Dict, List, Set, Tuple, Union
 
-from jax import core as jax_core
+from jax._src import core as jax_core
 import jax.numpy as jnp
 
 from oryx.experimental.matching import matcher

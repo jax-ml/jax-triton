@@ -20,11 +20,11 @@ import os
 from typing import Any, Tuple
 
 import jax
-from jax import core
 from jax import lax
 from jax import linear_util as lu
 from jax.interpreters import partial_eval as pe
 from jax.interpreters import xla
+from jax._src import core
 from jax._src import util
 from jax._src.lax.control_flow import for_loop
 import jax.numpy as jnp

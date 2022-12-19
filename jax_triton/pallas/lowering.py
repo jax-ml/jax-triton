@@ -20,7 +20,6 @@ from typing import Any, Optional, Tuple, Sequence
 
 import jax
 from jax import api_util
-from jax import core as jax_core
 from jax import linear_util as lu
 from jax import tree_util
 from jax import lax
@@ -29,6 +28,7 @@ from jax._src import util
 from jax._src.lax.control_flow import for_loop
 from jax.interpreters import partial_eval as pe
 from jax.interpreters import xla
+from jax._src import core as jax_core
 from jax._src import state
 from jax._src.state import primitives as sp
 from jax._src.state import discharge

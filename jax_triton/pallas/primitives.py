@@ -21,10 +21,10 @@ import functools
 from typing import Any, List, Optional, Tuple, Union
 
 import jax
-from jax import core as jax_core
 from jax import lax
 from jax import tree_util
 from jax._src import ad_util
+from jax._src import core as jax_core
 from jax._src import pretty_printer as pp
 from jax._src import state
 from jax._src.util import (safe_map, safe_zip, split_list, merge_lists,

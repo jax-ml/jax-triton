@@ -18,7 +18,7 @@ import dataclasses
 
 from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 
-from jax import core as jax_core
+from jax._src import core as jax_core
 
 @dataclasses.dataclass
 class GridEnv:

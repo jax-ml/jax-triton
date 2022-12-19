@@ -20,7 +20,6 @@ from typing import Any, Callable, Dict, NamedTuple, Optional, Sequence, Tuple, U
 
 import jax
 from jax import api_util
-from jax import core as jax_core
 from jax import linear_util as lu
 from jax import tree_util
 from jax import lax
@@ -31,6 +30,7 @@ from jax.interpreters import mlir
 from jax.interpreters import xla
 from jax.lib import xla_client as xc
 from jax._src import ad_util
+from jax._src import core as jax_core
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import mhlo
 from jax._src import state

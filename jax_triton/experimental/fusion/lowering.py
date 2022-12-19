@@ -19,10 +19,10 @@ from typing import Any, Dict
 
 import jax
 from jax import api_util
-from jax import core
 from jax import lax
 from jax import linear_util as lu
 from jax import tree_util
+from jax._src import core
 from jax._src import util
 from jax._src import source_info_util
 from jax.interpreters import partial_eval as pe
