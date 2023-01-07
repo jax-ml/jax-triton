@@ -256,8 +256,10 @@ def triton_kernel_call(*args, name, asm, shared_mem, out_shape,
   out_shape = tree_util.tree_map(
       lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), out_shape)
   flat_args, in_tree = tree_util.tree_flatten(args)
-  del in_tree
-  # TODO(sharadmv): check that in_tree is flat (no Pytrees allowed in triton_call)
+  children = tree_util.treedef_children(in_tree)
+  if not all(tree_util.treedef_is_leaf(c) for c in children):
+    raise TypeError("Arguments to triton_call must be arrays, not pytree nodes,"
+                    f" but got argument tree structure {in_tree}")
   flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
   out_flat = triton_kernel_call_p.bind(*flat_args, name=name, asm=Asm(asm),
       shared_mem=shared_mem, out_shapes=tuple(flat_out_shapes),
