@@ -130,6 +130,12 @@ PYBIND11_MODULE(triton_kernel_call_lib, m) {
   m.def("get_custom_call", [](){
       return EncapsulateFunction(do_custom_call);
       });
+  m.def("get_compute_capability", [](int device){
+      int major, minor;
+      cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device);
+      cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device);
+      return major * 10 + minor;
+      });
 }
 
 }  // namespace jax_triton

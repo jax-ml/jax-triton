@@ -14,9 +14,11 @@
 
 """Module for triton_call."""
 import collections
-import os
+import contextlib
+import faulthandler
 import functools
 import math
+import os
 import pickle
 
 from typing import Any, Callable, Dict, Optional, Tuple, Union
@@ -42,6 +44,7 @@ try:
   import triton
   import triton.compiler as tc
   import triton.language as tl
+  import triton._C.libtriton.triton as _triton
   CAN_USE_TRITON = True
 except ModuleNotFoundError:
   pass
@@ -128,7 +131,8 @@ def avals_to_layouts(avals):
   return ir.ArrayAttr.get([aval_to_layout(a) for a in avals])
 
 def compile_triton_func(
-    avals_in, avals_out, triton_func, num_warps, num_stages, metaparams):
+    avals_in, avals_out, triton_func, num_warps, num_stages, metaparams,
+    dump: bool):
   metadata = {triton_func.arg_names.index(k) : v for k, v in metaparams.items()}
   all_args = [*avals_in, *avals_out]
   signature = {i: get_triton_python_ir(a) for i, a in enumerate(all_args)}
@@ -139,11 +143,40 @@ def compile_triton_func(
   # TODO(sharadmv): handle multiple devices, right now we assume device 0 which
   # is fine when we have multiple of the same GPU but this won't work in
   # general.
-  asm, shared_mem, name = tc._compile(
-      triton_func, signature=signature, device=0,
-      specialization=specialization,
-      constants=metadata, num_warps=num_warps,
-      num_stages=num_stages, extern_libs={}, output="cubin")
+  device = 0
+  ttir = tc.ast_to_ttir(triton_func, signature, specialization, metadata)
+  name, asm, shared_mem = compile_ttir(ttir, device=device, num_warps=num_warps,
+                                       num_stages=num_stages, dump=dump)
+  return name, asm, shared_mem
+
+def compile_ttir(ttir,
+                 device: int = 0, num_warps: int = 4,
+                 num_stages: Optional[int] = None,
+                 dump: bool = False,
+                 ) -> Tuple[str, Dict[str, Any], int]:
+  compute_capability = triton_kernel_call_lib.get_compute_capability(device)
+  if num_stages is not None:
+    num_stages = 3 if compute_capability >= 75 else 2
+  if dump:
+    ttir.dump()
+  try:
+    ttgir = tc.ttir_to_ttgir(ttir, num_warps, num_stages, compute_capability)
+  except RuntimeError as e:
+    ttir.dump()
+    raise ValueError("TTIR->TTGIR pass failed!") from e
+  extern_libs = {}
+  try:
+    llir = tc.ttgir_to_llir(ttgir, extern_libs, compute_capability)
+  except RuntimeError as e:
+    ttgir.dump()
+    raise ValueError("TTIR->TTGIR pass failed!") from e
+  if dump:
+    ttgir.dump()
+  shared_mem = _triton.get_shared_memory_size(ttgir)
+  ptx = str(tc.llir_to_ptx(llir, compute_capability))
+  name = tc.ptx_get_kernel_name(ptx)
+  cubin = tc.ptx_to_cubin(ptx, compute_capability)
+  asm = dict(ttir=ttir, ttgir=ttgir, llir=llir, ptx=ptx, cubin=cubin)
   return name, asm, shared_mem
 
 def emit_triton_kernel_call(ctx, name, asm, shared_mem, *,
@@ -221,6 +254,7 @@ def triton_call(*args, kernel, out_shape, grid: Union[int, GridOrLambda],
                 call_name: str = "triton_kernel_call",
                 num_warps=4, num_stages=2, dump_binary_path: Optional[str] = None,
                 input_output_aliases: Dict[int, int] = {},
+                debug: bool = False,
                 **metaparams):
   if not CAN_USE_TRITON:
     raise ValueError("`triton_call` is only available when `triton` is installed.")
@@ -237,7 +271,8 @@ def triton_call(*args, kernel, out_shape, grid: Union[int, GridOrLambda],
   avals_in = [core.raise_to_shaped(core.get_aval(a)) for a in flat_args]
   avals_out = [core.ShapedArray(a.shape, a.dtype) for a in flat_out_shapes]
   kernel_name, asm_map, shared_mem = compile_triton_func(
-    avals_in, avals_out, kernel, num_warps, num_stages, metaparams)
+    avals_in, avals_out, kernel, num_warps, num_stages, metaparams,
+    dump=debug)
   asm = Asm(asm_map)
   out_flat = triton_kernel_call_p.bind(*flat_args, kernel_name=kernel_name,
       call_name=call_name, asm=asm,

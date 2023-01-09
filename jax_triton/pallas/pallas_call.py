@@ -44,7 +44,9 @@ import numpy as np
 from triton._C.libtriton import triton as tc
 
 from jax_triton import triton_kernel_call_lib
-from jax_triton.triton_call import emit_triton_kernel_call, avals_to_layouts
+from jax_triton.triton_call import emit_triton_kernel_call
+from jax_triton.triton_call import avals_to_layouts
+from jax_triton.triton_call import compile_ttir
 from jax_triton.pallas import lowering
 from jax_triton.pallas import core as pallas_core
 
@@ -276,13 +278,13 @@ class TritonCompilationResult(NamedTuple):
 
 @weakref_lru_cache
 def _compile_jaxpr(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: GridSpec,
-                   name: str, num_warps: int, num_stages: int
+                   name: str, num_warps: int, num_stages: int, dump: bool
                    ) -> TritonCompilationResult:
   lowering_result = lowering.lower_jaxpr_to_triton_module(jaxpr, in_shapes, grid_spec, name)
-  backend = tc.runtime.backend.CUDA
+  ttir = lowering_result.module
   device = 0
-  name, asm, shared_mem = tc.code_gen.compile_ttir(backend, lowering_result.module, device,
-      num_warps, num_stages, {}, 0)
+  name, asm, shared_mem = compile_ttir(ttir, device=device, num_warps=num_warps,
+                                       num_stages=num_stages, dump=dump)
   return TritonCompilationResult(name, asm, shared_mem, lowering_result)
 
 
@@ -307,17 +309,15 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
         grid_spec=grid_spec, **compiler_params)
   num_warps = compiler_params.get("num_warps", 4)
   num_stages = compiler_params.get("num_stages", 3)
-  compilation_result = _compile_jaxpr(jaxpr, tuple((*in_shapes, *out_shapes)),
-                                      grid_spec, name, num_warps, num_stages)
-  name = compilation_result.name
-  asm = compilation_result.asm
-  shared_mem = compilation_result.shared_mem
   if debug:
     print(jaxpr)
     print(grid_spec)
-  lowering_result = compilation_result.lowering_result
-  if debug:
-    lowering_result.module.print()
+  compilation_result = _compile_jaxpr(jaxpr, tuple((*in_shapes, *out_shapes)),
+                                      grid_spec, name, num_warps, num_stages,
+                                      dump=debug)
+  name = compilation_result.name
+  asm = compilation_result.asm
+  shared_mem = compilation_result.shared_mem
   out_type = ir.TupleType.get_tuple([
       ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
       for out_shape in ctx.avals_out])

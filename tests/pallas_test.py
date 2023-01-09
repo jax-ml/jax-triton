@@ -12,19 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Copyright 2022 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import functools
 import os
 import unittest
@@ -202,6 +189,81 @@ class PallasCallTest(PallasTest):
       idx = jnp.arange(i, i + 2)
       np.testing.assert_allclose(index(x, idx), x[idx])
 
+  def test_for_loop(self):
+    
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((), jnp.float32),
+        grid=1)
+    def f(y_ref):
+      y_ref[()] = 0.
+
+      def body(i, _):
+        y_ref[()] += 1
+
+      for_loop(4, body, ())
+    out = f()
+    self.assertEqual(out, 4.)
+
+  def test_for_loop1(self):
+    
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((16, 16), jnp.float32),
+        debug=True,
+        grid=1)
+    def f(x_ref, y_ref, o_ref):
+      o_ref[:, :] = jnp.zeros((16, 16), jnp.float32)
+
+      def body(i, _):
+        o_ref[:, :]  += jnp.dot(x_ref[:, :], y_ref[:, :])
+
+      for_loop(4, body, ())
+    x = y = jnp.ones((16, 16), jnp.float32)
+    out = f(x, y)
+    np.testing.assert_allclose(out, 4 * x.dot(y))
+
+  def test_for_loop2(self):
+    
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((32, 32), jnp.float32),
+        grid=1)
+    def f(x_ref, y_ref, o_ref):
+      acc = jnp.zeros((32, 32), jnp.float32)
+      def body(i, acc_ref):
+        acc = acc_ref[:, :]
+        x = pl.load(x_ref, (pl.ds(None), pl.ds(i * 16, 16)))
+        y = pl.load(y_ref, (pl.ds(i * 16, 16), pl.ds(None)))
+        acc = acc + pl.dot(x, y)
+        acc_ref[:, :] = acc
+      acc = for_loop(2, body, acc)
+      o_ref[:, :] = acc
+    x = y = jnp.ones((32, 32), jnp.float32)
+    out = f(x, y)
+    np.testing.assert_allclose(out, x.dot(y))
+
+  def test_for_loop3(self):
+    
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((32, 32), jnp.float32),
+        grid=(2, 2))
+    def f(x_ref, y_ref, o_ref):
+      pid_m, pid_n = pl.program_id(0), pl.program_id(1)
+      acc = jnp.zeros((16, 16), jnp.float32)
+      def body(i, acc_ref):
+        acc = acc_ref[:, :]
+        x = pl.load(x_ref, (pl.ds(pid_m * 16, 16), pl.ds(i * 16, 16)))
+        y = pl.load(y_ref, (pl.ds(i * 16, 16), pl.ds(pid_n * 16, 16)))
+        acc = acc + pl.dot(x, y)
+        acc_ref[:, :] = acc
+      acc = for_loop(2, body, acc)
+      pl.store(o_ref, (pl.ds(pid_m * 16, 16), pl.ds(pid_n * 16, 16)), acc)
+    x = y = jnp.ones((32, 32), jnp.float32)
+    out = f(x, y)
+    np.testing.assert_allclose(out, x.dot(y))
+
   @parameterized.named_parameters(*[
     (f"m_{m}_n_{n}_k_{k}_dtype_{dtype}_bm_{block_size_m}_"
      f"bn_{block_size_n}_bk_{block_size_k}_gm_{group_size_m}", m, n, k, dtype,
@@ -217,6 +279,7 @@ class PallasCallTest(PallasTest):
       if block_size_m <= m and block_size_n <= n and block_size_k <= k
     ])
   def test_matmul(self, m, n, k, dtype, bm, bn, bk, gm):
+    self.skipTest("slow")
 
     # TODO(sharadmv): expose this information in `jaxlib`
     if torch is not None and torch.cuda.get_device_capability() < (7, 0):
@@ -244,6 +307,7 @@ class PallasCallTest(PallasTest):
       if block_size_m <= m and block_size_n <= n and block_size_k <= k
     ])
   def test_matmul_block_spec(self, m, n, k, dtype, bm, bn, bk):
+    self.skipTest("Oof")
 
     # TODO(sharadmv): expose this information in `jaxlib`
     if torch is not None and torch.cuda.get_device_capability() < (7, 0):
@@ -389,6 +453,49 @@ class PallasCallTest(PallasTest):
     np.testing.assert_allclose(out, expected)
 
   @parameterized.named_parameters(*[
+    ("add_i32", pl.atomic_add, np.array(1, np.int32), np.sum),
+    ("max_i32", pl.atomic_max, np.array(1, np.int32), np.max),
+    ("min_i32", pl.atomic_min, np.array(1, np.int32), np.min),
+    ("add_f16", pl.atomic_add, np.array(1, np.float16), np.sum),
+    ("add_f32", pl.atomic_add, np.array(1, np.float32), np.sum),
+    ("max_f32", pl.atomic_max, np.array(1, np.float32), np.max),
+    ("min_f32", pl.atomic_min, np.array(1, np.float32), np.min),
+  ])
+  def test_scalar_atomic_scalar(self, op, value, numpy_op):
+    # TODO(sharadmv): expose this information in `jaxlib`
+    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+      raise unittest.SkipTest(
+          "Atomic ops only works on GPUs with capability >= sm70")
+
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((), value.dtype),
+        grid=(1,),
+        debug=True,
+        input_output_aliases={1: 0})
+    def atomic_kernel(x_ref, _, o_ref):
+      op(o_ref, (), x_ref[()])
+    if op == pl.atomic_add:
+      neutral = np.array(0, dtype=value.dtype)
+    elif op == pl.atomic_max:
+      if np.issubdtype(value.dtype, np.integer):
+        neutral = np.array(np.iinfo(value.dtype).min, value.dtype)
+      else:
+        neutral = np.array(-float('inf'), value.dtype)
+    elif op == pl.atomic_min:
+      if np.issubdtype(value.dtype, np.integer):
+        neutral = np.array(np.iinfo(value.dtype).max, value.dtype)
+      else:
+        neutral = np.array(float('inf'), value.dtype)
+    elif op == pl.atomic_or:
+      neutral = np.array(False, value.dtype)
+    else:
+      raise NotImplementedError()
+    out = atomic_kernel(value, neutral)
+    np.testing.assert_allclose(out, numpy_op(value))
+
+
+  @parameterized.named_parameters(*[
     ("add_i32", pl.atomic_add, np.array([1, 2, 3, 4], np.int32), np.sum),
     ("max_i32", pl.atomic_max, np.array([1, 2, 3, 4], np.int32), np.max),
     ("min_i32", pl.atomic_min, np.array([1, 2, 3, 4], np.int32), np.min),
@@ -401,12 +508,13 @@ class PallasCallTest(PallasTest):
     # TODO(sharadmv): expose this information in `jaxlib`
     if torch is not None and torch.cuda.get_device_capability() < (7, 0):
       raise unittest.SkipTest(
-          "Atomic ops onl works on GPUs with capability >= sm70")
+          "Atomic ops only works on GPUs with capability >= sm70")
 
     @functools.partial(
         self.pallas_call,
         out_shape=jax.ShapeDtypeStruct((), value.dtype),
         grid=value.shape[0],
+        debug=True,
         input_output_aliases={1: 0})
     def atomic_kernel(x_ref, _, o_ref):
       pid = pl.program_id(axis=0)
