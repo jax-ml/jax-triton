@@ -5,8 +5,8 @@ description = "JAX + OpenAI Triton integration"
 readme = "README.md"
 requires-python = ">=3.7<3.10"
 dependencies = [
-  "jax>=0.3.15",
-  "triton>=2.0.0.dev20220720",
+  "jax>=0.4.1",
+  "triton==2.0.0.dev20221202",
 ]
 
 [build-system]

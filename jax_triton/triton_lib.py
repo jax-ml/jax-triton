@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Module for triton_call."""
+"""Module for calling Triton kernels from JAX."""
 import collections
 import os
 import functools
 import math
 import pickle
 
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple, Union
 
 import jax
 import jax.dlpack
@@ -32,6 +32,7 @@ from jax._src import core
 from jax._src import state
 from jax._src import util
 from jax._src.lib import xla_bridge as xb
+from jax._src.typing import Array
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import mhlo
 import jaxlib
@@ -217,11 +218,99 @@ class Asm:
   def __init__(self, asm_map):
     self.asm_map = asm_map
 
-def triton_call(*args, kernel, out_shape, grid: Union[int, GridOrLambda],
+class ShapeDtype(Protocol):
+
+  @property
+  def shape(self) -> Tuple[int, ...]:
+    ...
+
+  @property
+  def dtype(self) -> np.dtype:
+    ...
+
+def triton_call(*args: Array, kernel: triton.JITFunction,
+                out_shape: Union[ShapeDtype, Sequence[ShapeDtype]],
+                grid: Union[int, GridOrLambda],
                 call_name: str = "triton_kernel_call",
-                num_warps=4, num_stages=2, dump_binary_path: Optional[str] = None,
+                num_warps: int = 4, num_stages: int = 2,
+                dump_binary_path: Optional[str] = None,
                 input_output_aliases: Dict[int, int] = {},
-                **metaparams):
+                **metaparams: Any):
+  """Calls a Triton kernel with `jax.Array` arguments.
+
+  Args:
+    *args: `jax.Array`-valued inputs for the Triton kernel.
+    kernel: A Triton kernel (e.g. a function decorated with `triton.jit`). The
+      Triton kernel cannot take in scalar-valued arguments and all static values
+      should be annotated with `triton.language.constexpr`.
+    out_shape: A `jax.ShapeDtypeStruct` (or something that has `.shape` and
+      `.dtype` attributes) or a sequence thereof that specify the output(s) of
+      the kernel. Pointers for each of the `jax.ShapeDtypeStruct`s in `out_shape`
+      will be passed into `kernel` following the pointers corresponding to the
+      inputs.
+    grid: An integer, tuple of up to 3 integers, or a function that returns a
+      tuple of up to 3 integers. When `grid` is an integer, `kernel` is
+      invocated in `grid`-many parallel executions. When `grid` is a sequence of
+      integers, `kernel` is launched in a `prod(grid)`-many parallel execution.
+      When `grid` is a function, it is passed `**metaparams` and should return a
+      tuple of up to 3 integers.
+    input_output_aliases: A dictionary mapping input argument indices to output
+      indices. Providing a mapping will alias the corresponding buffers.
+    num_warps: The number of warps used to execute the Triton kernel.
+    num_stages: The number of stages emitted by the Triton compiler.
+    **metaparams: Additional keyword arguments that will be provided to a `grid`
+      (if it is a function) and to the Triton kernel as `constexpr` arguments.
+
+  ## Example usage
+
+  First we define a simple kernel that adds two vectors.
+
+  ```python
+  import triton
+  import triton.language as tl
+
+  @triton.jit
+  def add_kernel(
+      x_ptr,
+      y_ptr,
+      output_ptr,
+      block_size: tl.constexpr,
+  ):
+    \"\"\"Adds two vectors.\"\"\"
+    pid = tl.program_id(axis=0)
+    block_start = pid * block_size
+    offsets = block_start + tl.arange(0, block_size)
+    mask = offsets < 8
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = tl.load(y_ptr + offsets, mask=mask)
+    output = x + y
+    tl.store(output_ptr + offsets, output, mask=mask)
+  ```
+
+  Then we use `triton_call` to call it from JAX.
+
+  ```python
+  import jax
+  import jax.numpy as jnp
+  import jax_triton as jt
+
+  def add(x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+    out_shape = jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)
+    block_size = 8
+    return jt.triton_call(
+        x,
+        y,
+        kernel=add_kernel,
+        out_shape=out_shape,
+        grid=(x.size // block_size,),
+        block_size=block_size)
+
+  x_val = jnp.arange(8)
+  y_val = jnp.arange(8, 16)
+  print(add(x_val, y_val))
+  print(jax.jit(add)(x_val, y_val))
+  ```
+  """
   if not CAN_USE_TRITON:
     raise ValueError("`triton_call` is only available when `triton` is installed.")
   xc.register_custom_call_target(

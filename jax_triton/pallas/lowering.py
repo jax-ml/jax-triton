@@ -33,7 +33,7 @@ from jax._src import state
 from jax._src.state import primitives as sp
 from jax._src.state import discharge
 from jax._src.state import ShapedArrayRef
-from jax_triton.triton_call import get_triton_python_ir
+from jax_triton.triton_lib import get_triton_python_ir
 import jax.numpy as jnp
 import triton
 import triton.language as tl
