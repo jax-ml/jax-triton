@@ -60,9 +60,7 @@ class BlockMapping:
   index_map_jaxpr: jax_core.ClosedJaxpr
 
   def compute_start_indices(self, loop_idx):
-    jaxpr = self.index_map_jaxpr.jaxpr
-    consts = self.index_map_jaxpr.consts
-    block_indices = jax_core.eval_jaxpr(jaxpr, consts, *loop_idx)
+    block_indices = jax_core.jaxpr_as_fun(self.index_map_jaxpr)(*loop_idx)
     return tuple(i if b is mapped else b * i
                  for b, i in zip(self.block_shape, block_indices))
 
