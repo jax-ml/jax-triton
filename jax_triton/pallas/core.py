@@ -31,8 +31,10 @@ _grid_env_stack: List[Tuple[GridEnv, ...]] = []
 def grid_env(grid_env: Tuple[Tuple[Any, int], ...]) -> Iterator[None]:
   _grid_env_stack.append(tuple(GridEnv(axis_index, axis_size)
                                for axis_index, axis_size in grid_env))
-  yield
-  _grid_env_stack.pop()
+  try:
+    yield
+  finally:
+    _grid_env_stack.pop()
 
 def current_grid_env() -> Optional[Tuple[GridEnv, ...]]:
   if not _grid_env_stack:
