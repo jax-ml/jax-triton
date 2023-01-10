@@ -44,7 +44,7 @@ import numpy as np
 from triton._C.libtriton import triton as tc
 
 from jax_triton import triton_kernel_call_lib
-from jax_triton.triton_call import emit_triton_kernel_call, avals_to_layouts
+from jax_triton.triton_lib import emit_triton_kernel_call, avals_to_layouts
 from jax_triton.pallas import lowering
 from jax_triton.pallas import core as pallas_core
 
