@@ -14,12 +14,14 @@
 
 #include "triton_kernel_call.h"
 
-#include <iostream>
 #include <cassert>
+#include <cstdint>
+#include <iostream>
 #include <string>
+#include <vector>
 
-#include <pybind11/pybind11.h>
 #include "cuda.h"
+#include "pybind11/pybind11.h"
 
 namespace py = pybind11;
 
@@ -39,26 +41,20 @@ void TritonExecutable::launch(CUstream stream, void** buffers) {
   /// Only load the kernel if it hasn't already been loaded for this device
   cuCtxGetDevice(&dev);
   CUfunction kernel = load(dev);
-  std::string params;
-  params.resize(8 * arity);
-  char* params_ptr = &params[0];
-  for (uint32_t i = 0; i < arity; i++) {
-    params_ptr = (char*)(((uintptr_t)params_ptr + 7) & (-8));
-    std::memcpy(params_ptr, &buffers[i], 8);
-    params_ptr += 8;
+
+  std::vector<void*> params;
+  params.reserve(arity);
+  for (uint32_t i = 0; i < arity; ++i) {
+    params.push_back(&buffers[i]);
   }
-  size_t params_size = static_cast<size_t>(params_ptr - &params[0]);
-  void* config[] = {
-    CU_LAUNCH_PARAM_BUFFER_POINTER,
-    static_cast<void*>(const_cast<char*>(params.data())),
-    CU_LAUNCH_PARAM_BUFFER_SIZE, &params_size,
-    CU_LAUNCH_PARAM_END
-  };
-  CUresult result = cuLaunchKernel(kernel, grid_0, grid_1, grid_2, num_warps * 32, 1, 1, shared_mem, stream, nullptr, config);
+
+  CUresult result =
+      cuLaunchKernel(kernel, grid_0, grid_1, grid_2, num_warps * 32, 1, 1,
+                     shared_mem, stream, params.data(), /*extra=*/nullptr);
   if (result != 0) {
     std::cout << "Failed launch: " << result << std::endl;
   }
-};
+}
 
 CUfunction TritonExecutable::load(CUdevice device) {
   const std::lock_guard<std::mutex> lock(mut);
