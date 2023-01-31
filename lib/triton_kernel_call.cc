@@ -68,9 +68,9 @@ CUfunction TritonExecutable::load(CUdevice device) {
   // Mimics Triton kernel loading
   std::string assembly;
   auto iter = asm_map.find("cubin");
-  if (iter != asm_map.end())
+  if (iter != asm_map.end()) {
     assembly = py::cast<std::string>(asm_map["cubin"]);
-  else {
+  } else {
     assert(asm_map.count("ptx") == 1);
     assembly = py::cast<std::string>(asm_map["ptx"]);
   }
@@ -78,11 +78,7 @@ CUfunction TritonExecutable::load(CUdevice device) {
   CUmodule mod;
   cuModuleLoadData(&mod, assembly.c_str());
   cuModuleGetFunction(&fun, mod, name.c_str());
-  int n_regs = 0;
-  int n_spills = 0;
-  cuFuncGetAttribute(&n_regs, CU_FUNC_ATTRIBUTE_NUM_REGS, fun);
-  cuFuncGetAttribute(&n_spills, CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES, fun);
-  n_spills /= 4;
+
   int shared_optin;
   cuDeviceGetAttribute(&shared_optin,
                        CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
@@ -101,7 +97,7 @@ CUfunction TritonExecutable::load(CUdevice device) {
   }
   kernels[device] = fun;
   return fun;
-};
+}
 
 void do_custom_call(CUstream stream, void** buffers,
     char* opaque, size_t opaque_len) {
