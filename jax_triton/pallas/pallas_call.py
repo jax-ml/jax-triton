@@ -322,10 +322,17 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
       ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
       for out_shape in ctx.avals_out])
   i32_type = ir.IntegerType.get_signless(32)
-  descriptor, keepalive = emit_triton_kernel_call(
-      ctx, name, asm, shared_mem, num_warps=num_warps, grid=grid_spec.grid,
-      metaparams={}, dump_binary_path=None)
-  ctx.module_context.add_keepalive(keepalive)
+  executable = emit_triton_kernel_call(
+      ctx,
+      name,
+      asm,
+      shared_mem,
+      num_warps=num_warps,
+      grid=grid_spec.grid,
+      metaparams={},
+      dump_binary_path=None,
+  )
+  ctx.module_context.add_keepalive(executable)
   output_operand_aliases = ir.ArrayAttr.get([
           mhlo.OutputOperandAlias.get(
               output_tuple_indices=[output],
@@ -334,15 +341,17 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
           for input, output in input_output_aliases
       ])
   out = mhlo.CustomCallOp(
-            [out_type], in_nodes,
-            call_target_name=ir.StringAttr.get("triton_kernel_call"),
-            has_side_effect=ir.BoolAttr.get(False),
-            backend_config=ir.StringAttr.get(descriptor),
-            api_version=ir.IntegerAttr.get(i32_type, 1),
-            called_computations=ir.ArrayAttr.get([]),
-            operand_layouts=avals_to_layouts(ctx.avals_in),
-            result_layouts=avals_to_layouts(ctx.avals_out),
-            output_operand_aliases=output_operand_aliases)
+      [out_type],
+      in_nodes,
+      call_target_name=ir.StringAttr.get("triton_kernel_call"),
+      has_side_effect=ir.BoolAttr.get(False),
+      backend_config=ir.StringAttr.get(executable.descriptor),
+      api_version=ir.IntegerAttr.get(i32_type, 1),
+      called_computations=ir.ArrayAttr.get([]),
+      operand_layouts=avals_to_layouts(ctx.avals_in),
+      result_layouts=avals_to_layouts(ctx.avals_out),
+      output_operand_aliases=output_operand_aliases,
+  )
   results = [mhlo.GetTupleElementOp(out, mlir.i32_attr(i)).result
              for i in range(len(out_shapes))]
   return results

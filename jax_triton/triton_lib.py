@@ -172,9 +172,9 @@ def emit_triton_kernel_call(ctx, name, asm, shared_mem, *,
   else:
     assert False
   arity = len(ctx.avals_in) + len(ctx.avals_out)
-  descriptor, keepalive = triton_kernel_call_lib.make_triton_call_descriptor(
-      name, asm, shared_mem, grid_0, grid_1, grid_2, num_warps, arity)
-  return descriptor, keepalive
+  return triton_kernel_call_lib.TritonExecutable(
+      name, asm, shared_mem, grid_0, grid_1, grid_2, num_warps, arity
+  )
 
 def triton_kernel_call_lowering(ctx, *args, kernel_name, call_name, asm, shared_mem,
                                 out_shapes, grid: GridOrLambda, num_warps: int,
@@ -187,10 +187,17 @@ def triton_kernel_call_lowering(ctx, *args, kernel_name, call_name, asm, shared_
       ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
       for out_shape in out_shapes])
   i32_type = ir.IntegerType.get_signless(32)
-  descriptor, keepalive = emit_triton_kernel_call(
-      ctx, kernel_name, asm.asm_map, shared_mem, dump_binary_path=dump_binary_path,
-      num_warps=num_warps, grid=grid, metaparams=metaparams)
-  ctx.module_context.add_keepalive(keepalive)
+  executable = emit_triton_kernel_call(
+      ctx,
+      kernel_name,
+      asm.asm_map,
+      shared_mem,
+      dump_binary_path=dump_binary_path,
+      num_warps=num_warps,
+      grid=grid,
+      metaparams=metaparams,
+  )
+  ctx.module_context.add_keepalive(executable)
   output_operand_aliases = ir.ArrayAttr.get([
           mhlo.OutputOperandAlias.get(
               output_tuple_indices=[output],
@@ -199,15 +206,17 @@ def triton_kernel_call_lowering(ctx, *args, kernel_name, call_name, asm, shared_
           for input, output in input_output_aliases
       ])
   out = mhlo.CustomCallOp(
-            [out_type], args,
-            call_target_name=ir.StringAttr.get(call_name),
-            has_side_effect=ir.BoolAttr.get(False),
-            backend_config=ir.StringAttr.get(descriptor),
-            api_version=ir.IntegerAttr.get(i32_type, 1),
-            called_computations=ir.ArrayAttr.get([]),
-            operand_layouts=avals_to_layouts(ctx.avals_in),
-            result_layouts=avals_to_layouts(ctx.avals_out),
-            output_operand_aliases=output_operand_aliases)
+      [out_type],
+      args,
+      call_target_name=ir.StringAttr.get(call_name),
+      has_side_effect=ir.BoolAttr.get(False),
+      backend_config=ir.StringAttr.get(executable.descriptor),
+      api_version=ir.IntegerAttr.get(i32_type, 1),
+      called_computations=ir.ArrayAttr.get([]),
+      operand_layouts=avals_to_layouts(ctx.avals_in),
+      result_layouts=avals_to_layouts(ctx.avals_out),
+      output_operand_aliases=output_operand_aliases,
+  )
   results = [mhlo.GetTupleElementOp(out, mlir.i32_attr(i)).result
              for i in range(len(out_shapes))]
   return results

@@ -14,10 +14,10 @@
 
 #include <mutex>
 #include <string>
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
 
 #include "cuda.h"
+#include "pybind11/pybind11.h"
+#include "pybind11/stl.h"
 
 namespace jax_triton {
 
@@ -25,24 +25,21 @@ using asm_map_t = std::unordered_map<std::string, pybind11::object>;
 
 class TritonExecutable {
   public:
-   explicit TritonExecutable(std::string name, asm_map_t asm_map, std::uint32_t shared_mem,
-                             std::uint32_t grid_0, std::uint32_t grid_1,
-                             std::uint32_t grid_2, std::uint32_t num_warps,
-                             std::uint32_t arity)
-     : name(std::move(name)),
-       asm_map(std::move(asm_map)),
-       shared_mem(shared_mem),
-       grid_0(grid_0),
-       grid_1(grid_1),
-       grid_2(grid_2),
-       num_warps(num_warps),
-       arity(arity),
-       kernels(),
-       mut() {}
+   TritonExecutable(std::string name, asm_map_t asm_map,
+                    std::uint32_t shared_mem, std::uint32_t grid_0,
+                    std::uint32_t grid_1, std::uint32_t grid_2,
+                    std::uint32_t num_warps, std::uint32_t arity)
+       : name(std::move(name)),
+         asm_map(std::move(asm_map)),
+         shared_mem(shared_mem),
+         grid_0(grid_0),
+         grid_1(grid_1),
+         grid_2(grid_2),
+         num_warps(num_warps),
+         arity(arity),
+         kernels(),
+         mut() {}
 
-   static TritonExecutable* from_descriptor(uint64_t descriptor) {
-     return reinterpret_cast<TritonExecutable*>(static_cast<uintptr_t>(descriptor));
-   };
    void launch(CUstream stream, void** buffers);
 
   private:

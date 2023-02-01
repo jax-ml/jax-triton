@@ -97,31 +97,29 @@ CUfunction TritonExecutable::load(CUdevice device) {
 
 void do_custom_call(CUstream stream, void** buffers,
     char* opaque, size_t opaque_len) {
-  uint64_t descriptor = std::strtoull(opaque, NULL, 0);
-  TritonExecutable* executable = TritonExecutable::from_descriptor(descriptor);
+  assert(opaque_len == sizeof(TritonExecutable*));
+  TritonExecutable* executable;
+  std::memcpy(&executable, opaque, sizeof(TritonExecutable*));
   executable->launch(stream, buffers);
 }
 
-std::pair<std::string, py::object> MakeTritonExecutable(std::string name, asm_map_t asm_map, uint32_t shared_mem, uint32_t grid_0, uint32_t grid_1, uint32_t grid_2, uint32_t num_warps, uint32_t arity) {
-  auto triton_call = std::make_unique<TritonExecutable>(
-      name, asm_map, shared_mem, grid_0, grid_1, grid_2, num_warps, arity);
-  std::string descriptor = std::to_string(reinterpret_cast<uint64_t>(triton_call.get()));
-  py::capsule callback_capsule(triton_call.release(), [](void* ptr) {
-    delete reinterpret_cast<TritonExecutable*>(ptr);
-  });
-  return std::make_pair(descriptor, py::object(std::move(callback_capsule)));
-}
-
-template <typename T>
-pybind11::capsule EncapsulateFunction(T* fn) {
-  return pybind11::capsule(reinterpret_cast<void*>(fn), "xla._CUSTOM_CALL_TARGET");
-}
-
 PYBIND11_MODULE(triton_kernel_call_lib, m) {
-  m.def("make_triton_call_descriptor", &MakeTritonExecutable);
-  m.def("get_custom_call", [](){
-      return EncapsulateFunction(do_custom_call);
+  py::class_<TritonExecutable>(m, "TritonExecutable")
+      .def(py::init<std::string, asm_map_t, uint32_t, uint32_t, uint32_t,
+                    uint32_t, uint32_t, uint32_t>())
+      .def_property_readonly("descriptor", [](TritonExecutable& executable) {
+        union {
+          TritonExecutable* ptr;
+          char bytes[sizeof(TritonExecutable*)];
+        } descriptor;
+        descriptor.ptr = &executable;
+        return py::bytes(descriptor.bytes, sizeof(TritonExecutable*));
       });
+
+  m.def("get_custom_call", [] {
+    return py::capsule(reinterpret_cast<void*>(&do_custom_call),
+                       "xla._CUSTOM_CALL_TARGET");
+  });
 }
 
 }  // namespace jax_triton
