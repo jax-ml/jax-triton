@@ -3,7 +3,7 @@ name = "jax-triton"
 version = "0.1.2"
 description = "JAX + OpenAI Triton integration"
 readme = "README.md"
-requires-python = ">=3.7<3.10"
+requires-python = ">=3.7,<3.10"
 dependencies = [
   "jax>=0.4.1",
   "triton==2.0.0.dev20221202",
