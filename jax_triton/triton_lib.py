@@ -147,34 +147,37 @@ def compile_triton_func(
       num_stages=num_stages, extern_libs={}, output="cubin")
   return name, asm, shared_mem
 
-def emit_triton_kernel_call(ctx, name, asm, shared_mem, *,
-                            dump_binary_path: Optional[str], grid: GridOrLambda,
-                            metaparams, num_warps):
+
+def emit_triton_kernel_call(
+    ctx,
+    name,
+    asm_map,
+    shared_mem,
+    *,
+    dump_binary_path: Optional[str],
+    grid: GridOrLambda,
+    metaparams,
+    num_warps,
+):
   if dump_binary_path is not None:
-    binary = dict(
-        asm=asm,
-        shared_mem=shared_mem,
-        name=name)
+    binary = dict(asm=asm_map, shared_mem=shared_mem, name=name)
     with open(dump_binary_path, "wb") as fp:
       pickle.dump(binary, fp)
 
+  # Prefer cubin to PTX, if available.
+  asm = asm_map.get("cubin", asm_map["ptx"])
+
   if callable(grid):
-    grid_ = grid(metaparams)
-  else:
-    grid_ = grid
-  grid_0 = grid_[0]
-  if len(grid_) == 1:
-    grid_1, grid_2 = 1, 1
-  elif len(grid_) == 2:
-    grid_1, grid_2 = grid_[1], 1
-  elif len(grid_) == 3:
-    grid_1, grid_2 = grid_[1], grid_[2]
-  else:
-    assert False
+    grid = grid(metaparams)
+  grid = list(grid)
+  grid.extend([1] * (3 - len(grid)))  # Fill with `1`s to length 3.
+  grid_0, grid_1, grid_2 = grid
   arity = len(ctx.avals_in) + len(ctx.avals_out)
+
   return triton_kernel_call_lib.TritonExecutable(
-      name, asm, shared_mem, grid_0, grid_1, grid_2, num_warps, arity
+      asm, name, arity, grid_0, grid_1, grid_2, num_warps, shared_mem
   )
+
 
 def triton_kernel_call_lowering(ctx, *args, kernel_name, call_name, asm, shared_mem,
                                 out_shapes, grid: GridOrLambda, num_warps: int,

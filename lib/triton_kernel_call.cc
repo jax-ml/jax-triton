@@ -12,100 +12,149 @@
 // See the License for the specific language governing permissions and
 // limitations under the License. */
 
-#include "triton_kernel_call.h"
-
 #include <cassert>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "cuda.h"
 #include "pybind11/pybind11.h"
 
+// TODO(cjfj): Use `Status` for error handling.
+#define CHECK_CUDA(expr)                                                  \
+  do {                                                                    \
+    CUresult result = (expr);                                             \
+    if (result != CUDA_SUCCESS) {                                         \
+      const char* error_string = "unknown error";                         \
+      cuGetErrorString(result, &error_string);                            \
+      std::cerr << "CUDA call failed (" << #expr << "): " << error_string \
+                << std::endl;                                             \
+      abort();                                                            \
+    }                                                                     \
+  } while (false)
+
 namespace py = pybind11;
 
 namespace jax_triton {
+namespace {
 
-const int TRITON_MAX_N_SHARED_BYTES = 49152;
-const int TRITON_MAX_SHARED_OPTIN = 49152;
+constexpr uint32_t kNumThreadsPerWarp = 32;
 
+struct CuModuleDeleter {
+  void operator()(CUmodule module) { cuModuleUnload(module); }
+};
 
-void TritonExecutable::launch(CUstream stream, void** buffers) {
-  CUdevice dev;
-  CUcontext ctx;
-  // Set the current context to the stream context so we can query the stream
-  // device
-  cuStreamGetCtx(stream, &ctx);
-  cuCtxSetCurrent(ctx);
-  /// Only load the kernel if it hasn't already been loaded for this device
-  cuCtxGetDevice(&dev);
-  CUfunction kernel = load(dev);
+using OwnedCUmodule =
+    std::unique_ptr<std::remove_pointer_t<CUmodule>, CuModuleDeleter>;
 
-  std::vector<void*> params;
-  params.reserve(arity);
-  for (uint32_t i = 0; i < arity; ++i) {
-    params.push_back(&buffers[i]);
+class TritonExecutable {
+ public:
+  TritonExecutable(std::string module_image, std::string kernel_name,
+                   uint32_t kernel_arity, uint32_t grid_0, uint32_t grid_1,
+                   uint32_t grid_2, uint32_t num_warps,
+                   uint32_t shared_mem_bytes)
+      : module_image_(std::move(module_image)),
+        kernel_name_(std::move(kernel_name)),
+        kernel_arity_(kernel_arity),
+        grid_{grid_0, grid_1, grid_2},
+        shared_mem_bytes_(shared_mem_bytes),
+        block_dim_x_(num_warps * kNumThreadsPerWarp) {}
+
+  void Launch(CUstream stream, void** buffers) {
+    CUfunction kernel = GetFunctionForCurrentCudaContext();
+
+    std::vector<void*> params;
+    params.reserve(kernel_arity_);
+    for (uint32_t i = 0; i < kernel_arity_; ++i) {
+      params.push_back(&buffers[i]);
+    }
+
+    CHECK_CUDA(
+        cuLaunchKernel(kernel, grid_[0], grid_[1], grid_[2], block_dim_x_,
+                       /*blockDimY=*/1, /*blockDimZ=*/1, shared_mem_bytes_,
+                       stream, params.data(), /*extra=*/nullptr));
   }
 
-  CUresult result =
-      cuLaunchKernel(kernel, grid_0, grid_1, grid_2, num_warps * 32, 1, 1,
-                     shared_mem, stream, params.data(), /*extra=*/nullptr);
-  if (result != 0) {
-    std::cout << "Failed launch: " << result << std::endl;
-  }
-}
+ private:
+  CUfunction GetFunctionForCurrentCudaContext() {
+    CUcontext context;
+    CHECK_CUDA(cuCtxGetCurrent(&context));
 
-CUfunction TritonExecutable::load(CUdevice device) {
-  const std::lock_guard<std::mutex> lock(mut);
-  if (is_loaded(device)) {
-    return kernels[device];
-  }
-  // Mimics Triton kernel loading
-  std::string assembly;
-  auto iter = asm_map.find("cubin");
-  if (iter != asm_map.end()) {
-    assembly = py::cast<std::string>(asm_map["cubin"]);
-  } else {
-    assert(asm_map.count("ptx") == 1);
-    assembly = py::cast<std::string>(asm_map["ptx"]);
-  }
-  CUfunction fun;
-  CUmodule mod;
-  cuModuleLoadData(&mod, assembly.c_str());
-  cuModuleGetFunction(&fun, mod, name.c_str());
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = functions_.find(context);
+    if (it != functions_.end()) {
+      return it->second;
+    }
 
-  int shared_optin;
-  cuDeviceGetAttribute(&shared_optin,
-                       CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
-                       device);
-  if (shared_mem > TRITON_MAX_N_SHARED_BYTES &&
-      shared_optin > TRITON_MAX_SHARED_OPTIN) {
-    cuFuncSetCacheConfig(fun, CU_FUNC_CACHE_PREFER_SHARED);
-    int shared_total, shared_static;
-    cuDeviceGetAttribute(
-        &shared_total, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR,
-        device);
-    cuFuncGetAttribute(&shared_static, CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
-                       fun);
-    cuFuncSetAttribute(fun, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                       shared_optin - shared_static);
-  }
-  kernels[device] = fun;
-  return fun;
-}
+    CUmodule module;
+    CHECK_CUDA(cuModuleLoadData(&module, module_image_.c_str()));
+    modules_.push_back(OwnedCUmodule(module, CuModuleDeleter()));
 
-void do_custom_call(CUstream stream, void** buffers,
-    char* opaque, size_t opaque_len) {
+    CUfunction function;
+    CHECK_CUDA(cuModuleGetFunction(&function, module, kernel_name_.c_str()));
+    auto [_, success] = functions_.insert({context, function});
+    assert(success);
+
+    // The maximum permitted static shared memory allocation in CUDA is 48kB,
+    // but we can expose more to the kernel using dynamic shared memory.
+    constexpr int kMaxStaticSharedMemBytes = 49152;
+    if (shared_mem_bytes_ <= kMaxStaticSharedMemBytes) {
+      return function;
+    }
+
+    // Set up dynamic shared memory.
+    CUdevice device;
+    CHECK_CUDA(cuCtxGetDevice(&device));
+
+    int shared_optin;
+    CHECK_CUDA(cuDeviceGetAttribute(
+        &shared_optin, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+        device));
+
+    if (shared_optin > kMaxStaticSharedMemBytes) {
+      CHECK_CUDA(cuFuncSetCacheConfig(function, CU_FUNC_CACHE_PREFER_SHARED));
+      int shared_total;
+      CHECK_CUDA(cuDeviceGetAttribute(
+          &shared_total,
+          CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR, device));
+      int shared_static;
+      CHECK_CUDA(cuFuncGetAttribute(
+          &shared_static, CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, function));
+      CHECK_CUDA(cuFuncSetAttribute(
+          function, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+          shared_optin - shared_static));
+    }
+    return function;
+  }
+
+  std::string module_image_;
+  std::string kernel_name_;
+  uint32_t kernel_arity_;
+  uint32_t grid_[3];
+  uint32_t shared_mem_bytes_;
+  uint32_t block_dim_x_;
+
+  std::mutex mutex_;
+  std::vector<OwnedCUmodule> modules_;
+  std::unordered_map<CUcontext, CUfunction> functions_;
+};
+
+}  // namespace
+
+void LaunchTritonExecutable(CUstream stream, void** buffers, char* opaque,
+                            size_t opaque_len) {
   assert(opaque_len == sizeof(TritonExecutable*));
   TritonExecutable* executable;
   std::memcpy(&executable, opaque, sizeof(TritonExecutable*));
-  executable->launch(stream, buffers);
+  executable->Launch(stream, buffers);
 }
 
 PYBIND11_MODULE(triton_kernel_call_lib, m) {
   py::class_<TritonExecutable>(m, "TritonExecutable")
-      .def(py::init<std::string, asm_map_t, uint32_t, uint32_t, uint32_t,
+      .def(py::init<std::string, std::string, uint32_t, uint32_t, uint32_t,
                     uint32_t, uint32_t, uint32_t>())
       .def_property_readonly("descriptor", [](TritonExecutable& executable) {
         union {
@@ -117,7 +166,7 @@ PYBIND11_MODULE(triton_kernel_call_lib, m) {
       });
 
   m.def("get_custom_call", [] {
-    return py::capsule(reinterpret_cast<void*>(&do_custom_call),
+    return py::capsule(reinterpret_cast<void*>(&LaunchTritonExecutable),
                        "xla._CUSTOM_CALL_TARGET");
   });
 }
