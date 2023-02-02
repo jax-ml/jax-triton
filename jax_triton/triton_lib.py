@@ -53,8 +53,6 @@ os.environ["TRITON_CACHE_DIR"] = ""
 map, unsafe_map = util.safe_map, map
 zip, unsafe_zip = util.safe_zip, zip
 
-triton_type_mappings = {}
-
 def get_triton_type(obj: Any) -> str:
   type_map = {
       jnp.dtype("bfloat16"): "bf16",
@@ -98,8 +96,6 @@ def get_triton_type(obj: Any) -> str:
     return 'B'
   if isinstance(obj, str):
     return 'str'
-  if type(obj) in triton_type_mappings:
-    return triton_type_mappings[type(obj)](obj)
   raise NotImplementedError(f'could not compute type name for {obj}: {type(obj)}')
 
 def get_triton_python_ir(aval):
@@ -346,28 +342,6 @@ def triton_call(*args: Array, kernel: triton.JITFunction,
       grid=grid, num_warps=num_warps, num_stages=num_stages,
       dump_binary_path=dump_binary_path,
      input_output_aliases=tuple(input_output_aliases.items()), **metaparams)
-  return tree_util.tree_unflatten(out_tree, out_flat)
-
-def triton_kernel_call(*args, name, asm, shared_mem, out_shape,
-                       grid: Union[int, GridOrLambda], num_warps: int = 4,
-                       input_output_aliases: Dict[int, int] = {},
-                       **metaparams):
-  if isinstance(grid, int):
-    grid = (grid,)
-  out_shape = tree_util.tree_map(
-      lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), out_shape)
-  flat_args, in_tree = tree_util.tree_flatten(args)
-  children = tree_util.treedef_children(in_tree)
-  if not all(tree_util.treedef_is_leaf(c) for c in children):
-    raise TypeError("Arguments to triton_call must be arrays, not pytree nodes,"
-                    f" but got argument tree structure {in_tree}")
-  flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
-  out_flat = triton_kernel_call_p.bind(*flat_args, name=name, asm=Asm(asm),
-      shared_mem=shared_mem, out_shapes=tuple(flat_out_shapes),
-      grid=grid, num_warps=num_warps,
-      dump_binary_path=None,
-      input_output_aliases=tuple(input_output_aliases.items()),
-      **metaparams)
   return tree_util.tree_unflatten(out_tree, out_flat)
 
 def cdiv(a, b):
