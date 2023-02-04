@@ -24,6 +24,7 @@ import triton.language as tl
 def add_kernel(
     x_ptr,
     y_ptr,
+    length,
     output_ptr,
     block_size: tl.constexpr,
 ):
@@ -31,7 +32,7 @@ def add_kernel(
   pid = tl.program_id(axis=0)
   block_start = pid * block_size
   offsets = block_start + tl.arange(0, block_size)
-  mask = offsets < 8
+  mask = offsets < length
   x = tl.load(x_ptr + offsets, mask=mask)
   y = tl.load(y_ptr + offsets, mask=mask)
   output = x + y
@@ -51,6 +52,7 @@ def add(x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
   return jt.triton_call(
       x,
       y,
+      x.size,
       kernel=add_kernel,
       out_shape=out_shape,
       grid=(x.size // block_size,),

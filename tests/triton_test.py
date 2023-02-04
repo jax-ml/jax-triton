@@ -14,18 +14,19 @@
 
 from absl.testing import absltest
 
-import triton
-import triton.language as tl
 import jax
 import jax.numpy as jnp
 import jax_triton as jt
 import numpy as np
+import triton
+import triton.language as tl
 
 
 @triton.jit
 def add_kernel(
     x_ptr,  # *Pointer* to first input vector
     y_ptr,  # *Pointer* to second input vector
+    length,  # Length of input and output vectors.
     output_ptr,  # *Pointer* to output vector
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -39,7 +40,7 @@ def add_kernel(
   block_start = pid * BLOCK_SIZE
   offsets = block_start + tl.arange(0, BLOCK_SIZE)
   # Create a mask to guard memory operations against out-of-bounds accesses
-  mask = offsets < 8
+  mask = offsets < length
   # Load x and y from DRAM, masking out any extra elements in case the input is not a
   # multiple of the block size
   x = tl.load(x_ptr + offsets, mask=mask)
@@ -52,6 +53,7 @@ def add_kernel(
 @triton.jit
 def tanh_kernel(
     x_ptr,  # *Pointer* to first input vector
+    length,  # Length of input and output vectors.
     output_ptr,  # *Pointer* to output vector
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -65,7 +67,7 @@ def tanh_kernel(
   block_start = pid * BLOCK_SIZE
   offsets = block_start + tl.arange(0, BLOCK_SIZE)
   # Create a mask to guard memory operations against out-of-bounds accesses
-  mask = offsets < 8
+  mask = offsets < length
   # Load x and y from DRAM, masking out any extra elements in case the input is not a
   # multiple of the block size
   x = tl.load(x_ptr + offsets, mask=mask)
@@ -82,7 +84,14 @@ class TritonTest(absltest.TestCase):
       out_shape = jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)
       grid = lambda meta: (triton.cdiv(x.size, meta['BLOCK_SIZE']),)
       return jt.triton_call(
-          x, y, kernel=add_kernel, out_shape=out_shape, grid=grid, BLOCK_SIZE=8)
+          x,
+          y,
+          x.size,
+          kernel=add_kernel,
+          out_shape=out_shape,
+          grid=grid,
+          BLOCK_SIZE=8,
+      )
 
     x = jnp.arange(8, dtype=jnp.float32)
     y = jnp.arange(8, dtype=jnp.float32)
@@ -94,7 +103,13 @@ class TritonTest(absltest.TestCase):
       out_shape = jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)
       grid = lambda meta: (triton.cdiv(x.size, meta['BLOCK_SIZE']),)
       return jt.triton_call(
-          x, kernel=tanh_kernel, out_shape=out_shape, grid=grid, BLOCK_SIZE=8)
+          x,
+          x.size,
+          kernel=tanh_kernel,
+          out_shape=out_shape,
+          grid=grid,
+          BLOCK_SIZE=8,
+      )
 
     x = jnp.arange(8, dtype=jnp.float32)
     np.testing.assert_allclose(tanh(x), np.tanh(x))

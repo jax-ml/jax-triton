@@ -44,7 +44,7 @@ import numpy as np
 from triton._C.libtriton import triton as tc
 
 from jax_triton import triton_kernel_call_lib
-from jax_triton.triton_lib import emit_triton_kernel_call, avals_to_layouts
+from jax_triton.triton_lib import avals_to_layouts, normalize_grid
 from jax_triton.pallas import lowering
 from jax_triton.pallas import core as pallas_core
 
@@ -322,17 +322,19 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
       ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
       for out_shape in ctx.avals_out])
   i32_type = ir.IntegerType.get_signless(32)
-  executable = emit_triton_kernel_call(
-      ctx,
-      name,
-      asm,
-      shared_mem,
-      num_warps=num_warps,
-      grid=grid_spec.grid,
-      metaparams={},
-      dump_binary_path=None,
+
+  kernel = triton_kernel_call_lib.TritonKernel(
+      asm["cubin"], name, num_warps, shared_mem
   )
-  ctx.module_context.add_keepalive(executable)
+
+  grid = normalize_grid(grid_spec.grid, metaparams={})
+  # All arguments are buffers.
+  all_args = [None] * (len(in_shapes) + len(out_shapes))
+  kernel_call = triton_kernel_call_lib.TritonKernelCall(
+      kernel, grid[0], grid[1], grid[2], all_args
+  )
+
+  ctx.module_context.add_keepalive(kernel_call)
   output_operand_aliases = ir.ArrayAttr.get([
           mhlo.OutputOperandAlias.get(
               output_tuple_indices=[output],
@@ -345,7 +347,7 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
       in_nodes,
       call_target_name=ir.StringAttr.get("triton_kernel_call"),
       has_side_effect=ir.BoolAttr.get(False),
-      backend_config=ir.StringAttr.get(executable.descriptor),
+      backend_config=ir.StringAttr.get(kernel_call.descriptor),
       api_version=ir.IntegerAttr.get(i32_type, 1),
       called_computations=ir.ArrayAttr.get([]),
       operand_layouts=avals_to_layouts(ctx.avals_in),

@@ -105,11 +105,10 @@ def get_triton_python_ir(aval):
 
 Metaparameters = Any
 ShapeDtypeDuck = Any
+Grid = Union[int, Tuple[int], Tuple[int, int], Tuple[int, int, int]]
+GridOrLambda = Union[Grid, Callable[[Dict[str, Any]], Grid]]
 
-Grid = Union[Tuple[int], Tuple[int, int], Tuple[int, int, int]]
-GridOrLambda = Union[Grid, Callable[[Any], Grid]]
-
-triton_kernel_call_p = jax.core.Primitive('triton_kernel_call')
+triton_kernel_call_p = jax.core.Primitive("triton_kernel_call")
 triton_kernel_call_p.multiple_results = True
 
 triton_kernel_call_p.def_impl(
@@ -132,69 +131,64 @@ def avals_to_layouts(avals):
   return ir.ArrayAttr.get([aval_to_layout(a) for a in avals])
 
 
-def compile_triton_func(
-    avals_in, avals_out, triton_func, num_warps, num_stages, metaparams):
-  metadata = {triton_func.arg_names.index(k): v for k, v in metaparams.items()}
-  all_args = [*avals_in, *avals_out]
-  signature = {i: get_triton_python_ir(a) for i, a in enumerate(all_args)}
+def get_or_create_triton_kernel(
+    ctx,
+    fn,
+    scalar_args,
+    *,
+    num_warps,
+    num_stages,
+    metaparams,
+    dump_binary_path,
+) -> triton_kernel_call_lib.TritonKernel:
+  arg_dtypes = list(map(get_triton_type, ctx.avals_in))
+  for idx, dtype, _ in scalar_args:
+    arg_dtypes.insert(idx, dtype)
+  arg_dtypes.extend(map(get_triton_type, ctx.avals_out))
+  signature = dict(enumerate(arg_dtypes))
+  # TODO(cjfj): cache kernel
+
+  constants = {fn.arg_names.index(k): v for k, v in metaparams.items()}
   # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
   specialization = collections.namedtuple(
-      "instance_descriptor", ["divisible_by_16", "equal_to_1"])(
-          tuple(range(len(all_args))), ())
+      "instance_descriptor", ["divisible_by_16", "equal_to_1"]
+  )(tuple(range(len(arg_dtypes))), ())
   # TODO(sharadmv): handle multiple devices, right now we assume device 0 which
   # is fine when we have multiple of the same GPU but this won't work in
   # general.
   asm, shared_mem, name = tc._compile(
-      triton_func, signature=signature, device=0,
+      fn,
+      signature=signature,
+      device=0,
       specialization=specialization,
-      constants=metadata, num_warps=num_warps,
-      num_stages=num_stages, extern_libs={}, output="cubin")
-  return name, asm, shared_mem
+      constants=constants,
+      num_warps=num_warps,
+      num_stages=num_stages,
+      extern_libs={},
+      output="cubin",
+  )
 
-
-def emit_triton_kernel_call(
-    ctx,
-    name,
-    asm_map,
-    shared_mem,
-    *,
-    dump_binary_path: Optional[str],
-    grid: GridOrLambda,
-    metaparams,
-    num_warps,
-):
   if dump_binary_path is not None:
-    binary = dict(asm=asm_map, shared_mem=shared_mem, name=name)
     with open(dump_binary_path, "wb") as fp:
-      pickle.dump(binary, fp)
+      pickle.dump(dict(asm=asm, shared_mem=shared_mem, name=name), fp)
 
-  # Prefer cubin to PTX, if available.
-  asm = asm_map.get("cubin", asm_map["ptx"])
-
-  if callable(grid):
-    grid = grid(metaparams)
-  grid = list(grid)
-  grid.extend([1] * (3 - len(grid)))  # Fill with `1`s to length 3.
-  grid_0, grid_1, grid_2 = grid
-  arity = len(ctx.avals_in) + len(ctx.avals_out)
-
-  return triton_kernel_call_lib.TritonExecutable(
-      asm, name, arity, grid_0, grid_1, grid_2, num_warps, shared_mem
+  return triton_kernel_call_lib.TritonKernel(
+      asm["cubin"], name, num_warps, shared_mem
   )
 
 
 def triton_kernel_call_lowering(
     ctx,
-    *args,
-    kernel_name,
+    *array_args,
+    fn,
+    scalar_args,
     call_name,
-    asm,
-    shared_mem,
     out_shapes,
-    grid: GridOrLambda,
-    num_warps: int,
-    dump_binary_path: Optional[str],
-    input_output_aliases: Tuple[Tuple[int, int], ...],
+    grid,
+    num_warps,
+    num_stages,
+    dump_binary_path,
+    input_output_aliases,
     **metaparams,
 ):
   if jaxlib.version.__version_info__ < (0, 3, 22) and input_output_aliases:
@@ -204,17 +198,28 @@ def triton_kernel_call_lowering(
       ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
       for out_shape in out_shapes])
   i32_type = ir.IntegerType.get_signless(32)
-  executable = emit_triton_kernel_call(
+
+  kernel = get_or_create_triton_kernel(
       ctx,
-      kernel_name,
-      asm.asm_map,
-      shared_mem,
-      dump_binary_path=dump_binary_path,
+      fn,
+      scalar_args,
       num_warps=num_warps,
-      grid=grid,
+      num_stages=num_stages,
       metaparams=metaparams,
+      dump_binary_path=dump_binary_path,
   )
-  ctx.module_context.add_keepalive(executable)
+
+  # Buffer args are filled in at runtime.
+  all_args = [None] * (len(array_args) + len(scalar_args) + len(out_shapes))
+  for idx, _, value in scalar_args:
+    all_args[idx] = value
+
+  kernel_call = triton_kernel_call_lib.TritonKernelCall(
+      kernel, grid[0], grid[1], grid[2], all_args
+  )
+
+  ctx.module_context.add_keepalive(kernel_call)
+
   output_operand_aliases = ir.ArrayAttr.get(
       [
           mhlo.OutputOperandAlias.get(
@@ -225,12 +230,13 @@ def triton_kernel_call_lowering(
           for input, output in input_output_aliases
       ]
   )
+
   out = mhlo.CustomCallOp(
       [out_type],
-      args,
+      array_args,
       call_target_name=ir.StringAttr.get(call_name),
       has_side_effect=ir.BoolAttr.get(False),
-      backend_config=ir.StringAttr.get(executable.descriptor),
+      backend_config=ir.StringAttr.get(kernel_call.descriptor),
       api_version=ir.IntegerAttr.get(i32_type, 1),
       called_computations=ir.ArrayAttr.get([]),
       operand_layouts=avals_to_layouts(ctx.avals_in),
@@ -244,10 +250,6 @@ def triton_kernel_call_lowering(
 
 mlir.register_lowering(triton_kernel_call_p, triton_kernel_call_lowering)
 
-class Asm:
-  """Hides the huge ASM dict from showing up in Jaxprs."""
-  def __init__(self, asm_map):
-    self.asm_map = asm_map
 
 class ShapeDtype(Protocol):
 
@@ -259,40 +261,32 @@ class ShapeDtype(Protocol):
   def dtype(self) -> np.dtype:
     ...
 
-def triton_call(*args: Array, kernel: triton.JITFunction,
-                out_shape: Union[ShapeDtype, Sequence[ShapeDtype]],
-                grid: Union[int, GridOrLambda],
-                call_name: str = "triton_kernel_call",
-                num_warps: int = 4, num_stages: int = 2,
-                dump_binary_path: Optional[str] = None,
-                input_output_aliases: Dict[int, int] = {},
-                **metaparams: Any):
+
+def normalize_grid(grid: GridOrLambda, metaparams) -> Tuple[int, int, int]:
+  if callable(grid):
+    grid = grid(metaparams)
+  if isinstance(grid, int):
+    grid = (grid,)
+  elif len(grid) > 3:
+    raise ValueError("`grid` should have three or fewer dimensions.")
+  return tuple(grid) + (1,) * (3 - len(grid))
+
+
+def triton_call(
+    *args: Union[Array, bool, int, float],
+    kernel: triton.JITFunction,
+    out_shape: Union[ShapeDtype, Sequence[ShapeDtype]],
+    grid: GridOrLambda,
+    call_name: str = "triton_kernel_call",
+    num_warps: int = 4,
+    num_stages: int = 2,
+    dump_binary_path: Optional[str] = None,
+    input_output_aliases: Optional[Dict[int, int]] = None,
+    **metaparams: Any,
+):
   """Calls a Triton kernel with `jax.Array` arguments.
 
-  Args:
-    *args: `jax.Array`-valued inputs for the Triton kernel.
-    kernel: A Triton kernel (e.g. a function decorated with `triton.jit`). The
-      Triton kernel cannot take in scalar-valued arguments and all static values
-      should be annotated with `triton.language.constexpr`.
-    out_shape: A `jax.ShapeDtypeStruct` (or something that has `.shape` and
-      `.dtype` attributes) or a sequence thereof that specify the output(s) of
-      the kernel. Pointers for each of the `jax.ShapeDtypeStruct`s in `out_shape`
-      will be passed into `kernel` following the pointers corresponding to the
-      inputs.
-    grid: An integer, tuple of up to 3 integers, or a function that returns a
-      tuple of up to 3 integers. When `grid` is an integer, `kernel` is
-      invocated in `grid`-many parallel executions. When `grid` is a sequence of
-      integers, `kernel` is launched in a `prod(grid)`-many parallel execution.
-      When `grid` is a function, it is passed `**metaparams` and should return a
-      tuple of up to 3 integers.
-    input_output_aliases: A dictionary mapping input argument indices to output
-      indices. Providing a mapping will alias the corresponding buffers.
-    num_warps: The number of warps used to execute the Triton kernel.
-    num_stages: The number of stages emitted by the Triton compiler.
-    **metaparams: Additional keyword arguments that will be provided to a `grid`
-      (if it is a function) and to the Triton kernel as `constexpr` arguments.
-
-  ## Example usage
+  Example usage:
 
   First we define a simple kernel that adds two vectors.
 
@@ -307,7 +301,6 @@ def triton_call(*args: Array, kernel: triton.JITFunction,
       output_ptr,
       block_size: tl.constexpr,
   ):
-    \"\"\"Adds two vectors.\"\"\"
     pid = tl.program_id(axis=0)
     block_start = pid * block_size
     offsets = block_start + tl.arange(0, block_size)
@@ -341,6 +334,30 @@ def triton_call(*args: Array, kernel: triton.JITFunction,
   print(add(x_val, y_val))
   print(jax.jit(add)(x_val, y_val))
   ```
+
+  Args:
+    *args: Inputs for the Triton kernel.
+    kernel: A Triton kernel (e.g. a function decorated with `triton.jit`). All
+      static values should be annotated with `triton.language.constexpr`.
+    out_shape: A `jax.ShapeDtypeStruct` (or something that has `.shape` and
+      `.dtype` attributes) or a sequence thereof that specify the output(s) of
+      the kernel. Pointers for each of the `jax.ShapeDtypeStruct`s in
+      `out_shape` will be passed into `kernel` following the input parameters.
+    grid: An integer, tuple of up to 3 integers, or a function that returns a
+      tuple of up to 3 integers. When `grid` is an integer, `kernel` is
+      invocated in `grid`-many parallel executions. When `grid` is a sequence of
+      integers, `kernel` is launched in a `prod(grid)`-many parallel execution.
+      When `grid` is a function, it is passed `**metaparams` and should return a
+      tuple of up to 3 integers.
+    input_output_aliases: A dictionary mapping input argument indices to output
+      indices. Providing a mapping will alias the corresponding buffers.
+    num_warps: The number of warps used to execute the Triton kernel.
+    num_stages: The number of stages emitted by the Triton compiler.
+    **metaparams: Additional keyword arguments that will be provided to a `grid`
+      (if it is a function) and to the Triton kernel as `constexpr` arguments.
+
+  Returns:
+    Outputs from the Trion kernel.
   """
   if not CAN_USE_TRITON:
     raise ValueError(
@@ -349,28 +366,35 @@ def triton_call(*args: Array, kernel: triton.JITFunction,
   xc.register_custom_call_target(
       call_name, triton_kernel_call_lib.get_custom_call(), platform="CUDA"
   )
-  if isinstance(grid, int):
-    grid = (grid,)
   out_shape = tree_util.tree_map(
       lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), out_shape)
-  flat_args, in_tree = tree_util.tree_flatten(args)
-  del in_tree
+  flat_args, _ = tree_util.tree_flatten(args)
   # TODO(sharadmv): check in_tree is flat (no Pytrees allowed in triton_call)
   flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
-  avals_in = [core.raise_to_shaped(core.get_aval(a)) for a in flat_args]
-  avals_out = [core.ShapedArray(a.shape, a.dtype) for a in flat_out_shapes]
-  kernel_name, asm_map, shared_mem = compile_triton_func(
-      avals_in, avals_out, kernel, num_warps, num_stages, metaparams
-  )
-  asm = Asm(asm_map)
+
+  array_args = []
+  scalar_args = []
+  for i, arg in enumerate(flat_args):
+    if isinstance(arg, (bool, int, float)):
+      dtype = get_triton_type(arg)
+      scalar_args.append((
+          i,
+          dtype,
+          triton_kernel_call_lib.encode_kernel_parameter(arg, dtype),
+      ))
+    else:
+      array_args.append(arg)
+
+  if input_output_aliases is None:
+    input_output_aliases = {}
+
   out_flat = triton_kernel_call_p.bind(
-      *flat_args,
-      kernel_name=kernel_name,
+      *array_args,
+      fn=kernel,
+      scalar_args=tuple(scalar_args),
       call_name=call_name,
-      asm=asm,
-      shared_mem=shared_mem,
       out_shapes=tuple(flat_out_shapes),
-      grid=grid,
+      grid=normalize_grid(grid, metaparams),
       num_warps=num_warps,
       num_stages=num_stages,
       dump_binary_path=dump_binary_path,
