@@ -646,7 +646,7 @@ def _for_lowering_rule(ctx: TritonLoweringRuleContext, *args, jaxpr,
   should_discharge = [not isinstance(a, ShapedArrayRef) for a in ctx.avals_in]
   loop_counter = ctx.builder.create_phi(tl.int32.to_ir(ctx.builder), 2)
   ref_avals = [v.aval for v in jaxpr.invars][1:]
-  read_only = [for_loop._is_read_only(eff) for eff in
+  read_only = [for_loop._is_read_only(eff) if eff else True for eff in
                state.get_ref_state_effects(ref_avals, jaxpr.effects)]
   lowering_args = []
   for arg, sd, ro in zip(args, should_discharge, read_only):
