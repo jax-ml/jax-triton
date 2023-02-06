@@ -52,30 +52,28 @@ map, unsafe_map = util.safe_map, map
 zip, unsafe_zip = util.safe_zip, zip
 
 
+_JAX_TO_TRITON_TYPE_MAP = {
+    jnp.dtype("bfloat16"): "bf16",
+    jnp.dtype("float64"): "fp64",
+    jnp.dtype("float32"): "fp32",
+    jnp.dtype("float16"): "fp16",
+    # Triton has 'fp8' as well which Jax doesn't support yet.
+    jnp.dtype("int64"): "i64",
+    jnp.dtype("int32"): "i32",
+    jnp.dtype("int16"): "i16",
+    jnp.dtype("int8"): "i8",
+    jnp.dtype("uint64"): "u64",
+    jnp.dtype("uint32"): "u32",
+    jnp.dtype("uint16"): "u16",
+    jnp.dtype("uint8"): "u8",
+    # Triton defines a 'B' type, which is an alias for both i1 and bool.
+    jnp.dtype("bool"): "B",
+}
+
+
 def get_triton_type(obj: Any) -> str:
-  type_map = {
-      jnp.dtype("bfloat16"): "bf16",
-      jnp.dtype("float64"): "fp64",
-      jnp.dtype("float32"): "fp32",
-      jnp.dtype("float16"): "fp16",
-      # Triton has 'fp8' as well which Jax doesn't support yet.
-
-      jnp.dtype("int64"): "i64",
-      jnp.dtype("int32"): "i32",
-      jnp.dtype("int16"): "i16",
-      jnp.dtype("int8"): "i8",
-
-      jnp.dtype("uint64"): "u64",
-      jnp.dtype("uint32"): "u32",
-      jnp.dtype("uint16"): "u16",
-      jnp.dtype("uint8"): "u8",
-
-      # Triton defines a 'B' type, which is an alias for both i1 and bool.
-      jnp.dtype("bool"): "B",
-  }
-
   if isinstance(obj, (jax.core.ShapedArray, state.ShapedArrayRef)):
-    return f"*{type_map[obj.dtype]}"
+    return f"*{_JAX_TO_TRITON_TYPE_MAP[obj.dtype]}"
   if isinstance(obj, tl.constexpr):
     obj = obj.value
   if isinstance(obj, int):
@@ -100,19 +98,14 @@ def get_triton_type(obj: Any) -> str:
   )
 
 
-def get_triton_python_ir(aval):
-  return get_triton_type(aval)
-
-Metaparameters = Any
-ShapeDtypeDuck = Any
 Grid = Union[int, Tuple[int], Tuple[int, int], Tuple[int, int, int]]
 GridOrLambda = Union[Grid, Callable[[Dict[str, Any]], Grid]]
 
 triton_kernel_call_p = jax.core.Primitive("triton_kernel_call")
 triton_kernel_call_p.multiple_results = True
-
 triton_kernel_call_p.def_impl(
     functools.partial(xla.apply_primitive, triton_kernel_call_p))
+
 
 @triton_kernel_call_p.def_abstract_eval
 def triton_kernel_call_abstract_eval(*_, out_shapes, **__):
@@ -194,9 +187,15 @@ def triton_kernel_call_lowering(
   if jaxlib.version.__version_info__ < (0, 3, 22) and input_output_aliases:
     raise NotImplementedError(
         "`input_output_aliases` only supported on `jaxlib>=0.3.22")
-  out_type = ir.TupleType.get_tuple([
-      ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
-      for out_shape in out_shapes])
+
+  out_type = ir.TupleType.get_tuple(
+      [
+          ir.RankedTensorType.get(
+              shape.shape, mlir.dtype_to_ir_type(shape.dtype)
+          )
+          for shape in out_shapes
+      ]
+  )
   i32_type = ir.IntegerType.get_signless(32)
 
   kernel = get_or_create_triton_kernel(

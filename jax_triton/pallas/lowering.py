@@ -33,7 +33,7 @@ from jax._src import state
 from jax._src.state import primitives as sp
 from jax._src.state import discharge
 from jax._src.state import ShapedArrayRef
-from jax_triton.triton_lib import get_triton_python_ir
+from jax_triton.triton_lib import get_triton_type
 import jax.numpy as jnp
 import triton
 import triton.language as tl
@@ -105,7 +105,7 @@ def lower_jaxpr_to_triton_module(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: Gr
   module = tl_ir.module("", builder)
 
   in_avals = [var.aval for var in jaxpr.invars]
-  triton_types = [get_triton_python_ir(x) for x in in_avals]
+  triton_types = [get_triton_type(x) for x in in_avals]
   arg_types = [triton.compiler.str_to_ty(arg) for arg in triton_types]
   assert len(jaxpr.outvars) == 0
   ret_type = tl.void
