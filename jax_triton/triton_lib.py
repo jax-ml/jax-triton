@@ -18,6 +18,7 @@ import functools
 import math
 import os
 import pickle
+import weakref
 
 from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple, Union
 
@@ -124,6 +125,11 @@ def avals_to_layouts(avals):
   return ir.ArrayAttr.get([aval_to_layout(a) for a in avals])
 
 
+# Compiled kernels are kept alive by the kernel call which, in turn, are kept
+# alive by the jitted JAX function.
+_COMPILED_KERNEL_CACHE = weakref.WeakValueDictionary()
+
+
 def get_or_create_triton_kernel(
     ctx,
     fn,
@@ -139,35 +145,50 @@ def get_or_create_triton_kernel(
     arg_dtypes.insert(idx, dtype)
   arg_dtypes.extend(map(get_triton_type, ctx.avals_out))
   signature = dict(enumerate(arg_dtypes))
-  # TODO(cjfj): cache kernel
 
   constants = {fn.arg_names.index(k): v for k, v in metaparams.items()}
   # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
   specialization = collections.namedtuple(
       "instance_descriptor", ["divisible_by_16", "equal_to_1"]
   )(tuple(range(len(arg_dtypes))), ())
-  # TODO(sharadmv): handle multiple devices, right now we assume device 0 which
-  # is fine when we have multiple of the same GPU but this won't work in
-  # general.
-  asm, shared_mem, name = tc._compile(
+
+  # Cache key should contain any parameter that can affect the compiler output.
+  cache_key = (
       fn,
-      signature=signature,
-      device=0,
-      specialization=specialization,
-      constants=constants,
-      num_warps=num_warps,
-      num_stages=num_stages,
-      extern_libs={},
-      output="cubin",
+      tuple(arg_dtypes),
+      tuple(metaparams.items()),
+      specialization,
+      num_warps,
+      num_stages,
   )
+  kernel = _COMPILED_KERNEL_CACHE.get(cache_key)
 
-  if dump_binary_path is not None:
-    with open(dump_binary_path, "wb") as fp:
-      pickle.dump(dict(asm=asm, shared_mem=shared_mem, name=name), fp)
+  if kernel is None:
+    # TODO(sharadmv): handle multiple devices, right now we assume device 0
+    # which is fine when we have multiple of the same GPU but this won't work in
+    # general.
+    asm, shared_mem, name = tc._compile(
+        fn,
+        signature=signature,
+        device=0,
+        specialization=specialization,
+        constants=constants,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        extern_libs={},
+        output="cubin",
+    )
 
-  return triton_kernel_call_lib.TritonKernel(
-      asm["cubin"], name, num_warps, shared_mem
-  )
+    if dump_binary_path is not None:
+      with open(dump_binary_path, "wb") as fp:
+        pickle.dump(dict(asm=asm, shared_mem=shared_mem, name=name), fp)
+
+    kernel = triton_kernel_call_lib.TritonKernel(
+        asm["cubin"], name, num_warps, shared_mem
+    )
+    _COMPILED_KERNEL_CACHE[cache_key] = kernel
+
+  return kernel
 
 
 def triton_kernel_call_lowering(

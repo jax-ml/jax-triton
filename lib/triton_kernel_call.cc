@@ -134,10 +134,10 @@ class TritonKernel {
 
 class TritonKernelCall {
  public:
-  TritonKernelCall(std::shared_ptr<TritonKernel> kernel, uint32_t grid_0,
-                   uint32_t grid_1, uint32_t grid_2,
+  TritonKernelCall(TritonKernel& kernel, uint32_t grid_0, uint32_t grid_1,
+                   uint32_t grid_2,
                    std::vector<std::optional<uint64_t>> parameters)
-      : kernel_(std::move(kernel)),
+      : kernel_(kernel),
         grid_{grid_0, grid_1, grid_2},
         parameters_(std::move(parameters)) {}
 
@@ -152,11 +152,11 @@ class TritonKernelCall {
       }
     }
 
-    kernel_->Launch(stream, grid_, params.data());
+    kernel_.Launch(stream, grid_, params.data());
   }
 
  private:
-  std::shared_ptr<TritonKernel> kernel_;
+  TritonKernel& kernel_;
   uint32_t grid_[3];
   // Parameter values. `nullopt` values represent buffer arguments.
   std::vector<std::optional<uint64_t>> parameters_;
@@ -225,12 +225,13 @@ void LaunchTritonKernel(CUstream stream, void** buffers, char* opaque,
 }
 
 PYBIND11_MODULE(triton_kernel_call_lib, m) {
-  py::class_<TritonKernel, std::shared_ptr<TritonKernel>>(m, "TritonKernel")
+  py::class_<TritonKernel>(m, "TritonKernel")
       .def(py::init<std::string, std::string, uint32_t, uint32_t>());
 
   py::class_<TritonKernelCall>(m, "TritonKernelCall")
-      .def(py::init<std::shared_ptr<TritonKernel>, uint32_t, uint32_t, uint32_t,
-                    std::vector<std::optional<uint64_t>>>())
+      .def(py::init<TritonKernel&, uint32_t, uint32_t, uint32_t,
+                    std::vector<std::optional<uint64_t>>>(),
+           py::keep_alive<1, 2>())  // Ensure that the kernel lives long enough.
       .def_property_readonly("descriptor", [](TritonKernelCall& kernel_call) {
         union {
           TritonKernelCall* ptr;

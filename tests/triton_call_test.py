@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -251,6 +252,30 @@ class TritonKernelCallTest(parameterized.TestCase):
     )
     expected = x + 1
     np.testing.assert_allclose(out, expected)
+
+  def test_compilation_cache(self):
+    fn1 = jax.jit(lambda x, y: add(x, y, block_size=32))
+    fn2 = jax.jit(lambda x, y: add(x, y, block_size=32))
+    fn3 = jax.jit(lambda x, y: add(x, y, block_size=64))
+
+    x1, y1 = create_random_inputs([42])
+    x2, y2 = create_random_inputs([43])
+
+    triton_compile_fn = triton.compiler._compile
+
+    call_count = [0]
+
+    def my_triton_compile(*args, **kwargs):
+      call_count[0] += 1
+      return triton_compile_fn(*args, **kwargs)
+
+    with mock.patch.object(triton.compiler, "_compile", new=my_triton_compile):
+      _ = fn1(x1, y1)
+      self.assertEqual(call_count[0], 1)
+      _ = fn2(x2, y2)
+      self.assertEqual(call_count[0], 1)  # Second call hits the cache.
+      _ = fn3(x1, y1)
+      self.assertEqual(call_count[0], 2)  # Third call misses (block size).
 
 
 if __name__ == "__main__":
