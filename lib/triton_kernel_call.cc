@@ -63,7 +63,9 @@ class TritonKernel {
         shared_mem_bytes_(shared_mem_bytes) {}
 
   void Launch(CUstream stream, uint32_t grid[3], void** params) {
-    CUfunction kernel = GetFunctionForCurrentCudaContext();
+    CUcontext context;
+    CHECK_CUDA(cuStreamGetCtx(stream, &context));
+    CUfunction kernel = GetFunctionForContext(context);
     CHECK_CUDA(cuLaunchKernel(kernel, grid[0], grid[1], grid[2], block_dim_x_,
                               /*blockDimY=*/1, /*blockDimZ=*/1,
                               shared_mem_bytes_, stream, params,
@@ -71,19 +73,18 @@ class TritonKernel {
   }
 
  private:
-  CUfunction GetFunctionForCurrentCudaContext() {
-    CUcontext context;
-    CHECK_CUDA(cuCtxGetCurrent(&context));
-
+  CUfunction GetFunctionForContext(CUcontext context) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = functions_.find(context);
     if (it != functions_.end()) {
       return it->second;
     }
 
+    CHECK_CUDA(cuCtxPushCurrent(context));
     CUmodule module;
     CHECK_CUDA(cuModuleLoadData(&module, module_image_.c_str()));
     modules_.push_back(OwnedCUmodule(module, CuModuleDeleter()));
+    CHECK_CUDA(cuCtxPopCurrent(nullptr));
 
     CUfunction function;
     CHECK_CUDA(cuModuleGetFunction(&function, module, kernel_name_.c_str()));
