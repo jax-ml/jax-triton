@@ -30,5 +30,7 @@ setup(
             library_dirs=[
                 "/usr/local/cuda/lib64", "/usr/local/cuda/lib64/stubs"
             ],
+            language="c++",
+            extra_compile_args=['-std=c++17', '-v'],
         )
     ])

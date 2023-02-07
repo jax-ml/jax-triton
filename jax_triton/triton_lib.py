@@ -363,7 +363,7 @@ def triton_call(
     dump_binary_path: Optional[str] = None,
     input_output_aliases: Optional[Dict[int, int]] = None,
     **metaparams: Any,
-):
+) -> Any:
   """Calls a Triton kernel with `jax.Array` arguments.
 
   Example usage:

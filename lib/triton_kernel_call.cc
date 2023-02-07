@@ -17,6 +17,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
