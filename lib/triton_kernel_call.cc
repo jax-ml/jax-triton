@@ -15,11 +15,13 @@
 #include <cassert>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 #include "cuda.h"
@@ -133,7 +135,12 @@ class TritonKernel {
   std::unordered_map<CUcontext, CUfunction> functions_;
 };
 
-class TritonKernelCall {
+struct TritonKernelCallBase {
+  virtual ~TritonKernelCallBase() = default;
+  virtual void Launch(CUstream stream, void** buffers) = 0;
+};
+
+class TritonKernelCall : public TritonKernelCallBase {
  public:
   TritonKernelCall(TritonKernel& kernel, uint32_t grid_0, uint32_t grid_1,
                    uint32_t grid_2,
@@ -142,7 +149,7 @@ class TritonKernelCall {
         grid_{grid_0, grid_1, grid_2},
         parameters_(std::move(parameters)) {}
 
-  void Launch(CUstream stream, void** buffers) {
+  void Launch(CUstream stream, void** buffers) override final {
     std::vector<void*> params;
     params.reserve(parameters_.size());
     for (std::optional<uint64_t>& param : parameters_) {
@@ -161,6 +168,87 @@ class TritonKernelCall {
   uint32_t grid_[3];
   // Parameter values. `nullopt` values represent buffer arguments.
   std::vector<std::optional<uint64_t>> parameters_;
+};
+
+class TritonAutotunedKernelCall : public TritonKernelCallBase {
+ public:
+  struct Config {
+    py::object kernel_call;
+    std::string description;
+  };
+
+  TritonAutotunedKernelCall(std::string name, std::vector<Config> configs)
+      : name_(name), configs_(configs) {}
+
+  void Launch(CUstream stream, void** buffers) override {
+    if (configs_.size() > 1) {
+      std::cerr << "Autotuning function: " << name_ << std::endl;
+      // First run a single iteration of each to config to determine how many
+      // iterations to run for benchmarking.
+      float best = std::numeric_limits<float>::infinity();
+      for (Config& config : configs_) {
+        auto& kernel_call = py::cast<TritonKernelCall&>(config.kernel_call);
+        float t = Benchmark(stream, kernel_call, buffers, 1);
+        std::cerr << config.description << ", ran 1 iter in " << t << " ms"
+                  << std::endl;
+        best = std::min(best, t);
+      }
+
+      int timed_iters =
+          std::max(static_cast<int>(kBenchmarkTimeMillis / best), 1);
+      std::cerr << "Benchmarking with " << timed_iters
+                << " iters (target time: " << kBenchmarkTimeMillis << " ms)"
+                << std::endl;
+
+      best = std::numeric_limits<float>::infinity();
+      for (Config& config : configs_) {
+        auto& kernel_call = py::cast<TritonKernelCall&>(config.kernel_call);
+        float t = Benchmark(stream, kernel_call, buffers, timed_iters);
+        std::cerr << config.description << ", ran " << timed_iters
+                  << " iters in " << t << " ms" << std::endl;
+
+        if (t < best) {
+          std::cerr << config.description << " is the new best config"
+                    << std::endl;
+          best = t;
+          std::swap(config, configs_[0]);
+        }
+      }
+
+      // Discard all but the best config.
+      py::gil_scoped_acquire gil;
+      configs_.erase(configs_.begin() + 1, configs_.end());
+    }
+
+    auto& kernel_call = py::cast<TritonKernelCall&>(configs_[0].kernel_call);
+    kernel_call.Launch(stream, buffers);
+  }
+
+ private:
+  static constexpr float kBenchmarkTimeMillis = 100.;
+
+  float Benchmark(CUstream stream, TritonKernelCall& kernel_call,
+                  void** buffers, int num_iterations) {
+    CUevent start, stop;
+    CHECK_CUDA(cuEventCreate(&start, /*Flags=*/CU_EVENT_DEFAULT));
+    CHECK_CUDA(cuEventCreate(&stop, /*Flags=*/CU_EVENT_DEFAULT));
+    kernel_call.Launch(stream, buffers);  // Warm-up iteration.
+    CHECK_CUDA(cuEventRecord(start, stream));
+    for (int i = 0; i < num_iterations; ++i) {
+      kernel_call.Launch(stream, buffers);
+    }
+    CHECK_CUDA(cuEventRecord(stop, stream));
+    CHECK_CUDA(cuEventSynchronize(stop));
+    float elapsed_ms;
+    CHECK_CUDA(cuEventElapsedTime(&elapsed_ms, start, stop));
+    CHECK_CUDA(cuEventDestroy(start));
+    CHECK_CUDA(cuEventDestroy(stop));
+    return elapsed_ms;
+  }
+
+  std::string name_;
+  // After auto-tuning, all configurations, except the best, will be discarded.
+  std::vector<Config> configs_;
 };
 
 template <typename CppT, typename PyT>
@@ -219,9 +307,9 @@ uint64_t EncodeKernelParameter(py::bool_ value, std::string_view dtype) {
 
 void LaunchTritonKernel(CUstream stream, void** buffers, char* opaque,
                         size_t opaque_len) {
-  assert(opaque_len == sizeof(TritonKernelCall*));
-  TritonKernelCall* kernel_call;
-  std::memcpy(&kernel_call, opaque, sizeof(TritonKernelCall*));
+  assert(opaque_len == sizeof(TritonKernelCallBase*));
+  TritonKernelCallBase* kernel_call;
+  std::memcpy(&kernel_call, opaque, sizeof(TritonKernelCallBase*));
   kernel_call->Launch(stream, buffers);
 }
 
@@ -241,6 +329,29 @@ PYBIND11_MODULE(triton_kernel_call_lib, m) {
         descriptor.ptr = &kernel_call;
         return py::bytes(descriptor.bytes, sizeof(TritonKernelCall*));
       });
+
+  py::class_<TritonAutotunedKernelCall>(m, "TritonAutotunedKernelCall")
+      .def(py::init<>([](std::string name,
+                         std::vector<std::pair<py::object, std::string>>
+                             calls_and_descriptions) {
+        std::vector<TritonAutotunedKernelCall::Config> configs;
+        configs.reserve(calls_and_descriptions.size());
+        for (auto& [kernel_call, desc] : calls_and_descriptions) {
+          configs.push_back({std::move(kernel_call), std::move(desc)});
+        }
+        return std::make_unique<TritonAutotunedKernelCall>(std::move(name),
+                                                           std::move(configs));
+      }))
+      .def_property_readonly(
+          "descriptor", [](TritonAutotunedKernelCall& kernel_call) {
+            union {
+              TritonAutotunedKernelCall* ptr;
+              char bytes[sizeof(TritonAutotunedKernelCall*)];
+            } descriptor;
+            descriptor.ptr = &kernel_call;
+            return py::bytes(descriptor.bytes,
+                             sizeof(TritonAutotunedKernelCall*));
+          });
 
   m.def("get_custom_call", [] {
     return py::capsule(reinterpret_cast<void*>(&LaunchTritonKernel),

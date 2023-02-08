@@ -277,6 +277,29 @@ class TritonKernelCallTest(parameterized.TestCase):
       _ = fn3(x1, y1)
       self.assertEqual(call_count[0], 2)  # Third call misses (block size).
 
+  def test_autotune(self):
+    autotune_configs = [
+        triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
+        triton.Config({"BLOCK_SIZE": 64}, num_warps=1),
+        triton.Config({"BLOCK_SIZE": 64}, num_warps=2),
+    ]
+
+    autotuned_add_kernel = triton.autotune(
+        autotune_configs, key=("n_elements",)
+    )(add_kernel)
+
+    x, y = create_random_inputs([1024])
+    out = jt.triton_call(
+        x,
+        y,
+        x.size,
+        kernel=autotuned_add_kernel,
+        out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+        grid=lambda meta: triton.cdiv(x.size, meta["BLOCK_SIZE"]),
+    )
+    expected = x + y
+    np.testing.assert_allclose(out, expected)
+
 
 if __name__ == "__main__":
   os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"

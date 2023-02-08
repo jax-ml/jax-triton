@@ -22,6 +22,7 @@ import weakref
 
 from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple, Union
 
+from absl import logging
 import jax
 import jaxlib
 from jax import tree_util
@@ -133,7 +134,7 @@ _COMPILED_KERNEL_CACHE = weakref.WeakValueDictionary()
 def get_or_create_triton_kernel(
     ctx,
     fn,
-    scalar_args,
+    scalar_arg_dtypes,
     *,
     num_warps,
     num_stages,
@@ -141,7 +142,7 @@ def get_or_create_triton_kernel(
     dump_binary_path,
 ) -> triton_kernel_call_lib.TritonKernel:
   arg_dtypes = list(map(get_triton_type, ctx.avals_in))
-  for idx, dtype, _ in scalar_args:
+  for idx, dtype in scalar_arg_dtypes:
     arg_dtypes.insert(idx, dtype)
   arg_dtypes.extend(map(get_triton_type, ctx.avals_out))
   signature = dict(enumerate(arg_dtypes))
@@ -191,6 +192,9 @@ def get_or_create_triton_kernel(
   return kernel
 
 
+_KERNEL_CALL_CACHE = weakref.WeakValueDictionary()
+
+
 def triton_kernel_call_lowering(
     ctx,
     *array_args,
@@ -219,24 +223,80 @@ def triton_kernel_call_lowering(
   )
   i32_type = ir.IntegerType.get_signless(32)
 
-  kernel = get_or_create_triton_kernel(
-      ctx,
-      fn,
-      scalar_args,
-      num_warps=num_warps,
-      num_stages=num_stages,
-      metaparams=metaparams,
-      dump_binary_path=dump_binary_path,
-  )
-
+  scalar_arg_dtypes = []
   # Buffer args are filled in at runtime.
-  all_args = [None] * (len(array_args) + len(scalar_args) + len(out_shapes))
-  for idx, _, value in scalar_args:
-    all_args[idx] = value
+  encoded_args = [None] * (len(array_args) + len(scalar_args) + len(out_shapes))
+  for idx, dtype, v in scalar_args:
+    scalar_arg_dtypes.append((idx, dtype))
+    encoded_args[idx] = triton_kernel_call_lib.encode_kernel_parameter(v, dtype)
 
-  kernel_call = triton_kernel_call_lib.TritonKernelCall(
-      kernel, grid[0], grid[1], grid[2], all_args
-  )
+  if isinstance(fn, triton.runtime.autotuner.Autotuner):
+    if any(idx not in fn.key_idx for idx, _ in scalar_arg_dtypes):
+      logging.warning(
+          "Auto-tuning key does not include all scalar arguments. "
+          "We may perform redundant auto-tuning."
+      )
+
+    # If any metaparams have been specified explicitly, we prune any configs
+    # that conflict. Note that this is more permissive than Triton's autotuner
+    # implementation, which will throw an error if any keys match.
+    # TODO(cjfj): Prune explicit `num_warps` / `num_stages`.
+    prev_early_config_prune_fn = fn.early_config_prune
+
+    def prune_configs(configs, named_args):
+      pruned_configs = []
+      for config in configs:
+        if all(config.kwargs.get(k, v) == v for k, v in metaparams.items()):
+          pruned_configs.append(config)
+      if prev_early_config_prune_fn is not None:
+        pruned_configs = prev_early_config_prune_fn(pruned_configs, named_args)
+      return pruned_configs
+
+    fn.early_config_prune = prune_configs
+    named_scalar_args = {fn.arg_names[idx]: v for idx, _, v in scalar_args}
+    fn.nargs = {name: named_scalar_args.get(name) for name in fn.arg_names}
+    configs = fn.prune_configs(metaparams)
+    fn = fn.fn
+  elif isinstance(fn, triton.JITFunction):
+    configs = [triton.Config({}, num_warps=num_warps, num_stages=num_stages)]
+  else:
+    raise ValueError("`kernel` must be a `JITFunction` or `Autotuner`.")
+
+  # Cache auto-tuned calls with the same parameters, so the auto-tuning need
+  # only be performed once.
+  cache_key = (fn, tuple(configs), tuple(encoded_args))
+  kernel_call = _KERNEL_CALL_CACHE.get(cache_key)
+
+  if kernel_call is None:
+    kernel_calls = []
+    for config in configs:
+      config_metaparams = metaparams.copy()
+      config_metaparams.update(config.kwargs)
+      kernel = get_or_create_triton_kernel(
+          ctx,
+          fn,
+          scalar_arg_dtypes,
+          num_warps=config.num_warps,
+          num_stages=config.num_stages,
+          metaparams=config_metaparams,
+          dump_binary_path=dump_binary_path,
+      )
+      grid = normalize_grid(grid, config_metaparams)
+      kernel_calls.append(
+          triton_kernel_call_lib.TritonKernelCall(
+              kernel, grid[0], grid[1], grid[2], encoded_args
+          )
+      )
+
+    if len(kernel_calls) > 1:
+      kernel_call = triton_kernel_call_lib.TritonAutotunedKernelCall(
+          f"{fn.fn.__name__} ({call_name=}) {named_scalar_args}",
+          [(call, str(config)) for call, config in zip(kernel_calls, configs)],
+      )
+    else:
+      kernel_call = kernel_calls[0]
+
+    _KERNEL_CALL_CACHE[cache_key] = kernel_call
 
   ctx.module_context.add_keepalive(kernel_call)
 
@@ -396,12 +456,7 @@ def triton_call(
   scalar_args = []
   for i, arg in enumerate(flat_args):
     if isinstance(arg, (bool, int, float)):
-      dtype = get_triton_type(arg)
-      scalar_args.append((
-          i,
-          dtype,
-          triton_kernel_call_lib.encode_kernel_parameter(arg, dtype),
-      ))
+      scalar_args.append((i, get_triton_type(arg), arg))
     else:
       array_args.append(arg)
 
@@ -414,7 +469,7 @@ def triton_call(
       scalar_args=tuple(scalar_args),
       call_name=call_name,
       out_shapes=tuple(flat_out_shapes),
-      grid=normalize_grid(grid, metaparams),
+      grid=grid,
       num_warps=num_warps,
       num_stages=num_stages,
       dump_binary_path=dump_binary_path,
