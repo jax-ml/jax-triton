@@ -448,7 +448,9 @@ def pallas_call(f: Callable, out_shape: Any, *, debug: bool = False,
       else:
         flat_in_specs, in_block_tree = tree_util.tree_flatten(tuple(in_specs))
         if in_block_tree != in_tree:
-          raise ValueError("Pytree specs for arguments and `in_specs` must match.")
+          raise ValueError(
+              "Pytree specs for arguments and `in_specs` must match: "
+              f"{in_tree} vs. {in_block_tree}")
       if out_specs is None:
         flat_out_specs = [None for arg in flat_out_shapes]
       else:
