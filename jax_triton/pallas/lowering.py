@@ -85,6 +85,7 @@ class TritonLoweringResult:
   ir_context: tl_ir.context
   module: tl_ir.module
   builder: tl_ir.builder
+  grid: Tuple[int, ...]
 
 def _eval_index_map(ctx: TritonModuleContext, idx, block_mapping: Optional[BlockMapping]):
   if block_mapping is None:
@@ -96,6 +97,26 @@ def _eval_index_map(ctx: TritonModuleContext, idx, block_mapping: Optional[Block
       for i, b in zip(block_indices, block_mapping.block_shape))
 
 triton_lowering_rules = {}
+
+def _process_grid_to_3d_grid(builder, grid_spec: GridSpec):
+  if len(grid_spec.grid) <= 3:
+    program_ids = [tl.program_id(axis=i, _builder=builder)
+                   for i in range(len(grid_spec.grid))]
+    return grid_spec.grid, program_ids
+  grid_prefix = grid_spec.grid[:-2]
+  grid_suffix = grid_spec.grid[-2:]
+  total_axis_size = np.prod(grid_prefix)
+  new_grid = (total_axis_size, *grid_suffix)
+  out_indices = [0] * len(grid_prefix)
+  grid0 = tl.program_id(0, _builder=builder)
+  for i, s in reversed(list(enumerate(grid_prefix))):
+    grid0, out_indices[i] = (
+        grid0.__floordiv__(s, _builder=builder),
+        grid0.__mod__(s, _builder=builder))
+  out_indices = [*out_indices, tl.program_id(1, _builder=builder),
+                 tl.program_id(2, _builder=builder)]
+  assert len(out_indices) == len(grid_spec.grid)
+  return new_grid, out_indices
 
 def lower_jaxpr_to_triton_module(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: GridSpec,
                                  name: str) -> tl_ir.module:
@@ -121,8 +142,7 @@ def lower_jaxpr_to_triton_module(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: Gr
   insert_pt = builder.get_insert_block()
   entry = tl_ir.basic_block.create(builder.context, "entry", fn)
   builder.set_insert_block(entry)
-  program_ids = [tl.program_id(axis=i, _builder=builder)
-                 for i in range(len(grid_spec.grid))]
+  new_grid, program_ids = _process_grid_to_3d_grid(builder, grid_spec)
   local_program_ids = [pid for i, pid in enumerate(program_ids)
                        if i not in grid_spec.mapped_dims]
   ctx = TritonModuleContext(name, ir_context, builder, module, grid_spec,
@@ -137,7 +157,7 @@ def lower_jaxpr_to_triton_module(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: Gr
   () = lower_jaxpr_to_triton_ir(ctx, jaxpr, block_infos, *args)
   ctx.builder.ret_void()
   ctx.builder.set_insert_block(insert_pt)
-  return TritonLoweringResult(ir_context, module, builder)
+  return TritonLoweringResult(ir_context, module, builder, new_grid)
 
 def lower_jaxpr_to_triton_ir(ctx: TritonModuleContext, jaxpr: jax_core.Jaxpr,
                              block_infos: Optional[Sequence[Optional[BlockInfo]]],
