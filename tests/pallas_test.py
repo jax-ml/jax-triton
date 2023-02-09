@@ -12,19 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Copyright 2022 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import functools
 import os
 import unittest
@@ -46,6 +33,7 @@ from jax.interpreters import partial_eval as pe
 import jax.numpy as jnp
 import jax_triton as jt
 from jax_triton import pallas as pl
+from jax_triton.pallas.ops import attention
 from jax_triton.pallas.pallas_call import _compile_jaxpr
 import numpy as np
 try:
@@ -274,7 +262,7 @@ class PallasCallTest(PallasTest):
     def dot(x_ref, y_ref, o_ref):
       x = x_ref[:, :]
       y = y_ref[:, :]
-      o_ref[:, :] = pl.dot(x, y)
+      o_ref[:, :] = pl.dot(x, y).astype(o_ref.dtype)
 
     k1, k2 = random.split(random.PRNGKey(0))
     x = random.normal(k1, (size, size), dtype=dtype)
@@ -749,6 +737,56 @@ class PallasPrimitivesTest(parameterized.TestCase):
     jaxpr, _ , _ = pe.trace_to_jaxpr_dynamic(
         lu.wrap_init(body), [state.ShapedArrayRef((4, 3, 2), jnp.int32)])
     self.assertIn(expected, jaxpr.pretty_print(use_color=False))
+
+class FusedAttentionTest(parameterized.TestCase):
+
+  @parameterized.parameters(*[
+    (1, 384, 1, 32),
+    (2, 384, 2, 32),
+  ])
+  def test_fused_attention_fwd(self, batch_size, seq_len, num_heads, head_dim):
+    self.skipTest("Not yet working on V100")
+    # TODO(sharadmv): expose this information in `jaxlib`
+    if torch is not None and torch.cuda.get_device_capability() < (8, 0):
+      raise unittest.SkipTest(
+          "Fused attention only works on GPUs with capability >= sm80")
+
+    k1, k2, k3 = random.split(random.PRNGKey(0), 3)
+    q = random.normal(k1, (batch_size, seq_len, num_heads, head_dim), dtype=jnp.float16)
+    k = random.normal(k2, (batch_size, seq_len, num_heads, head_dim), dtype=jnp.float16)
+    v = random.normal(k3, (batch_size, seq_len, num_heads, head_dim), dtype=jnp.float16)
+
+    o = attention.mha(q, k, v)
+    o_ref = attention.mha_reference(q, k, v)
+    np.testing.assert_allclose(o, o_ref, atol=0.05)
+
+  @parameterized.parameters(*[
+    (1, 384, 1, 32),
+    (2, 384, 2, 32),
+  ])
+  def test_fused_attention_bwd(self, batch_size, seq_len, num_heads, head_dim):
+    self.skipTest("Not yet working on V100")
+    # TODO(sharadmv): expose this information in `jaxlib`
+    if torch is not None and torch.cuda.get_device_capability() < (8, 0):
+      raise unittest.SkipTest(
+          "Fused attention only works on GPUs with capability >= sm80")
+
+    k1, k2, k3 = random.split(random.PRNGKey(0), 3)
+    q = random.normal(k1, (batch_size, seq_len, num_heads, head_dim), dtype=jnp.float16)
+    k = random.normal(k2, (batch_size, seq_len, num_heads, head_dim), dtype=jnp.float16)
+    v = random.normal(k3, (batch_size, seq_len, num_heads, head_dim), dtype=jnp.float16)
+
+    def f(q, k, v):
+      return attention.mha(q, k, v).sum()
+
+    def f_ref(q, k, v):
+      return attention.mha_reference(q, k, v).sum()
+
+    dq, dk, dv = jax.grad(f, argnums=(0, 1, 2))(q, k, v)
+    dq_ref, dk_ref, dv_ref = jax.grad(f_ref, argnums=(0, 1, 2))(q, k, v)
+    np.testing.assert_allclose(dq, dq_ref, atol=0.05)
+    np.testing.assert_allclose(dk, dk_ref, atol=0.05)
+    np.testing.assert_allclose(dv, dv_ref, atol=0.05)
 
 if __name__ == "__main__":
   absltest.main()
