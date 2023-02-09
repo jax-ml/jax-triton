@@ -327,7 +327,7 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
       asm["cubin"], name, num_warps, shared_mem
   )
 
-  grid = normalize_grid(grid_spec.grid, metaparams={})
+  grid = normalize_grid(compilation_result.lowering_result.grid, metaparams={})
   # All arguments are buffers.
   all_args = [None] * (len(in_shapes) + len(out_shapes))
   kernel_call = triton_kernel_call_lib.TritonKernelCall(
@@ -374,7 +374,7 @@ def clear_caches():
 
 def _preprocess_grid(grid: Optional[Union[Grid, int]]) -> Grid:
   if grid is None:
-    return (1,)
+    return ()
   if isinstance(grid, int):
     return (grid,)
   return grid

@@ -137,8 +137,7 @@ class PallasCallTest(PallasTest):
 
   def test_add_one(self):
     @functools.partial(
-        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.float32),
-        grid=1)
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.float32))
     def add_one(x_ref, o_ref):
       o_ref[()] = x_ref[()] + 1.
 
@@ -629,8 +628,7 @@ class PallasCallVmapTest(PallasTest):
   def test_vmap_of_simple_kernel(self):
     @functools.partial(
         self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.int32),
-        debug=False,
-        grid=1)
+        debug=False)
     def add_one(x_ref, o_ref):
       o_ref[()] = x_ref[()] + 1
     out = jax.vmap(add_one)(jnp.arange(8))
@@ -640,12 +638,35 @@ class PallasCallVmapTest(PallasTest):
   def test_double_vmap_of_simple_kernel(self):
     @functools.partial(
         self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.int32),
-        debug=False,
-        grid=1)
+        debug=False)
     def add_one(x_ref, o_ref):
       o_ref[()] = x_ref[()] + 1
     out = jax.vmap(jax.vmap(add_one))(jnp.arange(8).reshape((4, 2)))
     out_ref = jnp.arange(1, 9).reshape((4, 2))
+    np.testing.assert_allclose(out, out_ref)
+
+  def test_quadruple_vmap_of_simple_kernel(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.int32),
+        debug=False)
+    def add_one(x_ref, o_ref):
+      o_ref[()] = x_ref[()] + 1
+    out = jax.vmap(jax.vmap(jax.vmap(jax.vmap(add_one))))(
+        jnp.arange(15 * 8).reshape((5, 3, 4, 2)))
+    out_ref = jnp.arange(1, 15 * 8 + 1).reshape((5, 3, 4, 2))
+    np.testing.assert_allclose(out, out_ref)
+
+  def test_quadruple_vmap_of_batched_kernel(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((7,), jnp.int32),
+        debug=False,
+        grid=(7,))
+    def add_one(x_ref, o_ref):
+      i = pl.program_id(0)
+      o_ref[i] = x_ref[i] + 1
+    out = jax.vmap(jax.vmap(jax.vmap(jax.vmap(add_one))))(
+        jnp.arange(15 * 8 * 7).reshape((5, 3, 4, 2, 7)))
+    out_ref = jnp.arange(1, 15 * 8 * 7 + 1).reshape((5, 3, 4, 2, 7))
     np.testing.assert_allclose(out, out_ref)
 
   def test_vmap_of_slicing_kernel(self):
