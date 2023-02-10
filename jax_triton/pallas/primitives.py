@@ -326,9 +326,9 @@ def _load_pp_rule(eqn, context, settings):
   idx, *masked_other = tree_util.tree_unflatten(eqn.params["args_tree"], args)
   idx = _pp_idx(eqn.invars[0].aval, idx, context)
   lhs = jax_core.pp_vars([y], context, print_shapes=settings.print_shapes)
-  return [lhs, pp.text(' <- '), state_primitives.pp_ref(pp.concat([
+  return pp.concat([lhs, pp.text(' <- '), state_primitives.pp_ref(pp.concat([
     pp.text(jax_core.pp_var(x, context)), pp.text('['), idx, pp.text(']')
-    ]))]
+    ]))])
 jax_core.pp_eqn_rules[load_p] = _load_pp_rule
 
 def _load_jvp(primals, tangents, *, args_tree, masked, **params: Any):
@@ -400,9 +400,9 @@ def _swap_pp_rule(eqn, context, settings):
   idx = _pp_idx(eqn.invars[0].aval, idx, context)
   lhs = jax_core.pp_vars([y], context, print_shapes=settings.print_shapes)
   if isinstance(y, jax_core.DropVar):
-    return [state_primitives.pp_ref(pp.concat([
+    return pp.concat([state_primitives.pp_ref(pp.concat([
       pp.text(jax_core.pp_var(x, context)), pp.text('['), idx, pp.text(']'),
-      pp.text(" <- "), pp.text(jax_core.pp_var(val, context))]))]
+      pp.text(" <- "), pp.text(jax_core.pp_var(val, context))]))])
 jax_core.pp_eqn_rules[swap_p] = _swap_pp_rule
 
 def _swap_jvp(primals, tangents, *, args_tree, masked, **params: Any):
