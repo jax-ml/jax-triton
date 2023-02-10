@@ -1,6 +1,6 @@
 [project]
 name = "jax-triton"
-version = "0.1.3"
+dynamic = ["version"]
 description = "JAX + OpenAI Triton integration"
 readme = "README.md"
 requires-python = ">=3.7,<3.11"
@@ -19,3 +19,6 @@ build-backend = "setuptools.build_meta"
 
 [tools.setuptools]
 packages = ["jax_triton"]
+
+[tool.setuptools.dynamic]
+version = {attr = "jax_triton.version.__version__"}
