@@ -752,15 +752,15 @@ class PallasCallAutodifferentiationTest(PallasTest):
                                rtol=1e-5)
     jtu.check_grads(pallas_impl, (x,), modes=["fwd"], order=2)
 
-  # TODO(sharadmv): enable this when we update Triton
-  # def test_jvp_matmul(self):
-  #   k1, k2 = random.split(random.PRNGKey(0))
-  #   x = random.normal(k1, (256, 128))
-  #   y = random.normal(k2, (128, 64))
-  #   bm, bn, bk, gm = 64, 128, 32, 8
-  #   mm = functools.partial(matmul, bm=bm, bn=bn, bk=bk, gm=gm,
-  #                          interpret=self.INTERPRET)
-  #   jtu.check_grads(mm, (x, y), modes=["fwd"], order=1)
+  TODO(sharadmv): enable this when we update Triton
+  def test_jvp_matmul(self):
+    k1, k2 = random.split(random.PRNGKey(0))
+    x = random.normal(k1, (256, 128))
+    y = random.normal(k2, (128, 64))
+    bm, bn, bk, gm = 64, 128, 32, 8
+    mm = functools.partial(matmul, bm=bm, bn=bn, bk=bk, gm=gm,
+                           interpret=self.INTERPRET)
+    jtu.check_grads(mm, (x, y), modes=["fwd"], order=1)
 
   def test_slicing_block_spec(self):
     @functools.partial(
