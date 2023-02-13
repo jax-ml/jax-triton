@@ -31,7 +31,6 @@ from jax._src.util import (safe_map, safe_zip, split_list, merge_lists,
                            partition_list)
 from jax._src.state import primitives as state_primitives
 from jax._src.state import discharge as state_discharge
-from jax._src.typing import Array
 from jax.interpreters import ad
 from jax.interpreters import mlir
 from jax.interpreters import xla
@@ -217,7 +216,7 @@ class Slice:
     stop = size if stop is None else stop
     return Slice(start, stop - start)
 
-def dslice(start: Optional[Union[int, Array]], stop: Optional[int] = None):
+def dslice(start: Optional[Union[int, jax.Array]], stop: Optional[int] = None):
   if start is None:
     return slice(None)
   if stop is None:
@@ -230,7 +229,7 @@ ds = dslice  # Handy alias
 @tree_util.register_pytree_node_class
 @dataclasses.dataclass
 class NDIndexer:
-  indices: Tuple[Union[int, Slice, Array]]
+  indices: Tuple[Union[int, Slice, jax.Array]]
   shape: Tuple[int, ...]
   int_indexer_shape: Tuple[int, ...]
 
@@ -260,7 +259,7 @@ class NDIndexer:
       raise NotImplementedError("Non-`slice(None)` slices not supported yet.")
     if len(indices) != len(shape):
       raise ValueError("Must provide indexer for each dimension of `Ref`.")
-    is_int_indexing = [isinstance(i, (Array, int)) for i in indices]
+    is_int_indexing = [isinstance(i, (jax.Array, int)) for i in indices]
     other_indexers, int_indexers = partition_list(is_int_indexing, indices)
     int_indexers = [np.array(i, np.int32) if isinstance(i, int) else i for i in
                     int_indexers]

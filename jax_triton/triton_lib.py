@@ -31,7 +31,6 @@ from jax._src import state
 from jax._src import util
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import mhlo
-from jax._src.typing import Array
 import jax.dlpack
 from jax.interpreters import mlir
 from jax.interpreters import xla
@@ -387,7 +386,7 @@ def normalize_grid(grid: GridOrLambda, metaparams) -> Tuple[int, int, int]:
 
 
 def triton_call(
-    *args: Union[Array, bool, int, float],
+    *args: Union[jax.Array, bool, int, float],
     kernel: triton.JITFunction,
     out_shape: Union[ShapeDtype, Sequence[ShapeDtype]],
     grid: GridOrLambda,
