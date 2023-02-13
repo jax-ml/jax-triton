@@ -45,6 +45,7 @@ try:
   import triton
   import triton.compiler as tc
   import triton.language as tl
+  from triton.runtime import autotuner
   CAN_USE_TRITON = True
 except ModuleNotFoundError:
   pass
@@ -224,15 +225,17 @@ def triton_kernel_call_lowering(
   i32_type = ir.IntegerType.get_signless(32)
 
   arg_dtypes = list(map(get_triton_type, ctx.avals_in))
+  named_scalar_args = {}
   # Buffer args are filled in at runtime.
   encoded_args = [None] * (len(array_args) + len(scalar_args) + len(out_shapes))
   for idx, dtype, v in scalar_args:
     arg_dtypes.insert(idx, dtype)
+    named_scalar_args[fn.arg_names[idx]] = v
     encoded_args[idx] = triton_kernel_call_lib.encode_kernel_parameter(v, dtype)
 
   arg_dtypes.extend(map(get_triton_type, ctx.avals_out))
 
-  if isinstance(fn, triton.runtime.autotuner.Autotuner):
+  if isinstance(fn, autotuner.Autotuner):
     if any(idx not in fn.key_idx for idx, _, _ in scalar_args):
       logging.warning(
           "Auto-tuning key does not include all scalar arguments. "
@@ -255,14 +258,15 @@ def triton_kernel_call_lowering(
       return pruned_configs
 
     fn.early_config_prune = prune_configs
-    named_scalar_args = {fn.arg_names[idx]: v for idx, _, v in scalar_args}
     fn.nargs = {name: named_scalar_args.get(name) for name in fn.arg_names}
     configs = fn.prune_configs(metaparams)
     fn = fn.fn
-  elif isinstance(fn, triton.JITFunction):
+  elif isinstance(fn, (triton.JITFunction, autotuner.Heuristics)):
     configs = [triton.Config({}, num_warps=num_warps, num_stages=num_stages)]
   else:
-    raise ValueError("`kernel` must be a `JITFunction` or `Autotuner`.")
+    raise ValueError(
+        "`kernel` must be a Triton `JITFunction`, `Heuristics` or `Autotuner`."
+    )
 
   # Cache auto-tuned calls with the same parameters, so the auto-tuning need
   # only be performed once.
@@ -281,6 +285,14 @@ def triton_kernel_call_lowering(
     for config in configs:
       config_metaparams = metaparams.copy()
       config_metaparams.update(config.kwargs)
+
+      if isinstance(fn, autotuner.Heuristics):
+        for name, heuristic in fn.values.items():
+          config_metaparams[name] = heuristic(
+              {**named_scalar_args, **config_metaparams}
+          )
+        fn = fn.fn
+
       kernel = get_or_create_triton_kernel(
           fn,
           arg_dtypes,

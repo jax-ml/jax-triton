@@ -77,6 +77,7 @@ def matmul_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    K_EXACTLY_DIVISIBLE_BY_BLOCK: tl.constexpr,
 ):
   stride_am = K
   stride_ak = 1
@@ -102,9 +103,14 @@ def matmul_kernel(
   b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
   accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-  for _ in range(0, K, BLOCK_SIZE_K):
-    a = tl.load(a_ptrs)
-    b = tl.load(b_ptrs)
+  for k_remaining in range(K, 0, -BLOCK_SIZE_K):
+    if K_EXACTLY_DIVISIBLE_BY_BLOCK:
+      a = tl.load(a_ptrs)
+      b = tl.load(b_ptrs)
+    else:
+      mask = tl.arange(0, BLOCK_SIZE_K) < k_remaining
+      a = tl.load(a_ptrs, mask=mask[None, :], other=0.0)
+      b = tl.load(b_ptrs, mask=mask[:, None], other=0.0)
     accumulator += tl.dot(a, b)
     a_ptrs += BLOCK_SIZE_K * stride_ak
     b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -182,6 +188,7 @@ class TritonKernelCallTest(parameterized.TestCase):
         BLOCK_SIZE_N=block_size_n,
         BLOCK_SIZE_K=block_size_k,
         GROUP_SIZE_M=group_size_m,
+        K_EXACTLY_DIVISIBLE_BY_BLOCK=k % block_size_k == 0,
     )
     expected = jnp.matmul(x, y)
     np.testing.assert_allclose(out, expected, atol=0.05, rtol=0.05)
@@ -315,6 +322,38 @@ class TritonKernelCallTest(parameterized.TestCase):
     )
     expected = x + y
     np.testing.assert_allclose(out, expected)
+
+  def test_heuristics(self):
+    heuristic_returned_values = []
+
+    def heuristic_fn(args):
+      heuristic_returned_values.append(args["K"] % args["BLOCK_SIZE_K"] == 0)
+      return heuristic_returned_values[-1]
+
+    heuristics = {"K_EXACTLY_DIVISIBLE_BY_BLOCK": heuristic_fn}
+    matmul_kernel_with_heuristics = triton.heuristics(heuristics)(matmul_kernel)
+    block_size_m = block_size_n = block_size_k = 32
+
+    def matmul(m, n, k):
+      x, y = create_random_inputs([m, k], [k, n])
+      return jt.triton_call(
+          x,
+          y,
+          m,
+          n,
+          k,
+          kernel=matmul_kernel_with_heuristics,
+          out_shape=jax.ShapeDtypeStruct((m, n), dtype=x.dtype),
+          grid=(triton.cdiv(m, block_size_m) * triton.cdiv(n, block_size_n),),
+          BLOCK_SIZE_M=block_size_m,
+          BLOCK_SIZE_N=block_size_n,
+          BLOCK_SIZE_K=block_size_k,
+          GROUP_SIZE_M=1,
+      )
+
+    _ = matmul(m=128, n=128, k=128)
+    _ = matmul(m=128, n=128, k=144)
+    self.assertEqual(heuristic_returned_values, [True, False])
 
 
 if __name__ == "__main__":
