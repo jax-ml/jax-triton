@@ -145,12 +145,19 @@ class TritonKernelCall : public TritonKernelCallBase {
  public:
   TritonKernelCall(TritonKernel& kernel, uint32_t grid_0, uint32_t grid_1,
                    uint32_t grid_2,
-                   std::vector<std::optional<uint64_t>> parameters)
+                   std::vector<std::optional<uint64_t>> parameters,
+                   std::unordered_map<size_t, size_t> zeroed_buffers)
       : kernel_(kernel),
         grid_{grid_0, grid_1, grid_2},
-        parameters_(std::move(parameters)) {}
+        parameters_(std::move(parameters)),
+        zeroed_buffers_(std::move(zeroed_buffers)) {}
 
   void Launch(CUstream stream, void** buffers) override final {
+    for (const auto& [i, size] : zeroed_buffers_) {
+      CHECK_CUDA(cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(buffers[i]), 0,
+                                 size, stream));
+    }
+
     std::vector<void*> params;
     params.reserve(parameters_.size());
     for (std::optional<uint64_t>& param : parameters_) {
@@ -169,6 +176,8 @@ class TritonKernelCall : public TritonKernelCallBase {
   uint32_t grid_[3];
   // Parameter values. `nullopt` values represent buffer arguments.
   std::vector<std::optional<uint64_t>> parameters_;
+  // Buffers to be zeroed before kernel launch (index and size).
+  std::unordered_map<size_t, size_t> zeroed_buffers_;
 };
 
 class TritonAutotunedKernelCall : public TritonKernelCallBase {
@@ -320,7 +329,8 @@ PYBIND11_MODULE(triton_kernel_call_lib, m) {
 
   py::class_<TritonKernelCall>(m, "TritonKernelCall")
       .def(py::init<TritonKernel&, uint32_t, uint32_t, uint32_t,
-                    std::vector<std::optional<uint64_t>>>(),
+                    std::vector<std::optional<uint64_t>>,
+                    std::unordered_map<size_t, size_t>>(),
            py::keep_alive<1, 2>())  // Ensure that the kernel lives long enough.
       .def_property_readonly("descriptor", [](TritonKernelCall& kernel_call) {
         union {

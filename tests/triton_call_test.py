@@ -253,6 +253,22 @@ class TritonKernelCallTest(parameterized.TestCase):
     expected = x + 1
     np.testing.assert_allclose(out, expected)
 
+  @parameterized.parameters(False, True)
+  def test_zeroed_outputs(self, use_function):
+    @triton.jit
+    def noop_kernel(_):
+      pass
+
+    x = jnp.zeros([1000000])
+    # Without the `zeroed_outputs` argument, we read junk from device memory.
+    out = jt.triton_call(
+        kernel=noop_kernel,
+        out_shape=x,
+        grid=(1,),
+        zeroed_outputs=(lambda _: (0,)) if use_function else (0,),
+    )
+    np.testing.assert_allclose(out, x)
+
   def test_compilation_cache(self):
     fn1 = jax.jit(lambda x, y: add(x, y, block_size=32))
     fn2 = jax.jit(lambda x, y: add(x, y, block_size=32))

@@ -126,6 +126,10 @@ def avals_to_layouts(avals):
   return ir.ArrayAttr.get([aval_to_layout(a) for a in avals])
 
 
+def aval_size_bytes(aval):
+  return np.dtype(aval.dtype).itemsize * aval.size
+
+
 # Compiled kernels are kept alive by the kernel call which, in turn, are kept
 # alive by the jitted JAX function.
 _COMPILED_KERNEL_CACHE = weakref.WeakValueDictionary()
@@ -202,6 +206,7 @@ def triton_kernel_call_lowering(
     num_stages,
     dump_binary_path,
     input_output_aliases,
+    zeroed_outputs,
     **metaparams,
 ):
   if jaxlib.version.__version_info__ < (0, 3, 22) and input_output_aliases:
@@ -261,6 +266,7 @@ def triton_kernel_call_lowering(
 
   # Cache auto-tuned calls with the same parameters, so the auto-tuning need
   # only be performed once.
+  # FIXME(cjfj): Should the key include `grid` and `zeroed_outputs`?
   cache_key = (
       fn,
       tuple(configs),
@@ -284,9 +290,23 @@ def triton_kernel_call_lowering(
           dump_binary_path=dump_binary_path,
       )
       grid = normalize_grid(grid, config_metaparams)
+
+      config_zeroed_outputs = zeroed_outputs
+      if callable(zeroed_outputs):
+        config_zeroed_outputs = config_zeroed_outputs(config_metaparams)
+
+      zeroed_outputs_and_sizes = {
+          i: aval_size_bytes(ctx.avals_out[i]) for i in config_zeroed_outputs
+      }
+
       kernel_calls.append(
           triton_kernel_call_lib.TritonKernelCall(
-              kernel, grid[0], grid[1], grid[2], encoded_args
+              kernel,
+              grid[0],
+              grid[1],
+              grid[2],
+              encoded_args,
+              zeroed_outputs_and_sizes,
           )
       )
 
@@ -364,6 +384,9 @@ def triton_call(
     num_stages: int = 2,
     dump_binary_path: Optional[str] = None,
     input_output_aliases: Optional[Dict[int, int]] = None,
+    zeroed_outputs: Union[
+        Sequence[int], Callable[[Dict[str, Any]], Sequence[int]]
+    ] = (),
     **metaparams: Any,
 ) -> Any:
   """Calls a Triton kernel with `jax.Array` arguments.
@@ -433,6 +456,8 @@ def triton_call(
       tuple of up to 3 integers.
     input_output_aliases: A dictionary mapping input argument indices to output
       indices. Providing a mapping will alias the corresponding buffers.
+    zeroed_outputs: A sequence of indices, or a function returning a sequence of
+      indices, for outputs that should be zeroed before the kernel is launched.
     num_warps: The number of warps used to execute the Triton kernel.
     num_stages: The number of stages emitted by the Triton compiler.
     **metaparams: Additional keyword arguments that will be provided to a `grid`
@@ -476,6 +501,7 @@ def triton_call(
       num_stages=num_stages,
       dump_binary_path=dump_binary_path,
       input_output_aliases=tuple(input_output_aliases.items()),
+      zeroed_outputs=zeroed_outputs,
       **metaparams,
   )
   return tree_util.tree_unflatten(out_tree, out_flat)

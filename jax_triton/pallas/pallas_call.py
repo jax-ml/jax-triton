@@ -349,8 +349,9 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
   grid = normalize_grid(compilation_result.lowering_result.grid, metaparams={})
   # All arguments are buffers.
   all_args = [None] * (len(in_shapes) + len(out_shapes))
+  zeroed_outputs = {}  # TODO(cjfj): Expose through user API.
   kernel_call = triton_kernel_call_lib.TritonKernelCall(
-      kernel, grid[0], grid[1], grid[2], all_args
+      kernel, grid[0], grid[1], grid[2], all_args, zeroed_outputs
   )
 
   ctx.module_context.add_keepalive(kernel_call)
