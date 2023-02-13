@@ -702,8 +702,7 @@ class PallasCallAutodifferentiationTest(PallasTest):
     ("square", lambda x: x * x),
     ("add_one", lambda x: x + 1.),
     ("exp", jnp.exp),
-    # ("tanh", jnp.tanh),  TODO(sharadmv): re-enable this case when libdevice is
-    # updated
+    ("tanh", jnp.tanh),
     ])
   def test_jvp(self, impl):
     @functools.partial(
@@ -728,8 +727,7 @@ class PallasCallAutodifferentiationTest(PallasTest):
     ("square", lambda x: x * x),
     ("add_one", lambda x: x + 1.),
     ("exp", jnp.exp),
-    # ("tanh", jnp.tanh),  TODO(sharadmv): re-enable this case when libdevice is
-    # updated
+    ("tanh", jnp.tanh),
     ])
   def test_jvp_slice(self, impl):
     @functools.partial(
@@ -752,7 +750,6 @@ class PallasCallAutodifferentiationTest(PallasTest):
                                rtol=1e-5)
     jtu.check_grads(pallas_impl, (x,), modes=["fwd"], order=2)
 
-  TODO(sharadmv): enable this when we update Triton
   def test_jvp_matmul(self):
     k1, k2 = random.split(random.PRNGKey(0))
     x = random.normal(k1, (256, 128))
@@ -777,6 +774,24 @@ class PallasCallAutodifferentiationTest(PallasTest):
     out = add_vectors(xy, xy)
     out_ref = xy[0] + xy[1]
     np.testing.assert_allclose(out, out_ref)
+
+  @parameterized.named_parameters(*[
+    ("square", lambda x: x * x),
+    ("add_one", lambda x: x + 1.),
+    ("exp", jnp.exp),
+    ("tanh", jnp.tanh),
+    ])
+  def test_grad(self, impl):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.float32))
+    def pallas_impl(x_ref, o_ref):
+      o_ref[...] = impl(x_ref[...])
+
+    x = random.normal(random.PRNGKey(0))
+    g = jax.grad(pallas_impl)(x)
+    g_ref = jax.grad(impl)(x)
+    np.testing.assert_allclose(g, g_ref, atol=1e-5, rtol=1e-5)
+    jtu.check_grads(pallas_impl, (x,), modes=["rev"], order=1)
 
 
 class PallasCallVmapTest(PallasTest):
