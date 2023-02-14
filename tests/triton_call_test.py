@@ -53,15 +53,16 @@ def add_kernel(x_ptr, y_ptr, n_elements, output_ptr, BLOCK_SIZE: tl.constexpr):
   tl.store(output_ptr + offsets, output, mask=mask)
 
 
-def add(x, y, *, block_size):
+def add(x, y, *, block_size=8, **kwargs):
   return jt.triton_call(
       x,
       y,
       x.size,
       kernel=add_kernel,
       out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
-      grid=triton.cdiv(x.size, block_size),
+      grid=kwargs.pop("grid", triton.cdiv(x.size, block_size)),
       BLOCK_SIZE=block_size,
+      **kwargs,
   )
 
 
@@ -223,15 +224,7 @@ class TritonKernelCallTest(parameterized.TestCase):
     elif grid_type == "function_tuple":
       grid = lambda meta: (triton.cdiv(size, meta["BLOCK_SIZE"]),)
 
-    out = jt.triton_call(
-        x,
-        y,
-        x.size,
-        kernel=add_kernel,
-        out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
-        grid=grid,
-        BLOCK_SIZE=block_size,
-    )
+    out = add(x, y, block_size=block_size, grid=grid)
     expected = x + y
     np.testing.assert_allclose(out, expected)
 
@@ -262,16 +255,13 @@ class TritonKernelCallTest(parameterized.TestCase):
 
   @parameterized.parameters(False, True)
   def test_zeroed_outputs(self, use_function):
-    @triton.jit
-    def noop_kernel(_):
-      pass
-
-    x = jnp.zeros([1000000])
-    # Without the `zeroed_outputs` argument, we read junk from device memory.
-    out = jt.triton_call(
-        kernel=noop_kernel,
-        out_shape=x,
-        grid=(1,),
+    x, y = create_random_inputs([1000000])
+    # We alias `y` with the output, so are performing the add in-place.
+    # If we zero the output before the kernel, the result is `x + 0`.
+    out = add(
+        x,
+        y,
+        input_output_aliases={1: 0},
         zeroed_outputs=(lambda _: (0,)) if use_function else (0,),
     )
     np.testing.assert_allclose(out, x)

@@ -307,7 +307,8 @@ def triton_kernel_call_lowering(
         config_zeroed_outputs = config_zeroed_outputs(config_metaparams)
 
       zeroed_outputs_and_sizes = {
-          i: aval_size_bytes(ctx.avals_out[i]) for i in config_zeroed_outputs
+          i + len(ctx.avals_in): aval_size_bytes(ctx.avals_out[i])
+          for i in config_zeroed_outputs
       }
 
       kernel_calls.append(
