@@ -250,6 +250,9 @@ def triton_kernel_call_lowering(
     def prune_configs(configs, named_args):
       pruned_configs = []
       for config in configs:
+        if config.pre_hook is not None:
+          raise NotImplementedError("`pre_hook` is not supported")
+
         if all(config.kwargs.get(k, v) == v for k, v in metaparams.items()):
           pruned_configs.append(config)
       if prev_early_config_prune_fn is not None:

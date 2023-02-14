@@ -53,15 +53,18 @@ def add_kernel(x_ptr, y_ptr, n_elements, output_ptr, BLOCK_SIZE: tl.constexpr):
   tl.store(output_ptr + offsets, output, mask=mask)
 
 
-def add(x, y, *, block_size=8, **kwargs):
+def add(x, y, *, kernel=add_kernel, **kwargs):
+  if kernel is add_kernel:
+    kwargs.setdefault("BLOCK_SIZE", 8)
+
+  default_grid = lambda meta: triton.cdiv(x.size, meta["BLOCK_SIZE"])
   return jt.triton_call(
       x,
       y,
       x.size,
-      kernel=add_kernel,
+      kernel=kernel,
       out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
-      grid=kwargs.pop("grid", triton.cdiv(x.size, block_size)),
-      BLOCK_SIZE=block_size,
+      grid=kwargs.pop("grid", default_grid),
       **kwargs,
   )
 
@@ -146,7 +149,7 @@ class TritonKernelCallTest(parameterized.TestCase):
   )
   def test_add(self, size, dtype, block_size):
     x, y = create_random_inputs([size], dtype=dtype)
-    out = jax.jit(lambda x, y: add(x, y, block_size=block_size))(x, y)
+    out = jax.jit(lambda x, y: add(x, y, BLOCK_SIZE=block_size))(x, y)
     expected = x + y
     np.testing.assert_allclose(out, expected)
 
@@ -205,7 +208,7 @@ class TritonKernelCallTest(parameterized.TestCase):
       self.skipTest("Not enough devices")
 
     x, y = create_random_inputs([n_devices, size], dtype=dtype)
-    out = jax.pmap(lambda x, y: add(x, y, block_size=block_size))(x, y)
+    out = jax.pmap(lambda x, y: add(x, y, BLOCK_SIZE=block_size))(x, y)
     expected = x + y
     np.testing.assert_allclose(out, expected)
 
@@ -224,7 +227,7 @@ class TritonKernelCallTest(parameterized.TestCase):
     elif grid_type == "function_tuple":
       grid = lambda meta: (triton.cdiv(size, meta["BLOCK_SIZE"]),)
 
-    out = add(x, y, block_size=block_size, grid=grid)
+    out = add(x, y, BLOCK_SIZE=block_size, grid=grid)
     expected = x + y
     np.testing.assert_allclose(out, expected)
 
@@ -267,9 +270,11 @@ class TritonKernelCallTest(parameterized.TestCase):
     np.testing.assert_allclose(out, x)
 
   def test_compilation_cache(self):
-    fn1 = jax.jit(lambda x, y: add(x, y, block_size=32))
-    fn2 = jax.jit(lambda x, y: add(x, y, block_size=32))
-    fn3 = jax.jit(lambda x, y: add(x, y, block_size=64))
+    # Create unique JITFunction to avoid conflicts with other tests.
+    my_add_kernel = triton.jit(add_kernel.fn)
+    fn1 = jax.jit(lambda x, y: add(x, y, BLOCK_SIZE=32, kernel=my_add_kernel))
+    fn2 = jax.jit(lambda x, y: add(x, y, BLOCK_SIZE=32, kernel=my_add_kernel))
+    fn3 = jax.jit(lambda x, y: add(x, y, BLOCK_SIZE=64, kernel=my_add_kernel))
 
     x1, y1 = create_random_inputs([42])
     x2, y2 = create_random_inputs([43])
@@ -296,22 +301,22 @@ class TritonKernelCallTest(parameterized.TestCase):
         triton.Config({"BLOCK_SIZE": 64}, num_warps=1),
         triton.Config({"BLOCK_SIZE": 64}, num_warps=2),
     ]
-
-    autotuned_add_kernel = triton.autotune(
-        autotune_configs, key=("n_elements",)
-    )(add_kernel)
+    kernel = triton.autotune(autotune_configs, key=("n_elements",))(add_kernel)
 
     x, y = create_random_inputs([1024])
-    out = jt.triton_call(
-        x,
-        y,
-        x.size,
-        kernel=autotuned_add_kernel,
-        out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
-        grid=lambda meta: triton.cdiv(x.size, meta["BLOCK_SIZE"]),
-    )
+    out = add(x, y, kernel=kernel)
     expected = x + y
     np.testing.assert_allclose(out, expected)
+
+  def test_autotune_pre_hook_error(self):
+    autotune_configs = [
+        triton.Config({"BLOCK_SIZE": 32}, num_warps=1, pre_hook=lambda _: None),
+    ]
+    kernel = triton.autotune(autotune_configs, key=("n_elements",))(add_kernel)
+
+    x, y = create_random_inputs([1024])
+    with self.assertRaises(NotImplementedError):
+      _ = add(x, y, kernel=kernel)
 
   def test_heuristics(self):
     heuristic_returned_values = []
@@ -321,7 +326,7 @@ class TritonKernelCallTest(parameterized.TestCase):
       return heuristic_returned_values[-1]
 
     heuristics = {"K_EXACTLY_DIVISIBLE_BY_BLOCK": heuristic_fn}
-    matmul_kernel_with_heuristics = triton.heuristics(heuristics)(matmul_kernel)
+    kernel = triton.heuristics(heuristics)(matmul_kernel)
     block_size_m = block_size_n = block_size_k = 32
 
     def matmul(m, n, k):
@@ -332,7 +337,7 @@ class TritonKernelCallTest(parameterized.TestCase):
           m,
           n,
           k,
-          kernel=matmul_kernel_with_heuristics,
+          kernel=kernel,
           out_shape=jax.ShapeDtypeStruct((m, n), dtype=x.dtype),
           grid=(triton.cdiv(m, block_size_m) * triton.cdiv(n, block_size_n),),
           BLOCK_SIZE_M=block_size_m,
