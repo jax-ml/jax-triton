@@ -164,6 +164,31 @@ atomic_and = functools.partial(atomic_rmw, atomic_type=AtomicOpType.AND)
 atomic_or = functools.partial(atomic_rmw, atomic_type=AtomicOpType.OR)
 atomic_xor = functools.partial(atomic_rmw, atomic_type=AtomicOpType.XOR)
 
+atomic_cas_p = jax_core.Primitive("atomic_cas")
+
+def _atomic_cas_abstract_eval(ref_aval, cmp_aval, val_aval):
+  if cmp_aval.dtype != val_aval.dtype:
+    raise ValueError("Dtypes in cmp/val need to match")
+  if ref_aval.shape != ():
+    raise ValueError("Ref must be scalar.")
+  if cmp_aval.shape != ():
+    raise ValueError("Cmp must be scalar.")
+  if val_aval.shape != ():
+    raise ValueError("Val must be scalar.")
+  if cmp_aval.shape != val_aval.shape:
+    raise ValueError("Dtypes in cmp/val need to match")
+  return jax_core.ShapedArray(val_aval.shape, val_aval.dtype), {state.WriteEffect(ref_aval)}
+atomic_cas_p.def_effectful_abstract_eval(_atomic_cas_abstract_eval)
+
+def atomic_cas(ref, cmp, val):
+  return atomic_cas_p.bind(ref, cmp, val)
+
+@state.register_discharge_rule(atomic_cas_p)
+def _atomic_cas_discharge_rule(in_avals, out_avals, ref, cmp, val):
+  del in_avals, out_avals
+  new_val = jnp.where(ref == cmp, val, ref)
+  return (new_val, None, None), ref
+
 max_contiguous_p = jax_core.Primitive("max_contiguous")
 
 max_contiguous_p.def_impl(lambda x, **_: x)

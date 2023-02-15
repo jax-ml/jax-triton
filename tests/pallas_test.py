@@ -525,6 +525,53 @@ class PallasCallTest(PallasTest):
     num_misses = _compile_jaxpr.cache_info().misses
     self.assertEqual(num_misses, 1)
 
+  @parameterized.parameters(*[
+    (0, 0, 1),
+    (0, 1, 1),
+    (1, 0, 1),
+    (1, 1, 1),
+    (2, 1, 1),
+    (2, 1, 1),
+  ])
+  def test_atomic_cas(self, init_value, cmp, new_value):
+
+    @functools.partial(
+        self.pallas_call, out_shape=(
+          jax.ShapeDtypeStruct((), jnp.int32),
+          jax.ShapeDtypeStruct((), jnp.int32)),
+        input_output_aliases={0: 0})
+    def swap(_, lock_ref, out_ref):
+      out_ref[()] = pl.atomic_cas(lock_ref, cmp, new_value)
+
+    lock, out = swap(init_value)
+    np.testing.assert_allclose(lock, new_value if cmp == init_value else
+                               init_value)
+    np.testing.assert_allclose(out, init_value)
+
+  @parameterized.parameters(*[
+    1, 2, 3, 4, 8
+  ])
+  def test_atomic_counter(self, num_threads):
+    if self.INTERPRET:
+      self.skipTest("While loop not supported in interpret mode yet.")
+
+    @functools.partial(
+        self.pallas_call, out_shape=(
+          jax.ShapeDtypeStruct((), jnp.int32),
+          jax.ShapeDtypeStruct((), jnp.int32)),
+        input_output_aliases={0: 0, 1: 1},
+        grid=(num_threads,))
+    def increment(_, __, lock_ref, counter_ref):
+      def _cond(_):
+        return pl.atomic_cas(lock_ref, 0, 1) == 1
+      lax.while_loop(_cond, lambda a: a, 0)
+      counter_ref[...] += 1
+      pl.atomic_xchg(lock_ref, (), 0)
+
+    lock, count = increment(0, 0)
+    np.testing.assert_allclose(lock, 0)
+    np.testing.assert_allclose(count, num_threads)
+
 class PallasCallInterpreterTest(PallasCallTest):
   INTERPRET = True
 
