@@ -29,6 +29,7 @@ from jax._src.lax.control_flow import for_loop
 from jax.interpreters import partial_eval as pe
 from jax.interpreters import xla
 from jax._src import core as jax_core
+from jax._src import pjit
 from jax._src import state
 from jax._src.state import primitives as sp
 from jax._src.state import discharge
@@ -621,8 +622,14 @@ def _reduce_argmin_lowering(ctx: TritonLoweringRuleContext, a, *, axes,
 triton_lowering_rules[lax.argmin_p] = _reduce_argmin_lowering
 
 def _xla_call_lowering_rule(ctx: TritonLoweringRuleContext, *args, call_jaxpr, **_):
-  return lower_jaxpr_to_triton_ir(ctx.context, call_jaxpr, *args)
+  return lower_jaxpr_to_triton_ir(ctx.context, call_jaxpr, ctx.block_infos, *args)
 triton_lowering_rules[xla.xla_call_p] = _xla_call_lowering_rule
+
+def _pjit_lowering_rule(ctx: TritonLoweringRuleContext, *args, jaxpr, **_):
+  if jaxpr.consts:
+    raise NotImplementedError
+  return lower_jaxpr_to_triton_ir(ctx.context, jaxpr.jaxpr, ctx.block_infos, *args)
+triton_lowering_rules[pjit.pjit_p] = _pjit_lowering_rule
 
 def _for_lowering_rule(ctx: TritonLoweringRuleContext, *args, jaxpr,
     which_linear, nsteps, reverse, unroll):
