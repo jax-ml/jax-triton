@@ -26,12 +26,9 @@ from jax import lax
 from jax.interpreters import ad
 from jax.interpreters import batching
 from jax.interpreters import partial_eval as pe
-from jax.interpreters import mlir
 from jax.interpreters import xla
-from jax.lib import xla_client as xc
 from jax._src import ad_util
 from jax._src import core as jax_core
-from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import mhlo
 from jax._src import state
 from jax._src.util import (
@@ -41,11 +38,7 @@ from jax._src.lax.control_flow import for_loop
 import jax.numpy as jnp
 import numpy as np
 
-from triton._C.libtriton import triton as tc
-
-from jax_triton import triton_kernel_call_lib
-from jax_triton.triton_lib import avals_to_layouts, normalize_grid
-from jax_triton.pallas import lowering
+from jax_triton.utils import avals_to_layouts, normalize_grid
 from jax_triton.pallas import core as pallas_core
 
 map, unsafe_map = safe_map, map
@@ -287,98 +280,6 @@ def _pallas_call_batching_rule(args, dims, *,
   return out, (0,) * len(out)
 batching.primitive_batchers[pallas_call_p] = _pallas_call_batching_rule
 
-class TritonCompilationResult(NamedTuple):
-  name: str
-  asm: Dict[str, str]
-  shared_mem: int
-  lowering_result: lowering.TritonLoweringResult
-
-@weakref_lru_cache
-def _compile_jaxpr(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: GridSpec,
-                   name: str, num_warps: int, num_stages: int
-                   ) -> TritonCompilationResult:
-  lowering_result = lowering.lower_jaxpr_to_triton_module(jaxpr, in_shapes, grid_spec, name)
-  backend = tc.runtime.backend.CUDA
-  device = 0
-  name, asm, shared_mem = tc.code_gen.compile_ttir(backend, lowering_result.module, device,
-      num_warps, num_stages, {}, 0)
-  return TritonCompilationResult(name, asm, shared_mem, lowering_result)
-
-
-def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
-                         jaxpr: jax_core.Jaxpr,
-                         name: str,
-                         in_shapes: Tuple[jax.ShapeDtypeStruct, ...],
-                         out_shapes: Tuple[jax.ShapeDtypeStruct, ...],
-                         which_linear: Tuple[bool, ...],
-                         interpret: bool,
-                         debug: bool,
-                         input_output_aliases: Tuple[Tuple[int, int], ...],
-                         grid_spec: GridSpec,
-                         **compiler_params: Any):
-  if interpret:
-    return mlir.lower_fun(_pallas_call_impl, multiple_results=True)(
-        ctx, *in_nodes, jaxpr=jaxpr, name=name, out_shapes=out_shapes,
-        in_shapes=in_shapes,
-        which_linear=which_linear,
-        interpret=interpret, debug=debug,
-        input_output_aliases=input_output_aliases,
-        grid_spec=grid_spec, **compiler_params)
-  num_warps = compiler_params.get("num_warps", 4)
-  num_stages = compiler_params.get("num_stages", 3)
-  compilation_result = _compile_jaxpr(jaxpr, tuple((*in_shapes, *out_shapes)),
-                                      grid_spec, name, num_warps, num_stages)
-  name = compilation_result.name
-  asm = compilation_result.asm
-  shared_mem = compilation_result.shared_mem
-  if debug:
-    print(jaxpr)
-    print(grid_spec)
-  lowering_result = compilation_result.lowering_result
-  if debug:
-    lowering_result.module.print()
-  out_type = ir.TupleType.get_tuple([
-      ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
-      for out_shape in ctx.avals_out])
-  i32_type = ir.IntegerType.get_signless(32)
-
-  kernel = triton_kernel_call_lib.TritonKernel(
-      asm["cubin"], name, num_warps, shared_mem
-  )
-
-  grid = normalize_grid(compilation_result.lowering_result.grid, metaparams={})
-  # All arguments are buffers.
-  all_args = [None] * (len(in_shapes) + len(out_shapes))
-  zeroed_outputs = {}  # TODO(cjfj): Expose through user API.
-  kernel_call = triton_kernel_call_lib.TritonKernelCall(
-      kernel, grid[0], grid[1], grid[2], all_args, zeroed_outputs
-  )
-
-  ctx.module_context.add_keepalive(kernel_call)
-  output_operand_aliases = ir.ArrayAttr.get([
-          mhlo.OutputOperandAlias.get(
-              output_tuple_indices=[output],
-              operand_index=input,
-              operand_tuple_indices=[])
-          for input, output in input_output_aliases
-      ])
-  out = mhlo.CustomCallOp(
-      [out_type],
-      in_nodes,
-      call_target_name=ir.StringAttr.get("triton_kernel_call"),
-      has_side_effect=ir.BoolAttr.get(False),
-      backend_config=ir.StringAttr.get(kernel_call.descriptor),
-      api_version=ir.IntegerAttr.get(i32_type, 1),
-      called_computations=ir.ArrayAttr.get([]),
-      operand_layouts=avals_to_layouts(ctx.avals_in),
-      result_layouts=avals_to_layouts(ctx.avals_out),
-      output_operand_aliases=output_operand_aliases,
-  )
-  results = [mhlo.GetTupleElementOp(out, mlir.i32_attr(i)).result
-             for i in range(len(out_shapes))]
-  return results
-mlir.register_lowering(pallas_call_p, pallas_call_lowering, platform="cuda")
-
 @weakref_lru_cache
 def _initial_style_open_jaxpr(fun: Callable, in_tree, in_avals,
                               primitive_name: Optional[str] = None):
@@ -387,10 +288,6 @@ def _initial_style_open_jaxpr(fun: Callable, in_tree, in_avals,
   jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(wrapped_fun, in_avals, debug)
   jaxpr = for_loop._hoist_consts_to_refs(jaxpr)
   return jaxpr, consts, out_tree()
-
-def clear_caches():
-  _initial_style_open_jaxpr.cache_clear()
-  _compile_jaxpr.cache_clear()
 
 def _preprocess_grid(grid: Optional[Union[Grid, int]]) -> Grid:
   if grid is None:
@@ -430,8 +327,6 @@ def pallas_call(f: Callable, out_shape: Any, *, debug: bool = False,
                 interpret: bool = False,
                 name: Optional[str] = None,
                 **compiler_params: Any):
-  xc.register_custom_call_target(
-    "triton_kernel_call", triton_kernel_call_lib.get_custom_call(), platform="CUDA")
   if grid is None:
     if in_specs is not None:
       raise ValueError("Cannot specify `in_specs` with a `None` grid.")

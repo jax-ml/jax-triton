@@ -33,8 +33,12 @@ from jax.interpreters import partial_eval as pe
 import jax.numpy as jnp
 import jax_triton as jt
 from jax_triton import pallas as pl
+from jax_triton.pallas.pallas_call import _initial_style_open_jaxpr
 from jax_triton.pallas.ops import attention
-from jax_triton.pallas.pallas_call import _compile_jaxpr
+try:
+  from jax_triton.pallas.triton_ir_lowering import compile_jaxpr
+except ModuleNotFoundError:
+  compile_jaxpr = None
 import numpy as np
 try:
   import torch
@@ -116,7 +120,9 @@ class PallasTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
-    pl.clear_caches()
+    if compile_jaxpr:
+      compile_jaxpr.cache_clear()
+    _initial_style_open_jaxpr.cache_clear()
 
   def pallas_call(self, *args, **kwargs):
     return pl.pallas_call(*args, **kwargs, interpret=self.INTERPRET)
@@ -509,6 +515,8 @@ class PallasCallTest(PallasTest):
     self.assertEqual(trace_count, 1)
 
   def test_pallas_compilation_cache(self):
+    if not compile_jaxpr:
+      self.skipTest("No Triton GPU.")
     if self.INTERPRET:
       raise unittest.SkipTest("No Triton compilation in interpreter mode.")
     @functools.partial(
@@ -522,7 +530,7 @@ class PallasCallTest(PallasTest):
       return add_one(add_one(x))
 
     self.assertEqual(f(0.), 2.)
-    num_misses = _compile_jaxpr.cache_info().misses
+    num_misses = compile_jaxpr.cache_info().misses
     self.assertEqual(num_misses, 1)
 
   @parameterized.parameters(*[

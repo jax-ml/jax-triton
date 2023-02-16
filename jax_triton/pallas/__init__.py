@@ -15,7 +15,7 @@
 """Module for pallas, a jaxpr "dialect" for Triton."""
 from jax_triton.pallas.core import BlockSpec
 from jax_triton.pallas.pallas_call import pallas_call
-from jax_triton.pallas.pallas_call import clear_caches
+from jax_triton.pallas.pallas_call import pallas_call_p
 from jax_triton.pallas.primitives import atomic_add
 from jax_triton.pallas.primitives import atomic_and
 from jax_triton.pallas.primitives import atomic_cas
@@ -33,3 +33,10 @@ from jax_triton.pallas.primitives import multiple_of
 from jax_triton.pallas.primitives import program_id
 from jax_triton.pallas.primitives import store
 from jax_triton.pallas.primitives import swap
+from jax_triton.utils import cdiv
+
+try:
+  from jax_triton.pallas import triton_ir_lowering
+  del triton_ir_lowering
+except (ImportError, ModuleNotFoundError):
+  pass

@@ -37,6 +37,7 @@ from jax.interpreters import xla
 from jax.lib import xla_client as xc
 import jax.numpy as jnp
 from jax_triton import triton_kernel_call_lib
+from jax_triton import utils
 import numpy as np
 
 CAN_USE_TRITON = False
@@ -116,14 +117,6 @@ def triton_kernel_call_abstract_eval(*_, out_shapes, **__):
       for out_shape in out_shapes
   ]
 
-
-def aval_to_layout(aval):
-  arange = np.arange(aval.ndim, dtype="int64")[::-1].copy()
-  return ir.DenseIntElementsAttr.get(arange, type=ir.IndexType.get())
-
-
-def avals_to_layouts(avals):
-  return ir.ArrayAttr.get([aval_to_layout(a) for a in avals])
 
 
 def aval_size_bytes(aval):
@@ -303,7 +296,7 @@ def triton_kernel_call_lowering(
           metaparams=config_metaparams,
           dump_binary_path=dump_binary_path,
       )
-      grid = normalize_grid(grid, config_metaparams)
+      grid = utils.normalize_grid(grid, config_metaparams)
 
       config_zeroed_outputs = zeroed_outputs
       if callable(zeroed_outputs):
@@ -356,8 +349,8 @@ def triton_kernel_call_lowering(
       backend_config=ir.StringAttr.get(kernel_call.descriptor),
       api_version=ir.IntegerAttr.get(i32_type, 1),
       called_computations=ir.ArrayAttr.get([]),
-      operand_layouts=avals_to_layouts(ctx.avals_in),
-      result_layouts=avals_to_layouts(ctx.avals_out),
+      operand_layouts=utils.avals_to_layouts(ctx.avals_in),
+      result_layouts=utils.avals_to_layouts(ctx.avals_out),
       output_operand_aliases=output_operand_aliases,
   )
   results = [mhlo.GetTupleElementOp(out, mlir.i32_attr(i)).result
@@ -378,15 +371,6 @@ class ShapeDtype(Protocol):
   def dtype(self) -> np.dtype:
     ...
 
-
-def normalize_grid(grid: GridOrLambda, metaparams) -> Tuple[int, int, int]:
-  if callable(grid):
-    grid = grid(metaparams)
-  if isinstance(grid, int):
-    grid = (grid,)
-  elif len(grid) > 3:
-    raise ValueError("`grid` should have three or fewer dimensions.")
-  return tuple(grid) + (1,) * (3 - len(grid))
 
 
 def triton_call(
@@ -479,7 +463,7 @@ def triton_call(
       (if it is a function) and to the Triton kernel as `constexpr` arguments.
 
   Returns:
-    Outputs from the Trion kernel.
+    Outputs from the Triton kernel.
   """
   if not CAN_USE_TRITON:
     raise ValueError(
@@ -521,21 +505,3 @@ def triton_call(
   )
   return tree_util.tree_unflatten(out_tree, out_flat)
 
-
-def cdiv(a, b):
-  return triton.cdiv(a, b)
-
-
-def strides_from_shape(shape: Tuple[int]) -> Tuple[int]:
-  size = np.prod(shape)
-  strides = []
-  for s in shape:
-    size = size // s
-    strides.append(int(size))
-  return tuple(strides)
-
-
-def next_power_of_2(x: int) -> int:
-  if x == 0:
-    return 1
-  return 2 ** math.ceil(math.log2(x))
