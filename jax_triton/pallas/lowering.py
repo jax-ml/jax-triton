@@ -242,6 +242,10 @@ def _atomic_lowering_rule(ctx: TritonLoweringRuleContext, ptr, value,
   return op(ptr, value, mask=mask, _builder=ctx.builder)
 triton_lowering_rules[primitives.atomic_rmw_p] = _atomic_lowering_rule
 
+def _atomic_cas_lowering_rule(ctx: TritonLoweringRuleContext, ptr, cmp, val):
+  return tl.atomic_cas(ptr, cmp, val, _builder=ctx.builder)
+triton_lowering_rules[primitives.atomic_cas_p] = _atomic_cas_lowering_rule
+
 def _max_contiguous_lowering_rule(ctx: TritonLoweringRuleContext, x, *, values):
   values = [tl.constexpr(v) for v in values]
   return tl.max_contiguous(x, values, _builder=ctx.builder)
@@ -342,6 +346,10 @@ triton_lowering_rules[jax.lax.max_p] = max_lowering_rule
 def ge_lowering_rule(ctx: TritonLoweringRuleContext, a, b):
   return a.__ge__(b, _builder=ctx.builder)
 triton_lowering_rules[jax.lax.ge_p] = ge_lowering_rule
+
+def eq_lowering_rule(ctx: TritonLoweringRuleContext, a, b):
+  return a.__eq__(b, _builder=ctx.builder)
+triton_lowering_rules[jax.lax.eq_p] = eq_lowering_rule
 
 def select_n_lowering_rule(ctx: TritonLoweringRuleContext, pred, a, b):
   return tl.semantic.where(pred, b, a, ctx.builder)
@@ -737,7 +745,9 @@ def _while_lowering_rule(ctx: TritonLoweringRuleContext, *args, cond_nconsts,
   carry = lower_jaxpr_to_triton_ir(ctx.context, body_jaxpr.jaxpr,
                                    [*body_const_block_infos,
                                     *carry_block_infos], *body_consts, *lowering_args)
-  pred, = lower_jaxpr_to_triton_ir(ctx.context, cond_jaxpr.jaxpr, *cond_consts, *carry)
+  pred, = lower_jaxpr_to_triton_ir(ctx.context, cond_jaxpr.jaxpr,
+                                   [*cond_const_block_infos,
+                                    *carry_block_infos], *cond_consts, *carry)
   ctx.builder.cond_br(pred.handle, loop_bb, postloop_bb)
 
   # Update phi nodes to point to outputs of loop block
