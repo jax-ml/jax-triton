@@ -368,6 +368,10 @@ def eq_lowering_rule(ctx: TritonLoweringRuleContext, a, b):
   return a.__eq__(b, _builder=ctx.builder)
 triton_lowering_rules[jax.lax.eq_p] = eq_lowering_rule
 
+def bitwise_and_lowering_rule(ctx: TritonLoweringRuleContext, a, b):
+  return a.__and__(b, _builder=ctx.builder)
+triton_lowering_rules[jax.lax.and_p] = bitwise_and_lowering_rule
+
 def select_n_lowering_rule(ctx: TritonLoweringRuleContext, pred, a, b):
   return tl.semantic.where(pred, b, a, ctx.builder)
 triton_lowering_rules[jax.lax.select_n_p] = select_n_lowering_rule
