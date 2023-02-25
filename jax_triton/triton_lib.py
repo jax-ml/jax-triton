@@ -75,7 +75,7 @@ _JAX_TO_TRITON_TYPE_MAP = {
 
 
 def get_triton_type(obj: Any) -> str:
-  if isinstance(obj, (jax.core.ShapedArray, state.ShapedArrayRef)):
+  if isinstance(obj, (jax.core.ShapedArray, state.AbstractRef)):
     return f"*{_JAX_TO_TRITON_TYPE_MAP[obj.dtype]}"
   if isinstance(obj, tl.constexpr):
     obj = obj.value

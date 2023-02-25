@@ -35,7 +35,7 @@ from jax._src import state
 from jax.lib import xla_client as xc
 from jax._src.state import primitives as sp
 from jax._src.state import discharge
-from jax._src.state import ShapedArrayRef
+from jax._src.state import AbstractRef
 from jax._src.util import weakref_lru_cache
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import mhlo
@@ -679,11 +679,11 @@ def _for_lowering_rule(ctx: TritonLoweringRuleContext, *args, jaxpr,
   ctx.builder.set_insert_point((loop_bb, instr))
 
   # Populate phi args for loop block (loop counter and values)
-  should_discharge = [not isinstance(a, ShapedArrayRef) for a in ctx.avals_in]
+  should_discharge = [not isinstance(a, AbstractRef) for a in ctx.avals_in]
   loop_counter = ctx.builder.create_phi(tl.int32.to_ir(ctx.builder), 2)
-  ref_avals = [v.aval for v in jaxpr.invars][1:]
+  ref_avals = [v.aval for v in jaxpr.invars]
   read_only = [for_loop._is_read_only(eff) if eff else True for eff in
-               state.get_ref_state_effects(ref_avals, jaxpr.effects)]
+               state.get_ref_state_effects(ref_avals, jaxpr.effects)][1:]
   lowering_args = []
   for arg, sd, ro in zip(args, should_discharge, read_only):
     if not sd or ro:

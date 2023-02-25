@@ -353,9 +353,9 @@ def pallas_call(f: Callable, out_shape: Any, *, debug: bool = False,
     if grid is None:
       flat_in_specs = [None] * len(flat_args)
       flat_out_specs = [None] * len(flat_out_shapes)
-      in_ref_avals = [state.ShapedArrayRef(arg.shape, arg.dtype)
+      in_ref_avals = [state.shaped_array_ref(arg.shape, arg.dtype)
                       for arg in flat_args]
-      out_ref_avals = [state.ShapedArrayRef(arg.shape, arg.dtype)
+      out_ref_avals = [state.shaped_array_ref(arg.shape, arg.dtype)
                        for arg in flat_out_shapes]
     else:
       if in_specs is None:
@@ -374,11 +374,11 @@ def pallas_call(f: Callable, out_shape: Any, *, debug: bool = False,
           raise ValueError("Pytree specs for `out_shape` and `out_specs` must match: "
                            f"{out_tree} vs. {out_block_tree}")
       in_ref_avals = [
-          state.ShapedArrayRef(
+          state.shaped_array_ref(
             _compute_shape_from_block_spec(block_spec, arg.shape), arg.dtype)
           for block_spec, arg in zip(flat_in_specs, flat_args)]
       out_ref_avals = [
-          state.ShapedArrayRef(
+          state.shaped_array_ref(
             _compute_shape_from_block_spec(block_spec, arg.shape), arg.dtype)
           for block_spec, arg in zip(flat_out_specs, flat_out_shapes)]
     in_block_mappings = map(partial(_convert_block_spec_to_block_mapping, grid),

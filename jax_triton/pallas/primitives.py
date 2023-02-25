@@ -177,7 +177,7 @@ def _atomic_cas_abstract_eval(ref_aval, cmp_aval, val_aval):
     raise ValueError("Val must be scalar.")
   if cmp_aval.shape != val_aval.shape:
     raise ValueError("Dtypes in cmp/val need to match")
-  return jax_core.ShapedArray(val_aval.shape, val_aval.dtype), {state.WriteEffect(ref_aval)}
+  return jax_core.ShapedArray(val_aval.shape, val_aval.dtype), {state.WriteEffect(0)}
 atomic_cas_p.def_effectful_abstract_eval(_atomic_cas_abstract_eval)
 
 def atomic_cas(ref, cmp, val):
@@ -311,7 +311,7 @@ def _load_abstract_eval(ref_aval, *all_avals, args_tree,
                         **params: Any):
   idx_aval, *_ = tree_util.tree_unflatten(args_tree, all_avals)
   return (jax_core.ShapedArray(idx_aval.get_indexer_shape(), ref_aval.dtype),
-          {state.ReadEffect(ref_aval)})
+          {state.ReadEffect(0)})
 load_p.def_effectful_abstract_eval(_load_abstract_eval)
 
 def _pp_dslice(dim: int, slice: Slice, context):
@@ -411,7 +411,7 @@ def _swap_abstract_eval(ref_aval, val_aval, *all_avals, args_tree,
                      f"Ref dtype: {ref_aval.dtype}. "
                      f"Value shape: {val_aval.dtype}. ")
   return (jax_core.ShapedArray(expected_output_shape, ref_aval.dtype),
-          {state.WriteEffect(ref_aval)})
+          {state.WriteEffect(0)})
 swap_p.def_effectful_abstract_eval(_swap_abstract_eval)
 
 def _swap_pp_rule(eqn, context, settings):

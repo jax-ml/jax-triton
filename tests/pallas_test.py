@@ -798,7 +798,7 @@ class PallasPrimitivesTest(parameterized.TestCase):
       x = pl.load(x_ref, expr())
       return [x]
     jaxpr, _ , _ = pe.trace_to_jaxpr_dynamic(
-        lu.wrap_init(body), [state.ShapedArrayRef((4, 3, 2), jnp.int32)])
+        lu.wrap_init(body), [state.shaped_array_ref((4, 3, 2), jnp.int32)])
     self.assertIn(expected, jaxpr.pretty_print(use_color=False))
 
   @parameterized.parameters(*[
@@ -813,7 +813,7 @@ class PallasPrimitivesTest(parameterized.TestCase):
       pl.store(x_ref, expr(), pl.load(x_ref, expr()))
       return []
     jaxpr, _ , _ = pe.trace_to_jaxpr_dynamic(
-        lu.wrap_init(body), [state.ShapedArrayRef((4, 3, 2), jnp.int32)])
+        lu.wrap_init(body), [state.shaped_array_ref((4, 3, 2), jnp.int32)])
     self.assertIn(expected, jaxpr.pretty_print(use_color=False))
 
 class FusedAttentionTest(parameterized.TestCase):
