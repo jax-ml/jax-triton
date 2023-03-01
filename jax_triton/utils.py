@@ -45,7 +45,7 @@ def avals_to_layouts(avals):
 def cdiv(a: int, b: int) -> int:
   return (a + b - 1) // b
 
-def strides_from_shape(shape: Tuple[int]) -> Tuple[int]:
+def strides_from_shape(shape: Tuple[int, ...]) -> Tuple[int, ...]:
   size = np.prod(shape)
   strides = []
   for s in shape:
