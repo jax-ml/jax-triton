@@ -21,3 +21,5 @@ from jax_triton.triton_lib import triton_kernel_call_lib
 from jax_triton.version import __version__
 from jax_triton.version import __version_info__
 from jax_triton import pallas
+
+get_compute_capability = triton_kernel_call_lib.get_compute_capability

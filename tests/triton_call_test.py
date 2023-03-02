@@ -21,10 +21,11 @@ import jax
 from jax import random
 from jax.config import config
 import jax.numpy as jnp
-import jax_triton as jt
 import numpy as np
 import triton
 import triton.language as tl
+import jax_triton as jt
+from jax_triton import triton_lib
 try:
   import torch
 except ModuleNotFoundError:
@@ -292,7 +293,7 @@ class TritonKernelCallTest(parameterized.TestCase):
     x1, y1 = create_random_inputs([42])
     x2, y2 = create_random_inputs([43])
 
-    triton_compile_fn = triton.compiler._compile
+    triton_compile_fn = triton_lib.compile_ttir
 
     call_count = [0]
 
@@ -300,7 +301,7 @@ class TritonKernelCallTest(parameterized.TestCase):
       call_count[0] += 1
       return triton_compile_fn(*args, **kwargs)
 
-    with mock.patch.object(triton.compiler, "_compile", new=my_triton_compile):
+    with mock.patch.object(triton_lib, "compile_ttir", new=my_triton_compile):
       _ = fn1(x1, y1)
       self.assertEqual(call_count[0], 1)
       _ = fn2(x2, y2)

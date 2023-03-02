@@ -23,7 +23,7 @@ from jax_triton.pallas.ops import attention
 
 if __name__ == "__main__":
   dtype = jnp.float16
-  batch, seq_len, n_heads, head_dim = 384, 384, 4, 32
+  batch, seq_len, n_heads, head_dim = 4, 1024, 48, 64
   shape = (batch, seq_len, n_heads, head_dim)
 
   q_key, k_key, v_key = jax.random.split(jax.random.PRNGKey(0), 3)
@@ -32,18 +32,20 @@ if __name__ == "__main__":
   v = jax.random.normal(v_key, shape, dtype=dtype)
 
 
-  o = attention.mha(q, k, v)
-  o.block_until_ready()
+  o_ref = attention.mha_reference(q, k, v).block_until_ready()
+
+  mha = jax.jit(attention.mha)
+  o = mha(q, k, v).block_until_ready()
 
   mha_interpret = functools.partial(attention.mha, interpret=True)
-  o_ref = mha_interpret(q, k, v)
-  np.testing.assert_allclose(o, o_ref, atol=0.01, rtol=0.01)
+  o_int = mha_interpret(q, k, v).block_until_ready()
 
-  o_ref = attention.mha_reference(q, k, v)
-  np.testing.assert_allclose(o, o_ref, atol=0.01, rtol=0.01)
+  np.testing.assert_allclose(o, o_int, atol=0.03, rtol=0.03)
+  np.testing.assert_allclose(o_int, o_ref, atol=0.05, rtol=0.05)
+  np.testing.assert_allclose(o, o_ref, atol=0.05, rtol=0.05)
 
   n_trials = 1000
-  duration = timeit.timeit(lambda: attention.mha(q, k, v).block_until_ready(),
+  duration = timeit.timeit(lambda: mha(q, k, v).block_until_ready(),
                            number=n_trials)
   print(f"Fused Attention: {duration / n_trials * 1000:.2f}ms")
   duration = timeit.timeit(lambda: attention.mha_reference(q, k, v).block_until_ready(),
