@@ -126,6 +126,28 @@ def matmul_kernel(
   tl.store(c_ptrs, c, mask=c_mask)
 
 
+def matmul(x, y, *, kernel=matmul_kernel, **kwargs):
+  m, k = x.shape
+  _, n = y.shape
+
+  def grid(meta):
+    cdiv = triton.cdiv
+    return cdiv(m, meta["BLOCK_SIZE_M"]) * cdiv(n, meta["BLOCK_SIZE_N"])
+
+  return jt.triton_call(
+      x,
+      y,
+      m,
+      n,
+      k,
+      kernel=kernel,
+      out_shape=jax.ShapeDtypeStruct((m, n), dtype=x.dtype),
+      grid=grid,
+      GROUP_SIZE_M=8,
+      **kwargs,
+  )
+
+
 def create_random_inputs(shape1, shape2=None, *, dtype="float32"):
   if shape2 is None:
     shape2 = shape1
@@ -161,7 +183,6 @@ class TritonKernelCallTest(parameterized.TestCase):
       block_size_m=[64, 128],
       block_size_n=[128, 256],
       block_size_k=[32],
-      group_size_m=[8],
   )
   def test_matmul(
       self,
@@ -172,26 +193,18 @@ class TritonKernelCallTest(parameterized.TestCase):
       block_size_m,
       block_size_n,
       block_size_k,
-      group_size_m,
   ):
     # TODO(sharadmv): expose this information in `jaxlib`
     if torch is not None and torch.cuda.get_device_capability() < (7, 0):
       self.skipTest("Matmul only works on GPUs with capability >= sm70")
 
     x, y = create_random_inputs([m, k], [k, n], dtype=dtype)
-    out = jt.triton_call(
+    out = matmul(
         x,
         y,
-        m,
-        n,
-        k,
-        kernel=matmul_kernel,
-        out_shape=jax.ShapeDtypeStruct((m, n), dtype=dtype),
-        grid=(triton.cdiv(m, block_size_m) * triton.cdiv(n, block_size_n),),
         BLOCK_SIZE_M=block_size_m,
         BLOCK_SIZE_N=block_size_n,
         BLOCK_SIZE_K=block_size_k,
-        GROUP_SIZE_M=group_size_m,
         K_EXACTLY_DIVISIBLE_BY_BLOCK=k % block_size_k == 0,
     )
     expected = jnp.matmul(x, y)
@@ -327,28 +340,51 @@ class TritonKernelCallTest(parameterized.TestCase):
 
     heuristics = {"K_EXACTLY_DIVISIBLE_BY_BLOCK": heuristic_fn}
     kernel = triton.heuristics(heuristics)(matmul_kernel)
-    block_size_m = block_size_n = block_size_k = 32
 
-    def matmul(m, n, k):
+    def do_matmul(m, n, k):
       x, y = create_random_inputs([m, k], [k, n])
-      return jt.triton_call(
+      return matmul(
           x,
           y,
-          m,
-          n,
-          k,
           kernel=kernel,
-          out_shape=jax.ShapeDtypeStruct((m, n), dtype=x.dtype),
-          grid=(triton.cdiv(m, block_size_m) * triton.cdiv(n, block_size_n),),
-          BLOCK_SIZE_M=block_size_m,
-          BLOCK_SIZE_N=block_size_n,
-          BLOCK_SIZE_K=block_size_k,
-          GROUP_SIZE_M=1,
+          BLOCK_SIZE_M=32,
+          BLOCK_SIZE_N=32,
+          BLOCK_SIZE_K=32,
       )
 
-    _ = matmul(m=128, n=128, k=128)
-    _ = matmul(m=128, n=128, k=144)
+    _ = do_matmul(m=128, n=128, k=128)
+    _ = do_matmul(m=128, n=128, k=144)
     self.assertEqual(heuristic_returned_values, [True, False])
+
+  def test_autotune_with_heuristics(self):
+    heuristic_returned_values = []
+
+    def heuristic_fn(args):
+      heuristic_returned_values.append(args["K"] % args["BLOCK_SIZE_K"] == 0)
+      return heuristic_returned_values[-1]
+
+    heuristics = {"K_EXACTLY_DIVISIBLE_BY_BLOCK": heuristic_fn}
+    autotune_configs = [
+        triton.Config({"BLOCK_SIZE_K": 32}, num_warps=1),
+        triton.Config({"BLOCK_SIZE_K": 64}, num_warps=1),
+    ]
+    kernel = triton.autotune(autotune_configs, key=("M", "N", "K"))(
+        triton.heuristics(heuristics)(matmul_kernel)
+    )
+
+    def do_matmul(m, n, k):
+      x, y = create_random_inputs([m, k], [k, n])
+      return matmul(
+          x,
+          y,
+          kernel=kernel,
+          BLOCK_SIZE_M=32,
+          BLOCK_SIZE_N=32,
+      )
+
+    _ = do_matmul(m=128, n=128, k=128)
+    _ = do_matmul(m=128, n=128, k=160)
+    self.assertEqual(heuristic_returned_values, [True, True, True, False])
 
 
 if __name__ == "__main__":
