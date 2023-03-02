@@ -211,9 +211,7 @@ class PallasCallTest(PallasTest):
       if block_size_m <= m and block_size_n <= n and block_size_k <= k
     ])
   def test_matmul(self, m, n, k, dtype, bm, bn, bk, gm):
-
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Matmul only works on GPUs with capability >= sm70")
 
@@ -238,9 +236,7 @@ class PallasCallTest(PallasTest):
       if block_size_m <= m and block_size_n <= n and block_size_k <= k
     ])
   def test_matmul_block_spec(self, m, n, k, dtype, bm, bn, bk):
-
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Matmul only works on GPUs with capability >= sm70")
 
@@ -257,8 +253,7 @@ class PallasCallTest(PallasTest):
       for dtype in ["float32", "float16"]
   ))
   def test_dot(self, size, dtype):
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Matmul only works on GPUs with capability >= sm70")
 
@@ -392,8 +387,7 @@ class PallasCallTest(PallasTest):
     ("min_f32", pl.atomic_min, np.array([1, 2, 3, 4], np.float32), np.min),
   ])
   def test_scalar_atomic(self, op, value, numpy_op):
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Atomic ops onl works on GPUs with capability >= sm70")
 
@@ -426,8 +420,7 @@ class PallasCallTest(PallasTest):
 
   @parameterized.parameters(*[(0,), (1,)])
   def test_array_atomic_add(self, axis):
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Atomic ops onl works on GPUs with capability >= sm70")
 
@@ -819,13 +812,11 @@ class PallasPrimitivesTest(parameterized.TestCase):
 class FusedAttentionTest(parameterized.TestCase):
 
   @parameterized.parameters(*[
-    (1, 384, 1, 32),
-    (2, 384, 2, 32),
+    (1, 384, 1, 64),
+    (2, 384, 2, 64),
   ])
   def test_fused_attention_fwd(self, batch_size, seq_len, num_heads, head_dim):
-    self.skipTest("Not yet working on V100")
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (8, 0):
+    if jt.get_compute_capability(0) < 80:
       raise unittest.SkipTest(
           "Fused attention only works on GPUs with capability >= sm80")
 
@@ -843,9 +834,7 @@ class FusedAttentionTest(parameterized.TestCase):
     (2, 384, 2, 32),
   ])
   def test_fused_attention_bwd(self, batch_size, seq_len, num_heads, head_dim):
-    self.skipTest("Not yet working on V100")
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (8, 0):
+    if jt.get_compute_capability(0) < 80:
       raise unittest.SkipTest(
           "Fused attention only works on GPUs with capability >= sm80")
 
@@ -874,7 +863,7 @@ class FusedLayerNormTest(parameterized.TestCase):
     (2, 384, 192),
   ])
   def test_fused_layernorm_fwd(self, batch_size, seq_len, embed_dim):
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Fused layernorm only works on GPUs with capability >= sm70")
     k1, k2, k3 = random.split(random.PRNGKey(0), 3)
@@ -891,7 +880,7 @@ class FusedLayerNormTest(parameterized.TestCase):
     (2, 384, 192),
   ])
   def test_fused_layernorm_bwd(self, batch_size, seq_len, embed_dim):
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Fused layernorm only works on GPUs with capability >= sm70")
     k1, k2, k3 = random.split(random.PRNGKey(0), 3)

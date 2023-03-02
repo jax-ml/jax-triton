@@ -376,6 +376,15 @@ PYBIND11_MODULE(triton_kernel_call_lib, m) {
       py::overload_cast<py::float_, std::string_view>(&EncodeKernelParameter));
   m.def("encode_kernel_parameter",
         py::overload_cast<py::bool_, std::string_view>(&EncodeKernelParameter));
+  m.def("get_compute_capability", [](int device) {
+      int major, minor;
+      CHECK_CUDA(cuInit(device));
+      CHECK_CUDA(cuDeviceGetAttribute(
+            &major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device));
+      CHECK_CUDA(cuDeviceGetAttribute(
+            &minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device));
+      return major * 10 + minor;
+  });
 }
 
 }  // namespace jax_triton
