@@ -303,7 +303,7 @@ def triton_kernel_call_lowering(
       if callable(zeroed_outputs):
         config_zeroed_outputs = config_zeroed_outputs(config_metaparams)
 
-      zeroed_outputs_and_sizes = {
+      zeroed_outputs_with_sizes = {
           i + len(ctx.avals_in): aval_size_bytes(ctx.avals_out[i])
           for i in config_zeroed_outputs
       }
@@ -315,15 +315,20 @@ def triton_kernel_call_lowering(
               grid[1],
               grid[2],
               encoded_args,
-              zeroed_outputs_and_sizes,
+              zeroed_outputs_with_sizes,
           )
       )
 
     if len(kernel_calls) > 1:
       named_scalar_args = {fn.arg_names[i]: v for i, _, v in scalar_args}
+      input_output_aliases_with_sizes = tuple(
+          (input_idx, output_idx, aval_size_bytes(ctx.avals_in[input_idx]))
+          for input_idx, output_idx in input_output_aliases
+      )
       kernel_call = triton_kernel_call_lib.TritonAutotunedKernelCall(
           f"{fn.fn.__name__} ({call_name=}) {named_scalar_args}",
           [(call, str(config)) for call, config in zip(kernel_calls, configs)],
+          input_output_aliases_with_sizes,
       )
     else:
       kernel_call = kernel_calls[0]
@@ -335,11 +340,11 @@ def triton_kernel_call_lowering(
   output_operand_aliases = ir.ArrayAttr.get(
       [
           mhlo.OutputOperandAlias.get(
-              output_tuple_indices=[output],
-              operand_index=input,
+              output_tuple_indices=[output_idx],
+              operand_index=input_idx,
               operand_tuple_indices=[],
           )
-          for input, output in input_output_aliases
+          for input_idx, output_idx in input_output_aliases
       ]
   )
 

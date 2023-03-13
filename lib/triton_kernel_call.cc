@@ -187,11 +187,30 @@ class TritonAutotunedKernelCall : public TritonKernelCallBase {
     std::string description;
   };
 
-  TritonAutotunedKernelCall(std::string name, std::vector<Config> configs)
-      : name_(name), configs_(configs) {}
+  TritonAutotunedKernelCall(
+      std::string name, std::vector<Config> configs,
+      std::vector<std::tuple<size_t, size_t, size_t>> input_output_aliases)
+      : name_(std::move(name)),
+        configs_(std::move(configs)),
+        input_output_aliases_(std::move(input_output_aliases)) {}
 
   void Launch(CUstream stream, void** buffers) override {
     if (configs_.size() > 1) {
+      // If an input aliases with an output, it will get overwritten during the
+      // kernel execution. If the kernel is called repeatedly, as we do during
+      // auto-tuning, the final result will be junk, so we take a copy of the
+      // input to restore after auto-tuning.
+      std::unordered_map<size_t, std::vector<uint8_t>> input_copies;
+      for (auto [input_idx, output_idx, size] : input_output_aliases_) {
+        if (buffers[input_idx] == buffers[output_idx]) {
+          std::vector<uint8_t> input_copy(size);
+          CHECK_CUDA(cuMemcpyDtoHAsync(
+              input_copy.data(),
+              reinterpret_cast<CUdeviceptr>(buffers[input_idx]), size, stream));
+          input_copies[input_idx] = std::move(input_copy);
+        }
+      }
+
       std::cerr << "Autotuning function: " << name_ << std::endl;
       // First run a single iteration of each to config to determine how many
       // iterations to run for benchmarking.
@@ -228,6 +247,16 @@ class TritonAutotunedKernelCall : public TritonKernelCallBase {
       // Discard all but the best config.
       py::gil_scoped_acquire gil;
       configs_.erase(configs_.begin() + 1, configs_.end());
+
+      // Restore aliased inputs to their original values.
+      for (auto [input_idx, _, size] : input_output_aliases_) {
+        CHECK_CUDA(
+            cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(buffers[input_idx]),
+                              input_copies[input_idx].data(), size, stream));
+      }
+      // Synchronize stream to ensure copies are complete before the host copy
+      // is deleted.
+      CHECK_CUDA(cuStreamSynchronize(stream));
     }
 
     auto& kernel_call = py::cast<TritonKernelCall&>(configs_[0].kernel_call);
@@ -259,6 +288,8 @@ class TritonAutotunedKernelCall : public TritonKernelCallBase {
   std::string name_;
   // After auto-tuning, all configurations, except the best, will be discarded.
   std::vector<Config> configs_;
+  // (input buffer idx, output buffer idx, size)
+  std::vector<std::tuple<size_t, size_t, size_t>> input_output_aliases_;
 };
 
 template <typename CppT, typename PyT>
@@ -344,14 +375,17 @@ PYBIND11_MODULE(triton_kernel_call_lib, m) {
   py::class_<TritonAutotunedKernelCall>(m, "TritonAutotunedKernelCall")
       .def(py::init<>([](std::string name,
                          std::vector<std::pair<py::object, std::string>>
-                             calls_and_descriptions) {
+                             calls_and_descriptions,
+                         std::vector<std::tuple<size_t, size_t, size_t>>
+                             input_output_aliases) {
         std::vector<TritonAutotunedKernelCall::Config> configs;
         configs.reserve(calls_and_descriptions.size());
         for (auto& [kernel_call, desc] : calls_and_descriptions) {
           configs.push_back({std::move(kernel_call), std::move(desc)});
         }
-        return std::make_unique<TritonAutotunedKernelCall>(std::move(name),
-                                                           std::move(configs));
+        return std::make_unique<TritonAutotunedKernelCall>(
+            std::move(name), std::move(configs),
+            std::move(input_output_aliases));
       }))
       .def_property_readonly(
           "descriptor", [](TritonAutotunedKernelCall& kernel_call) {

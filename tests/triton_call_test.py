@@ -257,6 +257,7 @@ class TritonKernelCallTest(parameterized.TestCase):
 
     size = 8
     x = random.normal(random.PRNGKey(0), [size])
+    expected = x + 1
     out = jt.triton_call(
         x,
         size,
@@ -266,7 +267,6 @@ class TritonKernelCallTest(parameterized.TestCase):
         BLOCK_SIZE=1,
         input_output_aliases={0: 0},
     )
-    expected = x + 1
     np.testing.assert_allclose(out, expected)
 
   @parameterized.parameters(False, True)
@@ -317,8 +317,8 @@ class TritonKernelCallTest(parameterized.TestCase):
     kernel = triton.autotune(autotune_configs, key=("n_elements",))(add_kernel)
 
     x, y = create_random_inputs([1024])
-    out = add(x, y, kernel=kernel)
     expected = x + y
+    out = add(x, y, kernel=kernel)
     np.testing.assert_allclose(out, expected)
 
   def test_autotune_pre_hook_error(self):
@@ -385,6 +385,18 @@ class TritonKernelCallTest(parameterized.TestCase):
     _ = do_matmul(m=128, n=128, k=128)
     _ = do_matmul(m=128, n=128, k=160)
     self.assertEqual(heuristic_returned_values, [True, True, True, False])
+
+  def test_autotune_with_input_output_aliasing(self):
+    autotune_configs = [
+        triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
+        triton.Config({"BLOCK_SIZE": 64}, num_warps=1),
+    ]
+    kernel = triton.autotune(autotune_configs, key=("n_elements",))(add_kernel)
+
+    x, y = create_random_inputs([1024])
+    expected = x + y
+    out = add(x, y, kernel=kernel, input_output_aliases={0: 0})
+    np.testing.assert_allclose(out, expected)
 
 
 if __name__ == "__main__":
