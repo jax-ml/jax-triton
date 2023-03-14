@@ -196,6 +196,41 @@ class PallasCallTest(PallasTest):
       idx = jnp.arange(i, i + 2)
       np.testing.assert_allclose(index(x, idx), x[idx])
 
+  @parameterized.parameters(*[
+    ((), (2,), ()),
+    ((1,), (2,), (0,)),
+    ((1, 1), (2, 2), (0, 1)),
+    ((), (2, 2), ()),
+  ])
+  def test_broadcast_in_dim(self, in_shape, out_shape, dims):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct(out_shape, jnp.float32),
+        grid=1)
+    def f(x_ref, o_ref):
+      x = x_ref[...]
+      o_ref[...] = jax.lax.broadcast_in_dim(x, out_shape, dims)
+
+    x = jnp.arange(int(np.prod(in_shape)), dtype=jnp.float32).reshape(in_shape)
+    expected = jax.lax.broadcast_in_dim(x, out_shape, dims)
+    np.testing.assert_allclose(f(x), expected)
+
+  @parameterized.parameters(*[
+    ((2, 4), (8,)),
+    ((2, 4), (8, 1)),
+    ((2, 4), (1, 8)),
+    ((64,), (32, 2)),
+  ])
+  def test_reshape(self, in_shape, out_shape):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct(out_shape, jnp.float32),
+        grid=1)
+    def f(x_ref, o_ref):
+      o_ref[...] = x_ref[...].reshape(out_shape)
+
+    x = jnp.arange(int(np.prod(in_shape)), dtype=jnp.float32).reshape(in_shape)
+    expected = x.reshape(out_shape)
+    np.testing.assert_allclose(f(x), expected)
+
   @parameterized.named_parameters(*[
     (f"m_{m}_n_{n}_k_{k}_dtype_{dtype}_bm_{block_size_m}_"
      f"bn_{block_size_n}_bk_{block_size_k}_gm_{group_size_m}", m, n, k, dtype,

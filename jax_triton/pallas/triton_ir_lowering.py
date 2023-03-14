@@ -398,19 +398,28 @@ triton_lowering_rules[jax.lax.neg_p] = _neg_lowering_rule
 
 def _broadcast_in_dim_lowering_rule(ctx: TritonLoweringRuleContext, a, *, broadcast_dimensions, shape):
   # Add dummy dimensions
-  if len(a.shape) != 1 or a.shape[0].value != 1:
-    a_shape_iter = iter(a.shape)
-    new_shape = [next(a_shape_iter) if i in broadcast_dimensions else 1
-        for i in range(len(shape))]
-    new_shape = tuple(tl.constexpr(v) for v in new_shape)
-    a = tl.reshape(a, new_shape, _builder=ctx.builder)
+  if not a.type.is_block():
+    return tl.broadcast_to(a, list(shape), _builder=ctx.builder)
+  a_shape_iter = iter(a.shape)
+  new_shape = [next(a_shape_iter) if i in broadcast_dimensions else 1
+               for i in range(len(shape))]
+  new_shape = tuple(tl.constexpr(v) for v in new_shape)
+  a = tl.reshape(a, new_shape, _builder=ctx.builder)
   return tl.broadcast_to(a, list(shape), _builder=ctx.builder)
 triton_lowering_rules[jax.lax.broadcast_in_dim_p] = _broadcast_in_dim_lowering_rule
 
 def _squeeze_lowering_rule(ctx: TritonLoweringRuleContext, a, *, dimensions):
+  del dimensions
   shape = [tl.constexpr(s) for s in ctx.avals_out[0].shape]
   return tl.reshape(a, shape, _builder=ctx.builder)
 triton_lowering_rules[jax.lax.squeeze_p] = _squeeze_lowering_rule
+
+def _reshape_lowering_rule(ctx: TritonLoweringRuleContext, a, *, new_sizes,
+                           dimensions):
+  del new_sizes, dimensions
+  shape = [tl.constexpr(s) for s in ctx.avals_out[0].shape]
+  return tl.reshape(a, shape, _builder=ctx.builder)
+triton_lowering_rules[jax.lax.reshape_p] = _reshape_lowering_rule
 
 def _offset_ptr(ptr, block_info: Optional[BlockInfo], idx: primitives.NDIndexer, shape, builder,
                 is_scalar):
