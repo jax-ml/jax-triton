@@ -32,14 +32,13 @@ from jax._src import core as jax_core
 from jax._src.lib.mlir.dialects import mhlo
 from jax._src import state
 from jax._src.util import (
-    split_list, safe_map, safe_zip, weakref_lru_cache,
+    split_list, safe_map, safe_zip,
     tuple_insert, partition_list)
-from jax._src.lax.control_flow import for_loop
 import jax.numpy as jnp
 import numpy as np
 
-from jax_triton.utils import avals_to_layouts, normalize_grid
 from jax_triton.pallas import core as pallas_core
+from jax_triton.pallas import tracing_utils
 
 map, unsafe_map = safe_map, map
 zip, unsafe_zip = safe_zip, zip
@@ -280,47 +279,6 @@ def _pallas_call_batching_rule(args, dims, *,
   return out, (0,) * len(out)
 batching.primitive_batchers[pallas_call_p] = _pallas_call_batching_rule
 
-@weakref_lru_cache
-def _initial_style_open_jaxpr(fun: Callable, in_tree, in_avals,
-                              primitive_name: Optional[str] = None):
-  wrapped_fun, out_tree_thunk = api_util.flatten_fun_nokwargs(
-      lu.wrap_init(fun), in_tree)
-  debug = pe.debug_info(fun, in_tree, out_tree_thunk, False,
-                        primitive_name or "<unknown>")
-  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(wrapped_fun, in_avals, debug)
-  jaxpr = for_loop._hoist_consts_to_refs(jaxpr)
-  return jaxpr, consts, out_tree_thunk()
-
-def _preprocess_grid(grid: Optional[Union[Grid, int]]) -> Grid:
-  if grid is None:
-    return ()
-  if isinstance(grid, int):
-    return (grid,)
-  return grid
-
-def _extract_function_name(f: Callable, name: Optional[str]) -> str:
-  if name is None:
-    name = f.__name__ if hasattr(f, "__name__") and f.__name__ else "func"
-  return name
-
-def _convert_block_spec_to_block_mapping(
-    grid: Grid, block_spec: Optional[BlockSpec]) -> Optional[BlockMapping]:
-  if block_spec is None:
-    return None
-  in_avals = [jax_core.ShapedArray((), jnp.int32) for _ in grid]
-  block_shape = tuple(
-      pallas_core.mapped if s is None else s for s in block_spec.block_shape)
-  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(
-      lu.wrap_init(block_spec.compute_index), in_avals)
-  return BlockMapping(block_shape, jax_core.ClosedJaxpr(jaxpr, consts))
-
-def _compute_shape_from_block_spec(block_spec: Optional[BlockSpec],
-                                   arg_shape: Tuple[int, ...]
-                                   ) -> Tuple[int, ...]:
-  if block_spec is None:
-    return arg_shape
-  return tuple(s for s in block_spec.block_shape if s is not None)
-
 def pallas_call(f: Callable, out_shape: Any, *, debug: bool = False,
                 grid: Optional[Grid] = None,
                 in_specs: Optional[Sequence[Optional[BlockSpec]]] = None,
@@ -329,82 +287,42 @@ def pallas_call(f: Callable, out_shape: Any, *, debug: bool = False,
                 interpret: bool = False,
                 name: Optional[str] = None,
                 **compiler_params: Any):
-  if grid is None:
-    if in_specs is not None:
-      raise ValueError("Cannot specify `in_specs` with a `None` grid.")
-    if out_specs is not None:
-      raise ValueError("Cannot specify `out_specs` with a `None` grid.")
-  grid = _preprocess_grid(grid)
-  name = _extract_function_name(f, name)
-  singleton = False
   if not isinstance(out_shape, (tuple, list)):
     out_shape = (out_shape,)
     singleton = True
   if not isinstance(out_shape, tuple):
     out_shape = tuple(out_shape)
-  flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
-  if out_specs is not None and not isinstance(out_specs, (tuple, list)):
-    out_specs = (out_specs,)
-  if out_specs is not None and not isinstance(out_specs, tuple):
-    out_specs = tuple(out_specs)
-  flat_out_shapes = [jax.ShapeDtypeStruct(x.shape, x.dtype)
-                     for x in flat_out_shapes]
+
   @jax.jit
   def wrapped(*args):
     flat_args, in_tree = tree_util.tree_flatten(args)
-    if grid is None:
-      flat_in_specs = [None] * len(flat_args)
-      flat_out_specs = [None] * len(flat_out_shapes)
-      in_ref_avals = [state.shaped_array_ref(arg.shape, arg.dtype)
-                      for arg in flat_args]
-      out_ref_avals = [state.shaped_array_ref(arg.shape, arg.dtype)
-                       for arg in flat_out_shapes]
-    else:
-      if in_specs is None:
-        flat_in_specs = [None for arg in flat_args]
-      else:
-        flat_in_specs, in_block_tree = tree_util.tree_flatten(tuple(in_specs))
-        if in_block_tree != in_tree:
-          raise ValueError(
-              "Pytree specs for arguments and `in_specs` must match: "
-              f"{in_tree} vs. {in_block_tree}")
-      if out_specs is None:
-        flat_out_specs = [None for arg in flat_out_shapes]
-      else:
-        flat_out_specs, out_block_tree = tree_util.tree_flatten(out_specs)
-        if out_block_tree != out_tree:
-          raise ValueError("Pytree specs for `out_shape` and `out_specs` must match: "
-                           f"{out_tree} vs. {out_block_tree}")
-      in_ref_avals = [
-          state.shaped_array_ref(
-            _compute_shape_from_block_spec(block_spec, arg.shape), arg.dtype)
-          for block_spec, arg in zip(flat_in_specs, flat_args)]
-      out_ref_avals = [
-          state.shaped_array_ref(
-            _compute_shape_from_block_spec(block_spec, arg.shape), arg.dtype)
-          for block_spec, arg in zip(flat_out_specs, flat_out_shapes)]
-    in_block_mappings = map(partial(_convert_block_spec_to_block_mapping, grid),
-                            flat_in_specs)
-    out_block_mappings = map(partial(_convert_block_spec_to_block_mapping, grid),
-                             flat_out_specs)
+    flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
+
     jaxpr_in_tree = tree_util.tree_structure((*args, *out_shape))
-    jaxpr, consts, _ = _initial_style_open_jaxpr(
-        f, jaxpr_in_tree, tuple((*in_ref_avals, *out_ref_avals)),
-        primitive_name="pallas_call")
-    flat_in_specs = it.chain([None] * len(consts), flat_in_specs)
-    grid_spec = GridSpec(grid, tuple((*in_block_mappings,
-                                      *out_block_mappings)),
-                         ())
+    if not isinstance(f, pallas_core.Kernel):
+      kernel = pallas_core.Kernel(f, name, grid, in_specs, out_specs)
+    else:
+      kernel = f
+    flat_in_avals = tuple(jax_core.raise_to_shaped(jax_core.get_aval(a))
+                          for a in flat_args)
+    flat_out_avals = tuple(jax_core.ShapedArray(a.shape, a.dtype)
+                           for a in flat_out_shapes)
+    specialized_kernels, consts, out_tree = kernel.specialize(
+        flat_in_avals, flat_out_avals, jaxpr_in_tree)
     which_linear = (False,) * len(flat_args)
     out_flat = pallas_call_p.bind(
-        *consts, *flat_args, jaxpr=jaxpr, name=name, which_linear=which_linear,
+        *consts, *flat_args,
+        kernels=specialized_kernels,
+        name=name,
+        which_linear=which_linear,
         in_shapes=tuple(jax.ShapeDtypeStruct(a.shape, a.dtype)
                         for a in flat_args),
-        out_shapes=tuple(flat_out_shapes), debug=debug,
+        out_shapes=tuple(flat_out_shapes),
+        debug=debug,
         interpret=interpret,
-        grid_spec=grid_spec,
         input_output_aliases=tuple(input_output_aliases.items()),
         **compiler_params)
+    print(out_flat)
     out = tree_util.tree_unflatten(out_tree, out_flat)
     if singleton:
       return out[0]

@@ -33,7 +33,7 @@ from jax.interpreters import partial_eval as pe
 import jax.numpy as jnp
 import jax_triton as jt
 from jax_triton import pallas as pl
-from jax_triton.pallas.pallas_call import _initial_style_open_jaxpr
+from jax_triton.pallas.core import _initial_style_open_jaxpr
 from jax_triton.pallas.ops import attention
 from jax_triton.pallas.ops import layer_norm
 try:
