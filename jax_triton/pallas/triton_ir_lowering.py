@@ -659,10 +659,6 @@ def _reduce_argmin_lowering(ctx: TritonLoweringRuleContext, a, *, axes,
   return tl.argmin(a, axis=axis, _builder=ctx.builder)
 triton_lowering_rules[lax.argmin_p] = _reduce_argmin_lowering
 
-def _xla_call_lowering_rule(ctx: TritonLoweringRuleContext, *args, call_jaxpr, **_):
-  return lower_jaxpr_to_triton_ir(ctx.context, call_jaxpr, ctx.block_infos, *args)
-triton_lowering_rules[xla.xla_call_p] = _xla_call_lowering_rule
-
 def _pjit_lowering_rule(ctx: TritonLoweringRuleContext, *args, jaxpr, **_):
   if jaxpr.consts:
     raise NotImplementedError

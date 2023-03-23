@@ -171,10 +171,6 @@ def _logistic_lowering_rule(x):
       num_warps=4, num_stages=3)(x)
 lowering_rules[lax.logistic_p] = _logistic_lowering_rule
 
-def _xla_call_lowering_rule(*args, call_jaxpr, **_):
-  return _eval_fused_jaxpr(call_jaxpr, (), *args)
-lowering_rules[xla.xla_call_p] = _xla_call_lowering_rule
-
 elementwise_p = core.Primitive('elementwise')
 elementwise_p.multiple_results = True
 
