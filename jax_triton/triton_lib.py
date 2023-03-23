@@ -18,6 +18,7 @@ import functools
 import math
 import os
 import pickle
+import types
 import weakref
 
 from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple, Union
@@ -129,6 +130,7 @@ _COMPILED_KERNEL_CACHE = weakref.WeakValueDictionary()
 
 def get_or_create_triton_kernel(
     fn,
+    args,
     arg_dtypes,
     *,
     num_warps,
@@ -137,19 +139,31 @@ def get_or_create_triton_kernel(
     dump_binary_path,
 ) -> triton_kernel_call_lib.TritonKernel:
   signature = dict(enumerate(arg_dtypes))
+  # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
+  # We assume that all arrays are aligned to 16 bytes, and Triton may use this
+  # assumption, unless array args are include in the `do_not_specialize` list.
+  # We replace array arguments with mock Torch tensors, to allow us to use
+  # `JITFunction._get_config` to get the specialization.
+  mock_torch_tensor = types.SimpleNamespace(data_ptr=lambda: 16)
+  specialization = fn._get_config(  # pylint: disable=protected-access
+      *(
+          mock_torch_tensor if dtype.startswith("*") else arg
+          for arg, dtype in zip(args, arg_dtypes)
+      )
+  )
+  # TODO(cjfj): Workout why using `equal_to_1` causes errors and remove this.
+  specialization = specialization._replace(equal_to_1=())
 
   constants = {fn.arg_names.index(k): v for k, v in metaparams.items()}
-  # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
-  specialization = collections.namedtuple(
-      "instance_descriptor", ["divisible_by_16", "equal_to_1"]
-  )(tuple(range(len(arg_dtypes))), ())
+  constants.update({i: None for i, arg in enumerate(args) if arg is None})
+  constants.update({i: 1 for i in specialization.equal_to_1})
 
   # Cache key should contain any parameter that can affect the compiler output.
   cache_key = (
       fn,
-      tuple(arg_dtypes),
-      tuple(metaparams.items()),
+      tuple(signature.items()),
       specialization,
+      tuple(constants.items()),
       num_warps,
       num_stages,
   )
@@ -279,7 +293,7 @@ def triton_kernel_call_lowering(
       fn,
       tuple(configs),
       tuple(arg_dtypes),
-      tuple(encoded_args),
+      tuple(scalar_args),
       tuple(metaparams.items()),
   )
   kernel_call = _KERNEL_CALL_CACHE.get(cache_key)
@@ -291,6 +305,7 @@ def triton_kernel_call_lowering(
 
       kernel = get_or_create_triton_kernel(
           fn,
+          args,
           arg_dtypes,
           num_warps=config.num_warps,
           num_stages=config.num_stages,
