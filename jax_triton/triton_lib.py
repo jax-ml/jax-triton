@@ -130,8 +130,8 @@ _COMPILED_KERNEL_CACHE = weakref.WeakValueDictionary()
 
 def get_or_create_triton_kernel(
     fn,
-    args,
     arg_dtypes,
+    scalar_args,
     *,
     num_warps,
     num_stages,
@@ -145,17 +145,15 @@ def get_or_create_triton_kernel(
   # We replace array arguments with mock Torch tensors, to allow us to use
   # `JITFunction._get_config` to get the specialization.
   mock_torch_tensor = types.SimpleNamespace(data_ptr=lambda: 16)
-  specialization = fn._get_config(  # pylint: disable=protected-access
-      *(
-          mock_torch_tensor if dtype.startswith("*") else arg
-          for arg, dtype in zip(args, arg_dtypes)
-      )
-  )
+  args_for_specialization = [mock_torch_tensor] * len(arg_dtypes)
+  for i, _, v in scalar_args:
+    args_for_specialization[i] = v
+  specialization = fn._get_config(*args_for_specialization)  # pylint: disable=protected-access
   # TODO(cjfj): Workout why using `equal_to_1` causes errors and remove this.
   specialization = specialization._replace(equal_to_1=())
 
   constants = {fn.arg_names.index(k): v for k, v in metaparams.items()}
-  constants.update({i: None for i, arg in enumerate(args) if arg is None})
+  constants.update({i: None for i, _, v in scalar_args if v is None})
   constants.update({i: 1 for i in specialization.equal_to_1})
 
   # Cache key should contain any parameter that can affect the compiler output.
@@ -305,8 +303,8 @@ def triton_kernel_call_lowering(
 
       kernel = get_or_create_triton_kernel(
           fn,
-          args,
           arg_dtypes,
+          scalar_args,
           num_warps=config.num_warps,
           num_stages=config.num_stages,
           metaparams=config_metaparams,
