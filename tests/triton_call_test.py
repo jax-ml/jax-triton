@@ -288,7 +288,7 @@ class TritonKernelCallTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(out, x)
 
-  def test_compilation_cache(self):
+  def test_kernel_cache(self):
     # Create unique JITFunction to avoid conflicts with other tests.
     my_add_kernel = triton.jit(add_kernel.fn)
     fn1 = jax.jit(lambda x, y: add(x, y, BLOCK_SIZE=32, kernel=my_add_kernel))
@@ -313,6 +313,42 @@ class TritonKernelCallTest(parameterized.TestCase):
       self.assertEqual(call_count[0], 1)  # Second call hits the cache.
       _ = fn3(x1, y1)
       self.assertEqual(call_count[0], 2)  # Third call misses (block size).
+
+  def test_kernel_call_cache(self):
+    @triton.jit
+    def silly_add_kernel(x_ptr, y_ptr, output_ptr):
+      pid = tl.program_id(axis=0)
+      tl.store(output_ptr + pid, tl.load(x_ptr + pid) + tl.load(y_ptr + pid))
+
+    def silly_add(n):
+      x, y = create_random_inputs([n])
+      return jt.triton_call(
+          x,
+          y,
+          kernel=silly_add_kernel,
+          out_shape=x,
+          grid=x.size,
+      )
+
+    get_or_create_triton_kernel = jt.triton_lib.get_or_create_triton_kernel
+
+    call_count = [0]
+
+    def my_get_or_create_triton_kernel(*args, **kwargs):
+      call_count[0] += 1
+      return get_or_create_triton_kernel(*args, **kwargs)
+
+    with mock.patch.object(
+        jt.triton_lib,
+        "get_or_create_triton_kernel",
+        new=my_get_or_create_triton_kernel,
+    ):
+      _ = silly_add(42)
+      self.assertEqual(call_count[0], 1)
+      _ = silly_add(42)
+      self.assertEqual(call_count[0], 1)  # Second call hits the cache.
+      _ = silly_add(43)
+      self.assertEqual(call_count[0], 2)  # Third call misses (grid size).
 
   def test_autotune(self):
     autotune_configs = [

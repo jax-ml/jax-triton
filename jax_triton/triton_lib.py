@@ -284,51 +284,61 @@ def triton_kernel_call_lowering(
         "`kernel` must be a Triton `JITFunction`, `Heuristics` or `Autotuner`."
     )
 
+  kernel_call_params = []
+  for config in configs:
+    config_metaparams = {**metaparams, **config.kwargs}
+    grid = utils.normalize_grid(grid, config_metaparams)
+
+    config_zeroed_outputs = zeroed_outputs
+    if callable(zeroed_outputs):
+      config_zeroed_outputs = config_zeroed_outputs(config_metaparams)
+
+    zeroed_outputs_with_sizes = {
+        i + len(ctx.avals_in): aval_size_bytes(ctx.avals_out[i])
+        for i in sorted(config_zeroed_outputs)
+    }
+
+    kernel_call_params.append(
+        dict(
+            metaparams=tuple(sorted(config_metaparams.items())),
+            num_warps=config.num_warps,
+            num_stages=config.num_stages,
+            grid=grid,
+            zeroed_outputs_with_sizes=tuple(zeroed_outputs_with_sizes.items()),
+        )
+    )
+
   # Cache auto-tuned calls with the same parameters, so the auto-tuning need
   # only be performed once.
-  # FIXME(cjfj): Should the key include `grid` and `zeroed_outputs`?
   cache_key = (
       fn,
-      tuple(configs),
       tuple(arg_dtypes),
       tuple(scalar_args),
-      tuple(metaparams.items()),
+      tuple(tuple(p.items()) for p in kernel_call_params),
   )
   kernel_call = _KERNEL_CALL_CACHE.get(cache_key)
 
   if kernel_call is None:
     kernel_calls = []
-    for config in configs:
-      config_metaparams = {**metaparams, **config.kwargs}
-
+    for params in kernel_call_params:
       kernel = get_or_create_triton_kernel(
           fn,
           arg_dtypes,
           scalar_args,
-          num_warps=config.num_warps,
-          num_stages=config.num_stages,
-          metaparams=config_metaparams,
+          num_warps=params["num_warps"],
+          num_stages=params["num_stages"],
+          metaparams=dict(params["metaparams"]),
           dump_binary_path=dump_binary_path,
       )
-      grid = utils.normalize_grid(grid, config_metaparams)
-
-      config_zeroed_outputs = zeroed_outputs
-      if callable(zeroed_outputs):
-        config_zeroed_outputs = config_zeroed_outputs(config_metaparams)
-
-      zeroed_outputs_with_sizes = {
-          i + len(ctx.avals_in): aval_size_bytes(ctx.avals_out[i])
-          for i in config_zeroed_outputs
-      }
 
       kernel_calls.append(
           triton_kernel_call_lib.TritonKernelCall(
               kernel,
-              grid[0],
-              grid[1],
-              grid[2],
+              params["grid"][0],
+              params["grid"][1],
+              params["grid"][2],
               encoded_args,
-              zeroed_outputs_with_sizes,
+              dict(params["zeroed_outputs_with_sizes"]),
           )
       )
 
