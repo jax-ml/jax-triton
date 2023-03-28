@@ -863,11 +863,16 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
 
   grid = triton_utils.normalize_grid(
       compilation_result.lowering_result.grid, metaparams={})
-  # All arguments are buffers.
-  all_args = [None] * (len(in_shapes) + len(out_shapes))
-  zeroed_outputs = {}  # TODO(cjfj): Expose through user API.
+  kernel_params = []
+  for _ in range(len(in_shapes) + len(out_shapes)):
+    kernel_params.append(
+        triton_kernel_call_lib.create_array_parameter(
+            0,  # bytes to zero  # TODO(cjfj): Expose through user API.
+            True,  # divisible by 16
+        )
+    )
   kernel_call = triton_kernel_call_lib.TritonKernelCall(
-      kernel, grid[0], grid[1], grid[2], all_args, zeroed_outputs
+      kernel, grid[0], grid[1], grid[2], kernel_params
   )
 
   ctx.module_context.add_keepalive(kernel_call)

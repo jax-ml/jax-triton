@@ -23,6 +23,7 @@
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 #include "cuda.h"
@@ -143,28 +144,42 @@ struct TritonKernelCallBase {
 
 class TritonKernelCall : public TritonKernelCallBase {
  public:
+  struct ArrayParameter {
+    size_t bytes_to_zero;
+    bool ptr_must_be_divisible_by_16;
+  };
+
+  // Parameters can be either to either arrays or scalars (encoded as uint64).
+  using Parameter = std::variant<ArrayParameter, uint64_t>;
+
   TritonKernelCall(TritonKernel& kernel, uint32_t grid_0, uint32_t grid_1,
-                   uint32_t grid_2,
-                   std::vector<std::optional<uint64_t>> parameters,
-                   std::unordered_map<size_t, size_t> zeroed_buffers)
+                   uint32_t grid_2, std::vector<Parameter> parameters)
       : kernel_(kernel),
         grid_{grid_0, grid_1, grid_2},
-        parameters_(std::move(parameters)),
-        zeroed_buffers_(std::move(zeroed_buffers)) {}
+        parameters_(std::move(parameters)) {}
 
   void Launch(CUstream stream, void** buffers) override final {
-    for (const auto& [i, size] : zeroed_buffers_) {
-      CHECK_CUDA(cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(buffers[i]), 0,
-                                 size, stream));
-    }
-
     std::vector<void*> params;
     params.reserve(parameters_.size());
-    for (std::optional<uint64_t>& param : parameters_) {
-      if (param.has_value()) {
-        params.push_back(&*param);
+    for (size_t i = 0; i < parameters_.size(); ++i) {
+      const Parameter& param = parameters_[i];
+      if (std::holds_alternative<ArrayParameter>(param)) {
+        const ArrayParameter& array = std::get<ArrayParameter>(param);
+        void*& ptr = *(buffers++);
+        auto cu_ptr = reinterpret_cast<CUdeviceptr>(ptr);
+
+        if (array.ptr_must_be_divisible_by_16 && (cu_ptr % 16 != 0)) {
+          std::cerr << "Parameter " << i << ": pointer (" << ptr
+                    << ") is not divisible by 16." << std::endl;
+          abort();
+        }
+
+        if (array.bytes_to_zero > 0) {
+          CHECK_CUDA(cuMemsetD8Async(cu_ptr, 0, array.bytes_to_zero, stream));
+        }
+        params.push_back(&ptr);
       } else {
-        params.push_back(buffers++);
+        params.push_back(const_cast<uint64_t*>(&std::get<uint64_t>(param)));
       }
     }
 
@@ -174,10 +189,7 @@ class TritonKernelCall : public TritonKernelCallBase {
  private:
   TritonKernel& kernel_;
   uint32_t grid_[3];
-  // Parameter values. `nullopt` values represent buffer arguments.
-  std::vector<std::optional<uint64_t>> parameters_;
-  // Buffers to be zeroed before kernel launch (index and size).
-  std::unordered_map<size_t, size_t> zeroed_buffers_;
+  std::vector<Parameter> parameters_;
 };
 
 class TritonAutotunedKernelCall : public TritonKernelCallBase {
@@ -360,8 +372,7 @@ PYBIND11_MODULE(triton_kernel_call_lib, m) {
 
   py::class_<TritonKernelCall>(m, "TritonKernelCall")
       .def(py::init<TritonKernel&, uint32_t, uint32_t, uint32_t,
-                    std::vector<std::optional<uint64_t>>,
-                    std::unordered_map<size_t, size_t>>(),
+                    std::vector<TritonKernelCall::Parameter>>(),
            py::keep_alive<1, 2>())  // Ensure that the kernel lives long enough.
       .def_property_readonly("descriptor", [](TritonKernelCall& kernel_call) {
         union {
@@ -371,6 +382,8 @@ PYBIND11_MODULE(triton_kernel_call_lib, m) {
         descriptor.ptr = &kernel_call;
         return py::bytes(descriptor.bytes, sizeof(TritonKernelCall*));
       });
+
+  py::class_<TritonKernelCall::ArrayParameter>(m, "TritonArrayParameter");
 
   py::class_<TritonAutotunedKernelCall>(m, "TritonAutotunedKernelCall")
       .def(py::init<>([](std::string name,
@@ -403,12 +416,17 @@ PYBIND11_MODULE(triton_kernel_call_lib, m) {
                        "xla._CUSTOM_CALL_TARGET");
   });
 
-  m.def("encode_kernel_parameter",
+  m.def("create_array_parameter",
+        [](size_t bytes_to_zero, bool ptr_must_be_divisible_by_16) {
+          return TritonKernelCall::ArrayParameter{bytes_to_zero,
+                                                  ptr_must_be_divisible_by_16};
+        });
+  m.def("create_scalar_parameter",
         py::overload_cast<py::int_, std::string_view>(&EncodeKernelParameter));
   m.def(
-      "encode_kernel_parameter",
+      "create_scalar_parameter",
       py::overload_cast<py::float_, std::string_view>(&EncodeKernelParameter));
-  m.def("encode_kernel_parameter",
+  m.def("create_scalar_parameter",
         py::overload_cast<py::bool_, std::string_view>(&EncodeKernelParameter));
 }
 

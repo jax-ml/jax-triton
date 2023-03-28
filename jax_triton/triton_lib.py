@@ -137,7 +137,7 @@ def get_or_create_triton_kernel(
     num_stages,
     metaparams,
     dump_binary_path,
-) -> triton_kernel_call_lib.TritonKernel:
+) -> Tuple[triton_kernel_call_lib.TritonKernel, Any]:
   signature = dict(enumerate(arg_dtypes))
   # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
   # We assume that all arrays are aligned to 16 bytes, and Triton may use this
@@ -192,7 +192,7 @@ def get_or_create_triton_kernel(
     )
     _COMPILED_KERNEL_CACHE[cache_key] = kernel
 
-  return kernel
+  return kernel, specialization
 
 
 _KERNEL_CALL_CACHE = weakref.WeakValueDictionary()
@@ -229,13 +229,9 @@ def triton_kernel_call_lowering(
 
   args = list(ctx.avals_in)
   arg_dtypes = list(map(get_triton_type, ctx.avals_in))
-  # Buffer args are filled in at runtime.
-  encoded_args = [None] * (len(array_args) + len(scalar_args) + len(out_shapes))
   for idx, dtype, v in scalar_args:
     args.insert(idx, v)
     arg_dtypes.insert(idx, dtype)
-    encoded_args[idx] = triton_kernel_call_lib.encode_kernel_parameter(v, dtype)
-
   args.extend(ctx.avals_out)
   arg_dtypes.extend(map(get_triton_type, ctx.avals_out))
   named_args = dict(unsafe_zip(fn.arg_names, args))
@@ -284,7 +280,8 @@ def triton_kernel_call_lowering(
         "`kernel` must be a Triton `JITFunction`, `Heuristics` or `Autotuner`."
     )
 
-  kernel_call_params = []
+  outputs_offset = len(ctx.avals_in) + len(scalar_args)
+  config_params = []
   for config in configs:
     config_metaparams = {**metaparams, **config.kwargs}
     grid = utils.normalize_grid(grid, config_metaparams)
@@ -293,18 +290,18 @@ def triton_kernel_call_lowering(
     if callable(zeroed_outputs):
       config_zeroed_outputs = config_zeroed_outputs(config_metaparams)
 
-    zeroed_outputs_with_sizes = {
-        i + len(ctx.avals_in): aval_size_bytes(ctx.avals_out[i])
+    zeroed_params_with_sizes = {
+        i + outputs_offset: aval_size_bytes(ctx.avals_out[i])
         for i in sorted(config_zeroed_outputs)
     }
 
-    kernel_call_params.append(
+    config_params.append(
         dict(
             metaparams=tuple(sorted(config_metaparams.items())),
             num_warps=config.num_warps,
             num_stages=config.num_stages,
             grid=grid,
-            zeroed_outputs_with_sizes=tuple(zeroed_outputs_with_sizes.items()),
+            zeroed_params_with_sizes=tuple(zeroed_params_with_sizes.items()),
         )
     )
 
@@ -314,14 +311,14 @@ def triton_kernel_call_lowering(
       fn,
       tuple(arg_dtypes),
       tuple(scalar_args),
-      tuple(tuple(p.items()) for p in kernel_call_params),
+      tuple(tuple(p.items()) for p in config_params),
   )
   kernel_call = _KERNEL_CALL_CACHE.get(cache_key)
 
   if kernel_call is None:
     kernel_calls = []
-    for params in kernel_call_params:
-      kernel = get_or_create_triton_kernel(
+    for params in config_params:
+      kernel, specialization = get_or_create_triton_kernel(
           fn,
           arg_dtypes,
           scalar_args,
@@ -331,14 +328,28 @@ def triton_kernel_call_lowering(
           dump_binary_path=dump_binary_path,
       )
 
+      kernel_params = []
+      zeroed_params_with_sizes = dict(params["zeroed_params_with_sizes"])
+      for i, (arg, dtype) in enumerate(zip(args, arg_dtypes)):
+        if isinstance(arg, jax.ShapedArray):
+          kernel_params.append(
+              triton_kernel_call_lib.create_array_parameter(
+                  zeroed_params_with_sizes.get(i, 0),
+                  i in specialization.divisible_by_16,
+              )
+          )
+        else:
+          kernel_params.append(
+              triton_kernel_call_lib.create_scalar_parameter(arg, dtype)
+          )
+
       kernel_calls.append(
           triton_kernel_call_lib.TritonKernelCall(
               kernel,
               params["grid"][0],
               params["grid"][1],
               params["grid"][2],
-              encoded_args,
-              dict(params["zeroed_outputs_with_sizes"]),
+              kernel_params,
           )
       )
 
