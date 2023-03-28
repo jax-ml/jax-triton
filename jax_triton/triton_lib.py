@@ -149,8 +149,6 @@ def get_or_create_triton_kernel(
   for i, _, v in scalar_args:
     args_for_specialization[i] = v
   specialization = fn._get_config(*args_for_specialization)  # pylint: disable=protected-access
-  # TODO(cjfj): Workout why using `equal_to_1` causes errors and remove this.
-  specialization = specialization._replace(equal_to_1=())
 
   constants = {fn.arg_names.index(k): v for k, v in metaparams.items()}
   constants.update({i: None for i, _, v in scalar_args if v is None})
@@ -338,7 +336,7 @@ def triton_kernel_call_lowering(
                   i in specialization.divisible_by_16,
               )
           )
-        else:
+        elif i not in specialization.equal_to_1:
           kernel_params.append(
               triton_kernel_call_lib.create_scalar_parameter(arg, dtype)
           )

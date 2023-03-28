@@ -475,8 +475,7 @@ class TritonKernelCallTest(parameterized.TestCase):
     self.assertEqual(specialization.divisible_by_16, (1, 3, 9))
     # `stride_{ak,bn,cn}` equal 1, but we've marked `stride_ak` as "do not
     # specialize" leaving `stride_{bn,cn}`.
-    # TODO(cjfj): Re-enable check when `equal_to_1` is working.
-    # self.assertEqual(specialization.equal_to_1, (8, 10))
+    self.assertEqual(specialization.equal_to_1, (8, 10))
 
 
 if __name__ == "__main__":
