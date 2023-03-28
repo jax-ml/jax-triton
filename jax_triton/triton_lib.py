@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple, Uni
 
 from absl import logging
 import jax
+from jax import core
 import jaxlib
 from jax import tree_util
 from jax._src import core
@@ -329,7 +330,7 @@ def triton_kernel_call_lowering(
       kernel_params = []
       zeroed_params_with_sizes = dict(params["zeroed_params_with_sizes"])
       for i, (arg, dtype) in enumerate(zip(args, arg_dtypes)):
-        if isinstance(arg, jax.ShapedArray):
+        if isinstance(arg, core.ShapedArray):
           kernel_params.append(
               triton_kernel_call_lib.create_array_parameter(
                   zeroed_params_with_sizes.get(i, 0),
