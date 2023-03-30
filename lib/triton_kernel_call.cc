@@ -1,4 +1,4 @@
-/* // Copyright 2022 The jax_triton Authors.
+/* // Copyright 2023 The jax_triton Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License. */
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <iostream>
@@ -237,6 +238,7 @@ class TritonAutotunedKernelCall : public TritonKernelCallBase {
 
       int timed_iters =
           std::max(static_cast<int>(kBenchmarkTimeMillis / best), 1);
+      timed_iters = std::min(timed_iters, 100);
       std::cerr << "Benchmarking with " << timed_iters
                 << " iters (target time: " << kBenchmarkTimeMillis << " ms)"
                 << std::endl;
