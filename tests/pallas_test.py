@@ -857,10 +857,10 @@ class PallasAutotuningTest(PallasTest):
 
     @functools.partial(
         self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), jnp.float32),
-        grid=lambda block_size: 8 // block_size,
         autotuning_configs=[
-          pl.Config(dict(block_size=2), {}),
-          pl.Config(dict(block_size=4), {}),
+          pl.KernelConfig(meta=dict(block_size=block_size),
+                          grid=8 // block_size)
+          for block_size in [1, 2, 4, 8]
         ])
     def add_one(x_ref, o_ref, *, block_size):
       idx = pl.program_id(0) * block_size + jnp.arange(block_size)
@@ -873,18 +873,16 @@ class PallasAutotuningTest(PallasTest):
 
     @functools.partial(
         self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), jnp.float32),
-        grid=lambda block_size: 8 // block_size,
-        in_specs=[
-          lambda block_size: pl.BlockSpec(lambda i: i, (block_size,)),
-        ],
-        out_specs=[
-          lambda block_size: pl.BlockSpec(lambda i: i, (block_size,)),
-        ],
         autotuning_configs=[
-          pl.Config(dict(block_size=1), {}),
-          pl.Config(dict(block_size=2), {}),
-          pl.Config(dict(block_size=4), {}),
-          pl.Config(dict(block_size=8), {}),
+          pl.KernelConfig(meta=dict(block_size=block_size),
+                          in_specs=[
+                            pl.BlockSpec(lambda i: i, (block_size,))
+                          ],
+                          out_specs=[
+                            pl.BlockSpec(lambda i: i, (block_size,))
+                          ],
+                          grid=8 // block_size)
+          for block_size in [1, 2, 4, 8]
         ],
         debug=True)
     def add_one(x_ref, o_ref, *, block_size):

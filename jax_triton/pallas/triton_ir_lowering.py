@@ -833,9 +833,11 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
     if debug:
       print(kernel.jaxpr)
       print(kernel.grid_spec)
-    compiler_params = kernel.compiler_params
-    num_warps = compiler_params.get("num_warps", 4)
-    num_stages = compiler_params.get("num_stages", 3)
+    compiler_params = dict(kernel.compiler_params)
+    num_warps = compiler_params.pop("num_warps", 4)
+    num_stages = compiler_params.pop("num_stages", 3)
+    if compiler_params:
+      raise ValueError(f"Invalid compiler params: {compiler_params}")
     compilation_result = compile_jaxpr(kernel.jaxpr, kernel.num_consts,
                                        tuple((*in_shapes, *out_shapes)),
                                        kernel.grid_spec, kernel.name, num_warps, num_stages)

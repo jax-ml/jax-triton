@@ -18,7 +18,7 @@ import dataclasses
 import functools
 from functools import partial
 
-from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Iterator, List, Optional, Sequence, Tuple, Union
 
 import jax.numpy as jnp
 from jax._src import api_util
@@ -94,6 +94,18 @@ class GridSpec:
   replace = dataclasses.replace
 
 Platform = str
+
+
+@dataclasses.dataclass
+class KernelConfig:
+  in_specs: Optional[Sequence[Optional[BlockSpec]]] = None
+  out_specs: Optional[Sequence[Optional[BlockSpec]]] = None
+  grid: Optional[Union[Grid, int]] = None
+  meta: dict[str, Any] = dataclasses.field(default_factory=dict)
+  compiler_params: dict[Platform, dict[str, Any]] = dataclasses.field(default_factory=dict)
+
+  def replace(self, *args, **kwargs):
+    return dataclasses.replace(self, *args, **kwargs)
 
 @dataclasses.dataclass
 class Config:

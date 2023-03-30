@@ -306,24 +306,16 @@ def _compute_spec(config: Config, spec: MaybeSpec,
     spec = spec(**config.meta)
   return spec
 
-def specialize_kernel(config: Config,
+def specialize_kernel(config: pallas_core.KernelConfig,
                       func: Callable,
-                      grid: Optional[pallas_core.Grid],
                       name: Optional[str],
-                      in_specs: Optional[list[Optional[BlockSpec]]],
-                      out_specs: Optional[list[Optional[BlockSpec]]],
                       in_avals: tuple[jax_core.ShapedArray, ...],
                       out_avals: tuple[jax_core.ShapedArray, ...],
                       in_tree: tree_util.PyTreeDef,
                       compiler_params: dict[str, Any]
                       ) -> tuple[SpecializedKernel, ...]:
-  specialized_grid = grid
-  if callable(specialized_grid):
-    specialized_grid = specialized_grid(**config.meta)
-  specialized_grid = pallas_core.preprocess_grid(specialized_grid)
-  specialized_in_specs = map(partial(_compute_spec, config), in_specs)
-  specialized_out_specs = map(partial(_compute_spec, config), out_specs)
-  if specialized_grid == ():
+  grid = config.grid
+  if grid == ():
     in_ref_avals = [state.shaped_array_ref(arg.shape, arg.dtype)
                     for arg in in_avals]
     out_ref_avals = [state.shaped_array_ref(arg.shape, arg.dtype)
@@ -333,42 +325,76 @@ def specialize_kernel(config: Config,
         state.shaped_array_ref(
           pallas_core.compute_shape_from_block_spec(block_spec, aval.shape),
           aval.dtype)
-        for block_spec, aval in zip(specialized_in_specs, in_avals)]
+        for block_spec, aval in zip(config.in_specs, in_avals)]
     out_ref_avals = [
         state.shaped_array_ref(
           pallas_core.compute_shape_from_block_spec(block_spec, aval.shape),
           aval.dtype)
-        for block_spec, aval in zip(specialized_out_specs, out_avals)]
-  in_block_mappings = map(partial(pallas_core.convert_block_spec_to_block_mapping, specialized_grid),
-                          specialized_in_specs)
-  out_block_mappings = map(partial(pallas_core.convert_block_spec_to_block_mapping, specialized_grid),
-                           specialized_out_specs)
-  grid_spec = pallas_core.GridSpec(specialized_grid, (*in_block_mappings, *out_block_mappings), ())
+        for block_spec, aval in zip(config.out_specs, out_avals)]
+  in_block_mappings = map(
+      partial(pallas_core.convert_block_spec_to_block_mapping, grid),
+      config.in_specs)
+  out_block_mappings = map(
+      partial(pallas_core.convert_block_spec_to_block_mapping, grid),
+      config.out_specs)
+  grid_spec = pallas_core.GridSpec(grid, (*in_block_mappings, *out_block_mappings), ())
   jaxpr, consts, out_tree = tracing_utils.initial_style_open_jaxpr(
       func, in_tree, tuple((*in_ref_avals, *out_ref_avals)), "pallas_call", **config.meta)
   return SpecializedKernel("foo", jaxpr, len(consts), grid_spec,
                            dict(compiler_params, **config.compiler_params)), consts, out_tree
 
-def pallas_call(f: Callable, out_shape: Any, *, debug: bool = False,
+def _canonicalize_kernel_config(
+    maybe_kernel_config: Optional[pallas_core.KernelConfig],
+    in_avals: Sequence[jax_core.AbstractValue],
+    out_avals: Sequence[jax_core.AbstractValue],
+    in_specs: Optional[Sequence[Optional[BlockSpec]]],
+    out_specs: Optional[Sequence[Optional[BlockSpec]]],
+    grid: Optional[Union[Grid, int]],
+    ) -> pallas_core.KernelConfig:
+  if not maybe_kernel_config:
+    config = pallas_core.KernelConfig(in_specs=in_specs, out_specs=out_specs, grid=grid)
+  else:
+    config = maybe_kernel_config
+    grid = maybe_kernel_config.grid
+  grid, in_specs, out_specs = config.grid, config.in_specs, config.out_specs
+  grid = pallas_core.preprocess_grid(grid)
+  if in_specs is not None and not isinstance(in_specs, (tuple, list)):
+    in_specs = (in_specs,)
+  if out_specs is not None and not isinstance(out_specs, (tuple, list)):
+    out_specs = (out_specs,)
+  if in_specs is None:
+    in_specs = [None] * len(in_avals)
+  if out_specs is None:
+    out_specs = [None] * len(out_avals)
+  return config.replace(grid=grid, in_specs=in_specs, out_specs=out_specs)
+
+def pallas_call(f: Callable, out_shape: Any, *,
                 grid: Optional[Grid] = None,
+                config: Optional[pallas_core.KernelConfig] = None,
                 in_specs: Optional[Sequence[Optional[BlockSpec]]] = None,
                 out_specs: Optional[Sequence[Optional[BlockSpec]]] = None,
                 input_output_aliases: Dict[int, int] = {},
                 interpret: bool = False,
                 name: Optional[str] = None,
-                autotuning_configs: Optional[list[Config]] = None,
+                autotuning_configs: Optional[Sequence[pallas_core.KernelConfig]] = None,
+                debug: bool = False,
                 **compiler_params: Any):
+  if config is not None:
+    if grid is not None or in_specs is not None or out_specs is not None:
+      raise ValueError("Cannot specify both `config` and any of `grid`, "
+                       "`in_specs`, or `out_specs`.")
+    if autotuning_configs is not None:
+      raise ValueError("Cannot specify both `config` and `autotuning_configs`")
+  if autotuning_configs is not None:
+    if grid is not None or in_specs is not None or out_specs is not None:
+      raise ValueError("Cannot specify both `autotuning_configs` and any of `grid`, "
+                       "`in_specs`, or `out_specs`.")
   singleton = False
   if not isinstance(out_shape, (tuple, list)):
     out_shape = (out_shape,)
     singleton = True
   if not isinstance(out_shape, tuple):
     out_shape = tuple(out_shape)
-  if in_specs is not None and not isinstance(in_specs, (tuple, list)):
-    in_specs = (in_specs,)
-  if out_specs is not None and not isinstance(out_specs, (tuple, list)):
-    out_specs = (out_specs,)
-
   if not name:
     name = f.__name__ if hasattr(f, "__name__") else "unnamed"
 
@@ -382,29 +408,32 @@ def pallas_call(f: Callable, out_shape: Any, *, debug: bool = False,
                           for a in flat_args)
     flat_out_avals = tuple(jax_core.ShapedArray(a.shape, a.dtype)
                            for a in flat_out_shapes)
-    kernels = []
-    flat_in_specs = in_specs
-    flat_out_specs = out_specs
-    if flat_in_specs is None:
-      flat_in_specs = [None] * len(flat_in_avals)
-    if flat_out_specs is None:
-      flat_out_specs = [None] * len(flat_out_avals)
-    all_consts = []
+    canonicalized_configs = []
     if autotuning_configs is None:
+      canonicalized_configs.append(_canonicalize_kernel_config(config,
+                                                               flat_in_avals,
+                                                               flat_out_avals,
+                                                               in_specs,
+                                                               out_specs,
+                                                               grid))
+    else:
+      canonicalized_configs.extend(map(partial(_canonicalize_kernel_config,
+                                               in_avals=flat_in_avals,
+                                               out_avals=flat_out_avals,
+                                               in_specs=in_specs,
+                                               out_specs=out_specs,
+                                               grid=grid),
+                                       autotuning_configs))
+    kernels = []
+    all_consts = []
+    if len(canonicalized_configs) == 0:
+      raise ValueError("Cannot pass in empty autotuning configs")
+    for canonicalized_config in canonicalized_configs:
       specialized_kernel, consts, jaxpr_out_tree = specialize_kernel(
-          Config({}, {}), f, grid, name, flat_in_specs, flat_out_specs, flat_in_avals,
+          canonicalized_config, f, name, flat_in_avals,
           flat_out_avals, jaxpr_in_tree, compiler_params)
       kernels.append(specialized_kernel)
       all_consts.extend(consts)
-    else:
-      if len(autotuning_configs) == 0:
-        raise ValueError("Cannot pass in empty autotuning configs")
-      for config in autotuning_configs:
-        specialized_kernel, consts, jaxpr_out_tree = specialize_kernel(
-            config, f, grid, name, flat_in_specs, flat_out_specs, flat_in_avals, flat_out_avals,
-            jaxpr_in_tree, compiler_params)
-        kernels.append(specialized_kernel)
-        all_consts.extend(consts)
     if all_consts:
       raise NotImplementedError("Cannot handle consts.")
     del jaxpr_out_tree
