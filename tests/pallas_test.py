@@ -874,15 +874,19 @@ class PallasAutotuningTest(PallasTest):
     @functools.partial(
         self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), jnp.float32),
         autotuning_configs=[
-          pl.KernelConfig(meta=dict(block_size=block_size),
+          pl.KernelConfig(name=f"block_size={block_size}_num_warps={num_warps}_num_stages={num_stages}",
+                          meta=dict(block_size=block_size),
                           in_specs=[
                             pl.BlockSpec(lambda i: i, (block_size,))
                           ],
                           out_specs=[
                             pl.BlockSpec(lambda i: i, (block_size,))
                           ],
-                          grid=8 // block_size)
-          for block_size in [1, 2, 4, 8]
+                          grid=8 // block_size,
+                          compiler_params=dict(triton=dict(num_warps=num_warps,
+                                                           num_stages=num_stages)))
+          for block_size in [4, 8]
+          for num_warps, num_stages in zip([4, 4], [3, 2])
         ],
         debug=True)
     def add_one(x_ref, o_ref, *, block_size):

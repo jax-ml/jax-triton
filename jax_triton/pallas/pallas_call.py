@@ -47,7 +47,6 @@ zip, unsafe_zip = safe_zip, zip
 Grid = Tuple[int, ...]
 BlockSpec = pallas_core.BlockSpec
 BlockMapping = pallas_core.BlockMapping
-Config = pallas_core.Config
 GridSpec = pallas_core.GridSpec
 SpecializedKernel = pallas_core.SpecializedKernel
 
@@ -299,20 +298,16 @@ batching.primitive_batchers[pallas_call_p] = _pallas_call_batching_rule
 Kernel = Callable[..., Any]
 MaybeSpec = Optional[Union[pallas_core.BlockSpec,
                            Callable[..., pallas_core.BlockSpec]]]
-
-def _compute_spec(config: Config, spec: MaybeSpec,
-                  ) -> Optional[pallas_core.BlockSpec]:
-  if callable(spec):
-    spec = spec(**config.meta)
-  return spec
+Platform = str
+CompilerParams = dict[Platform, dict[str, Any]]
 
 def specialize_kernel(config: pallas_core.KernelConfig,
                       func: Callable,
-                      name: Optional[str],
+                      name: str,
                       in_avals: tuple[jax_core.ShapedArray, ...],
                       out_avals: tuple[jax_core.ShapedArray, ...],
                       in_tree: tree_util.PyTreeDef,
-                      compiler_params: dict[str, Any]
+                      compiler_params: CompilerParams,
                       ) -> tuple[SpecializedKernel, ...]:
   grid = config.grid
   if grid == ():
@@ -340,7 +335,9 @@ def specialize_kernel(config: pallas_core.KernelConfig,
   grid_spec = pallas_core.GridSpec(grid, (*in_block_mappings, *out_block_mappings), ())
   jaxpr, consts, out_tree = tracing_utils.initial_style_open_jaxpr(
       func, in_tree, tuple((*in_ref_avals, *out_ref_avals)), "pallas_call", **config.meta)
-  return SpecializedKernel("foo", jaxpr, len(consts), grid_spec,
+  if config.name is not None:
+    name = f"{name}_{config.name}"
+  return SpecializedKernel(name, jaxpr, len(consts), grid_spec,
                            dict(compiler_params, **config.compiler_params)), consts, out_tree
 
 def _canonicalize_kernel_config(
@@ -350,11 +347,16 @@ def _canonicalize_kernel_config(
     in_specs: Optional[Sequence[Optional[BlockSpec]]],
     out_specs: Optional[Sequence[Optional[BlockSpec]]],
     grid: Optional[Union[Grid, int]],
+    compiler_params: dict[str, Any],
     ) -> pallas_core.KernelConfig:
   if not maybe_kernel_config:
-    config = pallas_core.KernelConfig(in_specs=in_specs, out_specs=out_specs, grid=grid)
+    config = pallas_core.KernelConfig(in_specs=in_specs, out_specs=out_specs,
+                                      grid=grid,
+                                      compiler_params=compiler_params)
   else:
     config = maybe_kernel_config
+    config = config.replace(compiler_params=dict(compiler_params,
+                                                 **config.compiler_params))
     grid = maybe_kernel_config.grid
   grid, in_specs, out_specs = config.grid, config.in_specs, config.out_specs
   grid = pallas_core.preprocess_grid(grid)
@@ -378,7 +380,7 @@ def pallas_call(f: Callable, out_shape: Any, *,
                 name: Optional[str] = None,
                 autotuning_configs: Optional[Sequence[pallas_core.KernelConfig]] = None,
                 debug: bool = False,
-                **compiler_params: Any):
+                compiler_params: Optional[CompilerParams] = None):
   if config is not None:
     if grid is not None or in_specs is not None or out_specs is not None:
       raise ValueError("Cannot specify both `config` and any of `grid`, "
@@ -389,6 +391,8 @@ def pallas_call(f: Callable, out_shape: Any, *,
     if grid is not None or in_specs is not None or out_specs is not None:
       raise ValueError("Cannot specify both `autotuning_configs` and any of `grid`, "
                        "`in_specs`, or `out_specs`.")
+  if compiler_params is None:
+    compiler_params = {}
   singleton = False
   if not isinstance(out_shape, (tuple, list)):
     out_shape = (out_shape,)
@@ -415,14 +419,16 @@ def pallas_call(f: Callable, out_shape: Any, *,
                                                                flat_out_avals,
                                                                in_specs,
                                                                out_specs,
-                                                               grid))
+                                                               grid,
+                                                               compiler_params))
     else:
       canonicalized_configs.extend(map(partial(_canonicalize_kernel_config,
                                                in_avals=flat_in_avals,
                                                out_avals=flat_out_avals,
                                                in_specs=in_specs,
                                                out_specs=out_specs,
-                                               grid=grid),
+                                               grid=grid,
+                                               compiler_params=compiler_params),
                                        autotuning_configs))
     kernels = []
     all_consts = []

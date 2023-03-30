@@ -95,9 +95,9 @@ class GridSpec:
 
 Platform = str
 
-
 @dataclasses.dataclass
 class KernelConfig:
+  name: Optional[str] = None
   in_specs: Optional[Sequence[Optional[BlockSpec]]] = None
   out_specs: Optional[Sequence[Optional[BlockSpec]]] = None
   grid: Optional[Union[Grid, int]] = None
@@ -106,17 +106,6 @@ class KernelConfig:
 
   def replace(self, *args, **kwargs):
     return dataclasses.replace(self, *args, **kwargs)
-
-@dataclasses.dataclass
-class Config:
-  meta: dict[str, Any]
-  compiler_params: dict[Platform, dict[str, Any]]
-
-  def to_string(self, platform: str) -> str:
-    compiler_params = self.compiler_params.get(platform, {})
-    return "-".join([*(f"{k}_{v}" for k, v in self.meta.items()),
-                     *(f"{k}_{v}" for k, v in compiler_params.items())])
-
 
 def preprocess_grid(grid: Optional[Union[Grid, int]]) -> Grid:
   if grid is None:

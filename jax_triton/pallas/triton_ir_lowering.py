@@ -800,10 +800,17 @@ def _while_lowering_rule(ctx: TritonLoweringRuleContext, *args, cond_nconsts,
   return post_args
 triton_lowering_rules[lax.while_p] = _while_lowering_rule
 
+def _mangle_name(name: str):
+  name = name.replace("-", "_")
+  name = name.replace("-", "_")
+  name = name.replace("=", "_")
+  return name
+
 @weakref_lru_cache
 def compile_jaxpr(jaxpr: jax_core.Jaxpr, num_consts: int, in_shapes, grid_spec: GridSpec,
                    name: str, num_warps: int, num_stages: int
                    ) -> TritonCompilationResult:
+  name = _mangle_name(name)
   lowering_result = lower_jaxpr_to_triton_module(jaxpr, num_consts, in_shapes, grid_spec, name)
   backend = _triton.runtime.backend.CUDA
   device = 0
@@ -833,7 +840,8 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
     if debug:
       print(kernel.jaxpr)
       print(kernel.grid_spec)
-    compiler_params = dict(kernel.compiler_params)
+      print(kernel.compiler_params)
+    compiler_params = dict(kernel.compiler_params).get("triton", {})
     num_warps = compiler_params.pop("num_warps", 4)
     num_stages = compiler_params.pop("num_stages", 3)
     if compiler_params:
