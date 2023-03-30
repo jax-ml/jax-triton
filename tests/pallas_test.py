@@ -35,6 +35,7 @@ import jax_triton as jt
 from jax_triton import pallas as pl
 from jax_triton.pallas.ops import attention
 from jax_triton.pallas.ops import layer_norm
+from jax_triton.pallas.ops import matmul as matmul_ops
 from jax_triton.pallas.tracing_utils import initial_style_open_jaxpr
 try:
   from jax_triton.pallas.triton_ir_lowering import compile_jaxpr
@@ -895,6 +896,50 @@ class PallasAutotuningTest(PallasTest):
 
     x = jnp.arange(8.)
     np.testing.assert_allclose(add_one(x), x + 1.)
+
+  @parameterized.parameters(
+      (256, 256, 256),
+      (1024, 1024, 1024),
+      (1024, 512, 1024),
+      (1024, 512, 512),
+  )
+  def test_matmul_autotuned(self, m, n, k):
+    key = random.PRNGKey(0)
+    k1, k2 = random.split(key)
+    x = random.normal(k1, (m, k), dtype=jnp.float16)
+    y = random.normal(k2, (k, n), dtype=jnp.float16)
+    np.testing.assert_allclose(matmul_ops.matmul(x, y, debug=True),
+                               matmul_ops.matmul_reference(x, y),
+                               atol=0.05, rtol=0.05)
+
+
+  def test_vmap_of_autotuned_kernel(self):
+
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), jnp.float32),
+        autotuning_configs=[
+          pl.KernelConfig(name=f"block_size={block_size}_num_warps={num_warps}_num_stages={num_stages}",
+                          meta=dict(block_size=block_size),
+                          in_specs=[
+                            pl.BlockSpec(lambda i: i, (block_size,)),
+                            pl.BlockSpec(lambda i: i, (block_size,))
+                          ],
+                          out_specs=[
+                            pl.BlockSpec(lambda i: i, (block_size,))
+                          ],
+                          grid=8 // block_size,
+                          compiler_params=dict(triton=dict(num_warps=num_warps,
+                                                           num_stages=num_stages)))
+          for block_size in [4, 8]
+          for num_warps, num_stages in zip([4, 4], [3, 2])
+        ],
+        debug=True)
+    def add(x_ref, y_ref, o_ref, *, block_size):
+      del block_size
+      o_ref[...] = x_ref[...] + y_ref[...]
+
+    x = jnp.arange(16.).reshape((2, 8))
+    np.testing.assert_allclose(jax.vmap(add)(x, x), x + x)
 
 class FusedAttentionTest(parameterized.TestCase):
 

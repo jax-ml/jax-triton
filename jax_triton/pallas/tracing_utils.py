@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Module for tracing utilities."""
+
 from typing import Any, Callable, Optional
 
 from jax.interpreters import partial_eval as pe

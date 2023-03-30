@@ -848,21 +848,22 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
       raise ValueError(f"Invalid compiler params: {compiler_params}")
     compilation_result = compile_jaxpr(kernel.jaxpr, kernel.num_consts,
                                        tuple((*in_shapes, *out_shapes)),
-                                       kernel.grid_spec, kernel.name, num_warps, num_stages)
+                                       kernel.grid_spec, kernel.name, num_warps,
+                                       num_stages)
     name = compilation_result.name
     asm = compilation_result.asm
     shared_mem = compilation_result.shared_mem
     lowering_result = compilation_result.lowering_result
     if debug:
       lowering_result.module.print()
-    lowered_kernels.append((name, asm, shared_mem, lowering_result))
+    lowered_kernels.append((name, asm, shared_mem, lowering_result, num_warps))
   out_type = ir.TupleType.get_tuple([
       ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
       for out_shape in ctx.avals_out])
   i32_type = ir.IntegerType.get_signless(32)
 
   if len(lowered_kernels) == 1:
-    name, asm, shared_mem, lowering_result = lowered_kernels[0]
+    name, asm, shared_mem, lowering_result, num_warps = lowered_kernels[0]
     kernel = triton_kernel_call_lib.TritonKernel(
         asm["cubin"], name, num_warps, shared_mem
     )
@@ -882,7 +883,7 @@ def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
     )
   elif len(lowered_kernels) > 1:
     kernel_calls = []
-    for name, asm, shared_mem, lowering_result in lowered_kernels:
+    for name, asm, shared_mem, lowering_result, num_warps in lowered_kernels:
       kernel = triton_kernel_call_lib.TritonKernel(
           asm["cubin"], name, num_warps, shared_mem
       )
