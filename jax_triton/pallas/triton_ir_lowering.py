@@ -44,7 +44,7 @@ import numpy as np
 import triton
 import triton.language as tl
 from triton.language import ir as tl_ir
-import triton._C.libtriton.triton as _triton
+import triton.libtriton.triton as _triton
 
 from jax_triton import triton_kernel_call_lib
 from jax_triton import utils as triton_utils
