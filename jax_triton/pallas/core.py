@@ -31,6 +31,8 @@ from jax.interpreters import partial_eval as pe
 from jax._src.util import weakref_lru_cache, safe_map, safe_zip
 from jax._src.state.types import AbstractRef
 
+from jax_triton.pallas import tracing_utils
+
 map, unsafe_map = safe_map, map
 zip, unsafe_zip = safe_zip, zip
 
@@ -91,23 +93,18 @@ class GridSpec:
 
   replace = dataclasses.replace
 
-@weakref_lru_cache
-def _initial_style_open_jaxpr(fun: Callable, in_tree, in_avals,
-                              primitive_name: Optional[str] = None):
-  wrapped_fun, out_tree_thunk = api_util.flatten_fun_nokwargs(
-      lu.wrap_init(fun), in_tree)
-  debug_info = pe.debug_info(fun, in_tree, out_tree_thunk, False,
-                             primitive_name or "<unknown>")
-  jaxpr, consts = _initial_style_flat_jaxpr(wrapped_fun, in_avals,
-                                            debug_info=debug_info)
-  return jaxpr, consts, out_tree_thunk()
+Platform = str
 
-def _initial_style_flat_jaxpr(fun: lu.WrappedFun, in_avals,
-                              debug_info: Optional[jax_core.DebugInfo] = None
-                              ) -> tuple[jax_core.Jaxpr, list[Any]]:
-  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(fun, in_avals, debug_info)
-  jaxpr = for_loop._hoist_consts_to_refs(jaxpr)
-  return jaxpr, consts
+@dataclasses.dataclass
+class Config:
+  meta: dict[str, Any]
+  compiler_params: dict[Platform, dict[str, Any]]
+
+  def to_string(self, platform: str) -> str:
+    compiler_params = self.compiler_params.get(platform, {})
+    return "-".join([*(f"{k}_{v}" for k, v in self.meta.items()),
+                     *(f"{k}_{v}" for k, v in compiler_params.items())])
+
 
 def preprocess_grid(grid: Optional[Union[Grid, int]]) -> Grid:
   if grid is None:
@@ -141,64 +138,8 @@ def compute_shape_from_block_spec(block_spec: Optional[BlockSpec],
 
 @dataclasses.dataclass
 class SpecializedKernel:
+  name: str
   jaxpr: jax_core.Jaxpr
+  num_consts: int
   grid_spec: GridSpec
-
-@dataclasses.dataclass(frozen=True)
-class Kernel:
-  func: lu.WrappedFun
-  name: Optional[str]
-  grid: Optional[Grid]
-  in_specs: Optional[list[Optional[BlockSpec]]]
-  out_specs: Optional[list[Optional[BlockSpec]]]
-
-  def __post_init__(self):
-    if self.grid is None:
-      if self.in_specs is not None:
-        raise ValueError("Cannot specify `in_specs` with a `None` grid.")
-      if self.out_specs is not None:
-        raise ValueError("Cannot specify `out_specs` with a `None` grid.")
-
-  def get_name(self) -> str:
-    return extract_function_name(self.func, self.name)
-
-  def specialize(self,
-                 in_avals: tuple[AbstractRef, ...],
-                 out_avals: tuple[AbstractRef, ...],
-                 in_tree: tree_util.PyTreeDef
-                 ) -> tuple[SpecializedKernel, ...]:
-    grid = preprocess_grid(self.grid)
-    in_specs = self.in_specs
-    out_specs = self.out_specs
-    if out_specs is not None and not isinstance(out_specs, (tuple, list)):
-      out_specs = (out_specs,)
-    if out_specs is not None and not isinstance(out_specs, tuple):
-      out_specs = tuple(out_specs)
-    if in_specs is None:
-      in_specs = [None] * len(in_avals)
-    if out_specs is None:
-      out_specs = [None] * len(out_avals)
-    if grid == ():
-      in_ref_avals = [state.shaped_array_ref(arg.shape, arg.dtype)
-                      for arg in in_avals]
-      out_ref_avals = [state.shaped_array_ref(arg.shape, arg.dtype)
-                       for arg in out_avals]
-    else:
-      in_ref_avals = [
-          state.shaped_array_ref(
-            compute_shape_from_block_spec(block_spec, aval.shape),
-            aval.dtype)
-          for block_spec, aval in zip(in_specs, in_avals)]
-      out_ref_avals = [
-          state.shaped_array_ref(
-            compute_shape_from_block_spec(block_spec, aval.shape),
-            aval.dtype)
-          for block_spec, aval in zip(out_specs, out_avals)]
-    in_block_mappings = map(partial(convert_block_spec_to_block_mapping, grid),
-                            in_specs)
-    out_block_mappings = map(partial(convert_block_spec_to_block_mapping, grid),
-                             out_specs)
-    grid_spec = GridSpec(grid, (*in_block_mappings, *out_block_mappings), ())
-    jaxpr, consts, out_tree = _initial_style_open_jaxpr(
-        self.func, in_tree, tuple((*in_ref_avals, *out_ref_avals)))
-    return [SpecializedKernel(jaxpr, grid_spec)], consts, out_tree
+  compiler_params: dict[str, Any]

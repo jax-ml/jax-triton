@@ -33,9 +33,9 @@ from jax.interpreters import partial_eval as pe
 import jax.numpy as jnp
 import jax_triton as jt
 from jax_triton import pallas as pl
-from jax_triton.pallas.core import _initial_style_open_jaxpr
 from jax_triton.pallas.ops import attention
 from jax_triton.pallas.ops import layer_norm
+from jax_triton.pallas.tracing_utils import initial_style_open_jaxpr
 try:
   from jax_triton.pallas.triton_ir_lowering import compile_jaxpr
 except ModuleNotFoundError:
@@ -123,7 +123,7 @@ class PallasTest(parameterized.TestCase):
     super().setUp()
     if compile_jaxpr:
       compile_jaxpr.cache_clear()
-    _initial_style_open_jaxpr.cache_clear()
+    initial_style_open_jaxpr.cache_clear()
 
   def pallas_call(self, *args, **kwargs):
     return pl.pallas_call(*args, **kwargs, interpret=self.INTERPRET)
@@ -850,6 +850,49 @@ class PallasPrimitivesTest(parameterized.TestCase):
     jaxpr, _ , _ = pe.trace_to_jaxpr_dynamic(
         lu.wrap_init(body), [state.shaped_array_ref((4, 3, 2), jnp.int32)])
     self.assertIn(expected, jaxpr.pretty_print(use_color=False))
+
+class PallasAutotuningTest(PallasTest):
+  
+  def test_basic_autotuning(self):
+
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), jnp.float32),
+        grid=lambda block_size: 8 // block_size,
+        autotuning_configs=[
+          pl.Config(dict(block_size=2), {}),
+          pl.Config(dict(block_size=4), {}),
+        ])
+    def add_one(x_ref, o_ref, *, block_size):
+      idx = pl.program_id(0) * block_size + jnp.arange(block_size)
+      o_ref[idx] = x_ref[idx] + 1.
+
+    x = jnp.arange(8.)
+    np.testing.assert_allclose(add_one(x), x + 1.)
+
+  def test_basic_autotuning_with_block_spec(self):
+
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), jnp.float32),
+        grid=lambda block_size: 8 // block_size,
+        in_specs=[
+          lambda block_size: pl.BlockSpec(lambda i: i, (block_size,)),
+        ],
+        out_specs=[
+          lambda block_size: pl.BlockSpec(lambda i: i, (block_size,)),
+        ],
+        autotuning_configs=[
+          pl.Config(dict(block_size=1), {}),
+          pl.Config(dict(block_size=2), {}),
+          pl.Config(dict(block_size=4), {}),
+          pl.Config(dict(block_size=8), {}),
+        ],
+        debug=True)
+    def add_one(x_ref, o_ref, *, block_size):
+      del block_size
+      o_ref[...] = x_ref[...] + 1.
+
+    x = jnp.arange(8.)
+    np.testing.assert_allclose(add_one(x), x + 1.)
 
 class FusedAttentionTest(parameterized.TestCase):
 
