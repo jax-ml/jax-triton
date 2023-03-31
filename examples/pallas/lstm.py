@@ -155,7 +155,7 @@ def make_lstm(kernel):
     return ys, c
   return lstm
 
-if __name__ == "__main__":
+def main(unused_argv):
   parser = argparse.ArgumentParser()
   parser.add_argument('--batch_size', type=int, default=32)
   parser.add_argument('--feature_size', type=int, default=512)
@@ -217,3 +217,7 @@ if __name__ == "__main__":
       lstm(weights, xs, c)), number=n_trials)
     print(f"Triton: {triton_duration / n_trials * 1000:.4f}ms")
     print(f"Triton speedup: {xla_duration / triton_duration:.2f}")
+
+if __name__ == "__main__":
+  from absl import app
+  app.run(main)

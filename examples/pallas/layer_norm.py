@@ -20,7 +20,7 @@ import numpy as np
 
 from jax_triton.pallas.ops import layer_norm
 
-if __name__ == "__main__":
+def main(unused_argv):
   dtype = jnp.float32
   b, m, n = 32, 4096, 8196
 
@@ -61,3 +61,7 @@ if __name__ == "__main__":
   duration = timeit.timeit(lambda: jax.block_until_ready(f_ref_grad(x, weight, bias)),
                           number=n_trials)
   print(f"Reference Layer Norm Gradient: {duration / n_trials * 1000:.2f}ms")
+
+if __name__ == "__main__":
+  from absl import app
+  app.run(main)

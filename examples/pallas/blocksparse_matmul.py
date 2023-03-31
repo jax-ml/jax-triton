@@ -174,7 +174,7 @@ def sdd_matmul(x_ell, y, num_warps: int = 8, num_stages: int = 3, bn: int = 64,
                         debug=debug)(x_ell.blocks, x_ell.indices,
                                      x_ell.blocks_per_row, y)
 
-if __name__ == "__main__":
+def main(unused_argv):
   k1, k2 = random.split(random.PRNGKey(0))
   dtype = jnp.float16
   m, k, n = 4096, 4096, 4096
@@ -205,3 +205,7 @@ if __name__ == "__main__":
   duration = timeit.timeit(lambda: (x @ y).block_until_ready(),
                            number=n_trials)
   print(f"HLO Blocksparse Matmul: {duration / n_trials * 1000:.2f}ms")
+
+if __name__ == "__main__":
+  from absl import app
+  app.run(main)

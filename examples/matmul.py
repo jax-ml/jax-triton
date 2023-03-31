@@ -143,7 +143,7 @@ def matmul(a, b, activation=None):
       activation=activation)
 
 
-if __name__ == "__main__":
+def main(unused_argv):
   k1, k2 = jax.random.split(jax.random.PRNGKey(0))
   a_val = jax.random.normal(k1, (512, 512), dtype=jnp.float32)
   b_val = jax.random.normal(k2, (512, 512), dtype=jnp.float32)
@@ -151,3 +151,7 @@ if __name__ == "__main__":
   print(
       jax.jit(matmul, static_argnums=2)(a_val, b_val, relu).block_until_ready())
 
+
+if __name__ == "__main__":
+  from absl import app
+  app.run(main)

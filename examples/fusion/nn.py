@@ -43,7 +43,7 @@ def apply(weights, x):
     x = dense(x, weight)
   return dense(x, weights[-1], activation=lambda x: x)
 
-if __name__ == "__main__":
+def main(unused_argv):
   keys = random.split(random.PRNGKey(0), n_layers)
   keys_iter = iter(keys)
 
@@ -71,3 +71,7 @@ if __name__ == "__main__":
 
   t = timeit.timeit(lambda: xla_jit_net(x).block_until_ready(), number=n_trials)
   print(f"XLA: {t:.4}ms")
+
+if __name__ == "__main__":
+  from absl import app
+  app.run(main)

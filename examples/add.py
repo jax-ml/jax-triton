@@ -50,8 +50,12 @@ def add(x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
       block_size=block_size)
 
 
-if __name__ == "__main__":
+def main(unused_argv):
   x_val = jnp.arange(8)
   y_val = jnp.arange(8, 16)
   print(add(x_val, y_val))
   print(jax.jit(add)(x_val, y_val))
+
+if __name__ == "__main__":
+  from absl import app
+  app.run(main)

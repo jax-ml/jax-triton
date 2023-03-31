@@ -51,7 +51,7 @@ SIZES = [
 
 n_trials = 20000
 
-if __name__ == "__main__":
+def main(unused_argv):
   console = rich.console.Console()
   for b, d in SIZES:
     table = rich.table.Table(title=f"({b}, {d}) x ({d}, {d})", )
@@ -72,3 +72,7 @@ if __name__ == "__main__":
               number=n_trials, repeat=5)
       table.add_row(func_name, act_name, f"{np.min(times) / n_trials * 1000:.4}")
     console.print(table)
+
+if __name__ == "__main__":
+  from absl import app
+  app.run(main)

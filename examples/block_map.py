@@ -159,7 +159,7 @@ def mha(q, k, v, *,
       grid=grid, debug=True)(q, k, v)
   return out
 
-if __name__ == "__main__":
+def main(unused_argv):
   k1, k2 = random.split(random.PRNGKey(0), 2)
   x = random.normal(k1, (1024, 512))
   y = random.normal(k2, (512, 2048))
@@ -180,3 +180,7 @@ if __name__ == "__main__":
 
   o = mha(q, k, v).block_until_ready()
   o_ref = mha_reference(q, k, v).block_until_ready()
+
+if __name__ == "__main__":
+  from absl import app
+  app.run(main)

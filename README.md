@@ -93,8 +93,8 @@ and do an editable install with:
 $ cd jax-triton
 $ pip install -e .
 ```
-To run the `jax-triton` tests, you'll need `pytest` and `absl-py`:
+To run the `jax-triton` tests, you'll need `pytest`:
 ```bash
-$ pip install pytest absl-py
+$ pip install pytest
 $ pytest tests/
 ```

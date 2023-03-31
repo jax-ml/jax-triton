@@ -21,7 +21,7 @@ import numpy as np
 
 from jax_triton.pallas.ops import attention
 
-if __name__ == "__main__":
+def main(unused_argv):
   dtype = jnp.float16
   batch, seq_len, n_heads, head_dim = 384, 384, 4, 32
   shape = (batch, seq_len, n_heads, head_dim)
@@ -49,3 +49,7 @@ if __name__ == "__main__":
   duration = timeit.timeit(lambda: attention.mha_reference(q, k, v).block_until_ready(),
                            number=n_trials)
   print(f"Reference Attention: {duration / n_trials * 1000:.2f}ms")
+
+if __name__ == "__main__":
+  from absl import app
+  app.run(main)

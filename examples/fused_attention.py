@@ -190,10 +190,14 @@ def fused_attention(q: jnp.ndarray, k: jnp.ndarray,
   return output
 
 
-if __name__ == "__main__":
+def main(unused_argv):
   q_key, k_key, v_key = random.split(random.PRNGKey(0), 3)
   q = random.normal(q_key, (2, 3, 1024, 64), dtype=jnp.float16)
   k = random.normal(k_key, (2, 3, 64, 1024), dtype=jnp.float16)
   v = random.normal(v_key, (2, 3, 1024, 64), dtype=jnp.float16)
   print(fused_attention(q, k, v))
   print(jax.jit(fused_attention)(q, k, v))
+
+if __name__ == "__main__":
+  from absl import app
+  app.run(main)

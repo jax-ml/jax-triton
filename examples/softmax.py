@@ -67,7 +67,11 @@ def softmax(x: jnp.ndarray) -> jnp.ndarray:
       block_size=block_size)
 
 
-if __name__ == "__main__":
+def main(unused_argv):
   x_val = jnp.ones((8, 5), dtype="float32")
   print(softmax(x_val).block_until_ready())
   print(jax.jit(softmax)(x_val).block_until_ready())
+
+if __name__ == "__main__":
+  from absl import app
+  app.run(main)

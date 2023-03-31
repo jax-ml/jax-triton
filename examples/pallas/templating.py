@@ -25,7 +25,11 @@ def make_kernel(eltwise_kernel):
 kernel1 = make_kernel(lambda x: x * 2)
 kernel2 = make_kernel(jnp.exp)
 
-if __name__ == "__main__":
+def main(unused_argv):
   x = jnp.array(1.)
   print(pl.pallas_call(kernel1, out_shape=x, grid=1)(x, x))
   print(pl.pallas_call(kernel2, out_shape=x, grid=1)(x, x))
+
+if __name__ == "__main__":
+  from absl import app
+  app.run(main)
