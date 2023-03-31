@@ -29,7 +29,7 @@
 
 #include "cuda.h"
 #include "pybind11/pybind11.h"
-#include "pybind11/stl.h"
+#include "pybind11/stl.h"  // IWYU pragma: keep
 
 // TODO(cjfj): Use `Status` for error handling.
 #define CHECK_CUDA(expr)                                                  \
