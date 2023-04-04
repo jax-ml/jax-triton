@@ -129,10 +129,6 @@ def _atomic_rmw_discharge_rule(in_avals, out_avals, ref, val, *args, args_tree,
   else:
     raise NotImplementedError
   return (x_new,) + (None,) * (len(in_avals) + 1), out
-  (new_ref_val, *_), out = state_discharge._discharge_rules[state_primitives.swap_p](
-      [ref_aval, val_aval, *non_slice_idx_avals], out_avals, ref, val, *non_slice_idx,
-      indexed_dims=indexed_dims)
-  return (new_ref_val, None, *((None,) * len(in_avals))), out
 state_discharge.register_discharge_rule(atomic_rmw_p)(_atomic_rmw_discharge_rule)
 
 def _atomic_abstract_eval(ref_aval, val_aval, *all_avals,
@@ -183,7 +179,7 @@ atomic_cas_p.def_effectful_abstract_eval(_atomic_cas_abstract_eval)
 def atomic_cas(ref, cmp, val):
   return atomic_cas_p.bind(ref, cmp, val)
 
-@state.register_discharge_rule(atomic_cas_p)
+@state_discharge.register_discharge_rule(atomic_cas_p)
 def _atomic_cas_discharge_rule(in_avals, out_avals, ref, cmp, val):
   del in_avals, out_avals
   new_val = jnp.where(ref == cmp, val, ref)
@@ -393,7 +389,7 @@ def _load_discharge_rule(in_avals, out_avals, ref, *args, args_tree,
     mask, other = masked_other
     out = jnp.where(mask, out, other)
   return (None,) * len(in_avals), out
-state.register_discharge_rule(load_p)(_load_discharge_rule)
+state_discharge.register_discharge_rule(load_p)(_load_discharge_rule)
 
 swap_p = jax_core.Primitive('masked_swap')
 
@@ -469,7 +465,7 @@ def _swap_discharge_rule(in_avals, out_avals, ref, val, *args, args_tree,
   else:
     raise NotImplementedError
   return (x_new,) + (None,) * (len(in_avals) - 1), out
-state.register_discharge_rule(swap_p)(_swap_discharge_rule)
+state_discharge.register_discharge_rule(swap_p)(_swap_discharge_rule)
 
 
 def load(x_ref, idx, *, mask=None, other=None, cache_modifier="",

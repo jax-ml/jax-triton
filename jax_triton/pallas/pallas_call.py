@@ -31,6 +31,7 @@ from jax._src import ad_util
 from jax._src import core as jax_core
 from jax._src.lib.mlir.dialects import mhlo
 from jax._src import state
+from jax._src.state import discharge as state_discharge
 from jax._src.util import (
     split_list, safe_map, safe_zip, weakref_lru_cache,
     tuple_insert, partition_list)
@@ -87,7 +88,7 @@ def _pallas_call_impl(*args, jaxpr, name, out_shapes, which_linear,
     # discharged jaxpr. This should reproduce exactly what compiling to Triton
     # will do.
     grid = grid_spec.grid
-    discharged_jaxpr, consts = state.discharge_state(jaxpr, ())
+    discharged_jaxpr, consts = state_discharge.discharge_state(jaxpr, ())
     if debug:
       print(discharged_jaxpr)
     loop_indices = jnp.array(list(it.product(*(range(g) for g in grid))))
