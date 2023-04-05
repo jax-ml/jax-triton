@@ -13,41 +13,57 @@
 // limitations under the License. */
 
 #include <algorithm>
-#include <cassert>
 #include <cstdint>
-#include <iostream>
 #include <limits>
 #include <memory>
-#include <mutex>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
-#include <unordered_map>
 #include <variant>
 #include <vector>
 
+#include "absl/base/optimization.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_format.h"
+#include "absl/synchronization/mutex.h"
 #include "cuda.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/stl.h"  // IWYU pragma: keep
+#include "pybind11_abseil/status_casters.h"  // IWYU pragma: keep
 
-// TODO(cjfj): Use `Status` for error handling.
-#define CHECK_CUDA(expr)                                                  \
-  do {                                                                    \
-    CUresult result = (expr);                                             \
-    if (result != CUDA_SUCCESS) {                                         \
-      const char* error_string = "unknown error";                         \
-      cuGetErrorString(result, &error_string);                            \
-      std::cerr << "CUDA call failed (" << #expr << "): " << error_string \
-                << std::endl;                                             \
-      abort();                                                            \
-    }                                                                     \
+#define RETURN_IF_ERROR(expr)               \
+  do {                                      \
+    absl::Status status = (expr);           \
+    if (ABSL_PREDICT_FALSE(!status.ok())) { \
+      return status;                        \
+    }                                       \
   } while (false)
+
+#define CUDA_TO_STATUS(expr) \
+  jax_triton::ToStatus(expr, __FILE__, __LINE__, #expr)
+
+#define CUDA_RETURN_IF_ERROR(expr) RETURN_IF_ERROR(CUDA_TO_STATUS(expr))
 
 namespace py = pybind11;
 
 namespace jax_triton {
 namespace {
+
+absl::Status ToStatus(CUresult result, const char* file, int64_t line,
+                      const char* expr) {
+  if (ABSL_PREDICT_TRUE(result == CUDA_SUCCESS)) {
+    return absl::OkStatus();
+  }
+
+  const char* str;
+  CHECK_EQ(cuGetErrorName(result, &str), CUDA_SUCCESS);
+  return absl::InternalError(absl::StrFormat("%s:%d: CUDA call `%s` failed: %s",
+                                             file, line, expr, str));
+}
 
 constexpr uint32_t kNumThreadsPerWarp = 32;
 
@@ -67,34 +83,36 @@ class TritonKernel {
         block_dim_x_(num_warps * kNumThreadsPerWarp),
         shared_mem_bytes_(shared_mem_bytes) {}
 
-  void Launch(CUstream stream, uint32_t grid[3], void** params) {
+  absl::Status Launch(CUstream stream, uint32_t grid[3], void** params) {
     CUcontext context;
-    CHECK_CUDA(cuStreamGetCtx(stream, &context));
-    CUfunction kernel = GetFunctionForContext(context);
-    CHECK_CUDA(cuLaunchKernel(kernel, grid[0], grid[1], grid[2], block_dim_x_,
-                              /*blockDimY=*/1, /*blockDimZ=*/1,
-                              shared_mem_bytes_, stream, params,
-                              /*extra=*/nullptr));
+    CUDA_RETURN_IF_ERROR(cuStreamGetCtx(stream, &context));
+    absl::StatusOr<CUfunction> kernel = GetFunctionForContext(context);
+    RETURN_IF_ERROR(kernel.status());
+    return CUDA_TO_STATUS(cuLaunchKernel(
+        *kernel, grid[0], grid[1], grid[2], block_dim_x_,
+        /*blockDimY=*/1, /*blockDimZ=*/1, shared_mem_bytes_, stream, params,
+        /*extra=*/nullptr));
   }
 
  private:
-  CUfunction GetFunctionForContext(CUcontext context) {
-    std::lock_guard<std::mutex> lock(mutex_);
+  absl::StatusOr<CUfunction> GetFunctionForContext(CUcontext context) {
+    absl::MutexLock lock(&mutex_);
     auto it = functions_.find(context);
     if (it != functions_.end()) {
       return it->second;
     }
 
-    CHECK_CUDA(cuCtxPushCurrent(context));
+    CUDA_RETURN_IF_ERROR(cuCtxPushCurrent(context));
     CUmodule module;
-    CHECK_CUDA(cuModuleLoadData(&module, module_image_.c_str()));
+    CUDA_RETURN_IF_ERROR(cuModuleLoadData(&module, module_image_.c_str()));
     modules_.push_back(OwnedCUmodule(module, CuModuleDeleter()));
-    CHECK_CUDA(cuCtxPopCurrent(nullptr));
+    CUDA_RETURN_IF_ERROR(cuCtxPopCurrent(nullptr));
 
     CUfunction function;
-    CHECK_CUDA(cuModuleGetFunction(&function, module, kernel_name_.c_str()));
+    CUDA_RETURN_IF_ERROR(
+        cuModuleGetFunction(&function, module, kernel_name_.c_str()));
     auto [_, success] = functions_.insert({context, function});
-    assert(success);
+    CHECK(success);
 
     // The maximum permitted static shared memory allocation in CUDA is 48kB,
     // but we can expose more to the kernel using dynamic shared memory.
@@ -105,23 +123,24 @@ class TritonKernel {
 
     // Set up dynamic shared memory.
     CUdevice device;
-    CHECK_CUDA(cuCtxGetDevice(&device));
+    CUDA_RETURN_IF_ERROR(cuCtxGetDevice(&device));
 
     int shared_optin;
-    CHECK_CUDA(cuDeviceGetAttribute(
+    CUDA_RETURN_IF_ERROR(cuDeviceGetAttribute(
         &shared_optin, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
         device));
 
     if (shared_optin > kMaxStaticSharedMemBytes) {
-      CHECK_CUDA(cuFuncSetCacheConfig(function, CU_FUNC_CACHE_PREFER_SHARED));
+      CUDA_RETURN_IF_ERROR(
+          cuFuncSetCacheConfig(function, CU_FUNC_CACHE_PREFER_SHARED));
       int shared_total;
-      CHECK_CUDA(cuDeviceGetAttribute(
+      CUDA_RETURN_IF_ERROR(cuDeviceGetAttribute(
           &shared_total,
           CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR, device));
       int shared_static;
-      CHECK_CUDA(cuFuncGetAttribute(
+      CUDA_RETURN_IF_ERROR(cuFuncGetAttribute(
           &shared_static, CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, function));
-      CHECK_CUDA(cuFuncSetAttribute(
+      CUDA_RETURN_IF_ERROR(cuFuncSetAttribute(
           function, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
           shared_optin - shared_static));
     }
@@ -133,14 +152,14 @@ class TritonKernel {
   uint32_t block_dim_x_;
   uint32_t shared_mem_bytes_;
 
-  std::mutex mutex_;
-  std::vector<OwnedCUmodule> modules_;
-  std::unordered_map<CUcontext, CUfunction> functions_;
+  absl::Mutex mutex_;
+  std::vector<OwnedCUmodule> modules_ ABSL_GUARDED_BY(mutex_);
+  absl::flat_hash_map<CUcontext, CUfunction> functions_ ABSL_GUARDED_BY(mutex_);
 };
 
 struct TritonKernelCallBase {
   virtual ~TritonKernelCallBase() = default;
-  virtual void Launch(CUstream stream, void** buffers) = 0;
+  virtual absl::Status Launch(CUstream stream, void** buffers) = 0;
 };
 
 class TritonKernelCall : public TritonKernelCallBase {
@@ -159,7 +178,7 @@ class TritonKernelCall : public TritonKernelCallBase {
         grid_{grid_0, grid_1, grid_2},
         parameters_(std::move(parameters)) {}
 
-  void Launch(CUstream stream, void** buffers) override final {
+  absl::Status Launch(CUstream stream, void** buffers) override final {
     std::vector<void*> params;
     params.reserve(parameters_.size());
     for (size_t i = 0; i < parameters_.size(); ++i) {
@@ -170,13 +189,13 @@ class TritonKernelCall : public TritonKernelCallBase {
         auto cu_ptr = reinterpret_cast<CUdeviceptr>(ptr);
 
         if (array.ptr_must_be_divisible_by_16 && (cu_ptr % 16 != 0)) {
-          std::cerr << "Parameter " << i << ": pointer (" << ptr
-                    << ") is not divisible by 16." << std::endl;
-          abort();
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Parameter %zu (%p) is not divisible by 16.", i, ptr));
         }
 
         if (array.bytes_to_zero > 0) {
-          CHECK_CUDA(cuMemsetD8Async(cu_ptr, 0, array.bytes_to_zero, stream));
+          CUDA_RETURN_IF_ERROR(
+              cuMemsetD8Async(cu_ptr, 0, array.bytes_to_zero, stream));
         }
         params.push_back(&ptr);
       } else {
@@ -184,7 +203,7 @@ class TritonKernelCall : public TritonKernelCallBase {
       }
     }
 
-    kernel_.Launch(stream, grid_, params.data());
+    return kernel_.Launch(stream, grid_, params.data());
   }
 
  private:
@@ -207,7 +226,7 @@ class TritonAutotunedKernelCall : public TritonKernelCallBase {
         configs_(std::move(configs)),
         input_output_aliases_(std::move(input_output_aliases)) {}
 
-  void Launch(CUstream stream, void** buffers) override {
+  absl::Status Launch(CUstream stream, void** buffers) override {
     if (configs_.size() > 1) {
       // If an input aliases with an output, it will get overwritten during the
       // kernel execution. If the kernel is called repeatedly, as we do during
@@ -217,43 +236,48 @@ class TritonAutotunedKernelCall : public TritonKernelCallBase {
       for (auto [input_idx, output_idx, size] : input_output_aliases_) {
         if (buffers[input_idx] == buffers[output_idx]) {
           std::vector<uint8_t> input_copy(size);
-          CHECK_CUDA(cuMemcpyDtoHAsync(
+          CUDA_RETURN_IF_ERROR(cuMemcpyDtoHAsync(
               input_copy.data(),
               reinterpret_cast<CUdeviceptr>(buffers[input_idx]), size, stream));
           input_copies[input_idx] = std::move(input_copy);
         }
       }
 
-      std::cerr << "Autotuning function: " << name_ << std::endl;
+      LOG(INFO) << "Autotuning function: " << name_;
       // First run a single iteration of each to config to determine how many
       // iterations to run for benchmarking.
       float best = std::numeric_limits<float>::infinity();
       for (Config& config : configs_) {
         auto& kernel_call = py::cast<TritonKernelCall&>(config.kernel_call);
-        float t = Benchmark(stream, kernel_call, buffers, 1);
-        std::cerr << config.description << ", ran 1 iter in " << t << " ms"
-                  << std::endl;
-        best = std::min(best, t);
+        absl::StatusOr<float> t = Benchmark(stream, kernel_call, buffers, 1);
+        RETURN_IF_ERROR(t.status());
+        LOG(INFO) << config.description << ", ran 1 iter in " << *t << " ms";
+        best = std::min(best, *t);
       }
 
       int timed_iters =
           std::max(static_cast<int>(kBenchmarkTimeMillis / best), 1);
-      timed_iters = std::min(timed_iters, 100);
-      std::cerr << "Benchmarking with " << timed_iters
-                << " iters (target time: " << kBenchmarkTimeMillis << " ms)"
-                << std::endl;
+      if (timed_iters > 100) {
+        timed_iters = 100;
+        LOG(INFO) << "Benchmarking with 100 iters (capped at 100)";
+      } else {
+        timed_iters = std::min(timed_iters, 100);
+        LOG(INFO) << "Benchmarking with " << timed_iters
+                  << " iters (target time: " << kBenchmarkTimeMillis << " ms)";
+      }
 
       best = std::numeric_limits<float>::infinity();
       for (Config& config : configs_) {
         auto& kernel_call = py::cast<TritonKernelCall&>(config.kernel_call);
-        float t = Benchmark(stream, kernel_call, buffers, timed_iters);
-        std::cerr << config.description << ", ran " << timed_iters
-                  << " iters in " << t << " ms" << std::endl;
+        absl::StatusOr<float> t =
+            Benchmark(stream, kernel_call, buffers, timed_iters);
+        RETURN_IF_ERROR(t.status());
+        LOG(INFO) << config.description << ", ran " << timed_iters
+                  << " iters in " << *t << " ms";
 
-        if (t < best) {
-          std::cerr << config.description << " is the new best config"
-                    << std::endl;
-          best = t;
+        if (*t < best) {
+          LOG(INFO) << config.description << " is the new best config";
+          best = *t;
           std::swap(config, configs_[0]);
         }
       }
@@ -264,38 +288,39 @@ class TritonAutotunedKernelCall : public TritonKernelCallBase {
 
       // Restore aliased inputs to their original values.
       for (auto [input_idx, _, size] : input_output_aliases_) {
-        CHECK_CUDA(
+        CUDA_RETURN_IF_ERROR(
             cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(buffers[input_idx]),
                               input_copies[input_idx].data(), size, stream));
       }
       // Synchronize stream to ensure copies are complete before the host copy
       // is deleted.
-      CHECK_CUDA(cuStreamSynchronize(stream));
+      CUDA_RETURN_IF_ERROR(cuStreamSynchronize(stream));
     }
 
     auto& kernel_call = py::cast<TritonKernelCall&>(configs_[0].kernel_call);
-    kernel_call.Launch(stream, buffers);
+    return kernel_call.Launch(stream, buffers);
   }
 
  private:
-  static constexpr float kBenchmarkTimeMillis = 100.;
+  static constexpr float kBenchmarkTimeMillis = 10.;
 
-  float Benchmark(CUstream stream, TritonKernelCall& kernel_call,
-                  void** buffers, int num_iterations) {
+  absl::StatusOr<float> Benchmark(CUstream stream,
+                                  TritonKernelCall& kernel_call, void** buffers,
+                                  int num_iterations) {
     CUevent start, stop;
-    CHECK_CUDA(cuEventCreate(&start, /*Flags=*/CU_EVENT_DEFAULT));
-    CHECK_CUDA(cuEventCreate(&stop, /*Flags=*/CU_EVENT_DEFAULT));
-    kernel_call.Launch(stream, buffers);  // Warm-up iteration.
-    CHECK_CUDA(cuEventRecord(start, stream));
+    CUDA_RETURN_IF_ERROR(cuEventCreate(&start, /*Flags=*/CU_EVENT_DEFAULT));
+    CUDA_RETURN_IF_ERROR(cuEventCreate(&stop, /*Flags=*/CU_EVENT_DEFAULT));
+    RETURN_IF_ERROR(kernel_call.Launch(stream, buffers));  // Warm-up iteration.
+    CUDA_RETURN_IF_ERROR(cuEventRecord(start, stream));
     for (int i = 0; i < num_iterations; ++i) {
-      kernel_call.Launch(stream, buffers);
+      RETURN_IF_ERROR(kernel_call.Launch(stream, buffers));
     }
-    CHECK_CUDA(cuEventRecord(stop, stream));
-    CHECK_CUDA(cuEventSynchronize(stop));
+    CUDA_RETURN_IF_ERROR(cuEventRecord(stop, stream));
+    CUDA_RETURN_IF_ERROR(cuEventSynchronize(stop));
     float elapsed_ms;
-    CHECK_CUDA(cuEventElapsedTime(&elapsed_ms, start, stop));
-    CHECK_CUDA(cuEventDestroy(start));
-    CHECK_CUDA(cuEventDestroy(stop));
+    CUDA_RETURN_IF_ERROR(cuEventElapsedTime(&elapsed_ms, start, stop));
+    CUDA_RETURN_IF_ERROR(cuEventDestroy(start));
+    CUDA_RETURN_IF_ERROR(cuEventDestroy(stop));
     return elapsed_ms;
   }
 
@@ -318,7 +343,8 @@ uint64_t EncodeKernelParameterAs(PyT value) {
   return encoded.bits;
 }
 
-uint64_t EncodeKernelParameter(py::int_ value, std::string_view dtype) {
+absl::StatusOr<uint64_t> EncodeKernelParameter(py::int_ value,
+                                               std::string_view dtype) {
   if ((dtype == "i1") || (dtype == "i8")) {
     return EncodeKernelParameterAs<int8_t>(value);
   } else if (dtype == "u8") {
@@ -336,25 +362,30 @@ uint64_t EncodeKernelParameter(py::int_ value, std::string_view dtype) {
   } else if (dtype == "u64") {
     return EncodeKernelParameterAs<uint64_t>(value);
   } else {
-    throw std::runtime_error(std::string("unknown dtype: ") + dtype.data());
+    return absl::InvalidArgumentError(std::string("unknown dtype: ") +
+                                      dtype.data());
   }
 }
 
-uint64_t EncodeKernelParameter(py::float_ value, std::string_view dtype) {
+absl::StatusOr<uint64_t> EncodeKernelParameter(py::float_ value,
+                                               std::string_view dtype) {
   if (dtype == "fp32") {
     return EncodeKernelParameterAs<float>(value);
   } else if (dtype == "fp64") {
     return EncodeKernelParameterAs<double>(value);
   } else {
-    throw std::runtime_error(std::string("unknown dtype: ") + dtype.data());
+    return absl::InvalidArgumentError(std::string("unknown dtype: ") +
+                                      dtype.data());
   }
 }
 
-uint64_t EncodeKernelParameter(py::bool_ value, std::string_view dtype) {
+absl::StatusOr<uint64_t> EncodeKernelParameter(py::bool_ value,
+                                               std::string_view dtype) {
   if ((dtype == "int1") || (dtype == "B")) {
     return EncodeKernelParameterAs<bool>(value);
   } else {
-    throw std::runtime_error(std::string("unknown dtype: ") + dtype.data());
+    return absl::InvalidArgumentError(std::string("unknown dtype: ") +
+                                      dtype.data());
   }
 }
 
@@ -362,10 +393,11 @@ uint64_t EncodeKernelParameter(py::bool_ value, std::string_view dtype) {
 
 void LaunchTritonKernel(CUstream stream, void** buffers, char* opaque,
                         size_t opaque_len) {
-  assert(opaque_len == sizeof(TritonKernelCallBase*));
+  CHECK_EQ(opaque_len, sizeof(TritonKernelCallBase*));
   TritonKernelCallBase* kernel_call;
   std::memcpy(&kernel_call, opaque, sizeof(TritonKernelCallBase*));
-  kernel_call->Launch(stream, buffers);
+  absl::Status status = kernel_call->Launch(stream, buffers);
+  LOG_IF(FATAL, !status.ok()) << status;  // TODO(cjfj): Return the `Status`.
 }
 
 PYBIND11_MODULE(triton_kernel_call_lib, m) {
