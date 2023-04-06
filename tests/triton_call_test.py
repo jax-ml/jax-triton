@@ -289,6 +289,23 @@ class TritonKernelCallTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(out, x)
 
+  def test_multiple_outputs(self):
+    @triton.jit
+    def copy_twice_kernel(a_ptr, x_ptr, y_ptr):
+      a = tl.load(a_ptr)
+      tl.store(x_ptr, a)
+      tl.store(y_ptr, a)
+
+    a = jnp.array([42])
+    x, y = jt.triton_call(
+        a,
+        kernel=copy_twice_kernel,
+        out_shape=[a, a],
+        grid=(1,),
+    )
+    np.testing.assert_array_equal(a, x)
+    np.testing.assert_array_equal(a, y)
+
   def test_kernel_cache(self):
     # Create unique JITFunction to avoid conflicts with other tests.
     my_add_kernel = triton.jit(add_kernel.fn)
