@@ -216,16 +216,6 @@ def triton_kernel_call_lowering(
     raise NotImplementedError(
         "`input_output_aliases` only supported on `jaxlib>=0.3.22")
 
-  out_type = ir.TupleType.get_tuple(
-      [
-          ir.RankedTensorType.get(
-              shape.shape, mlir.dtype_to_ir_type(shape.dtype)
-          )
-          for shape in out_shapes
-      ]
-  )
-  i32_type = ir.IntegerType.get_signless(32)
-
   args = list(ctx.avals_in)
   arg_dtypes = list(map(get_triton_type, ctx.avals_in))
   for idx, dtype, v in scalar_args:
@@ -370,31 +360,45 @@ def triton_kernel_call_lowering(
 
   ctx.module_context.add_keepalive(kernel_call)
 
-  output_operand_aliases = ir.ArrayAttr.get(
-      [
-          mhlo.OutputOperandAlias.get(
-              output_tuple_indices=[output_idx],
-              operand_index=input_idx,
-              operand_tuple_indices=[],
-          )
-          for input_idx, output_idx in input_output_aliases
-      ]
-  )
+  out_types = [
+      ir.RankedTensorType.get(shape.shape, mlir.dtype_to_ir_type(shape.dtype))
+      for shape in out_shapes
+  ]
 
-  out = mhlo.CustomCallOp(
-      [out_type],
+  if len(out_types) > 1:
+    out_types = [ir.TupleType.get_tuple(out_types)]
+
+  output_operand_aliases = []
+  for input_idx, output_idx in input_output_aliases:
+    if (len(out_shapes) == 1) and (output_idx != 0):
+      raise ValueError("output index out of range")
+
+    output_operand_aliases.append(
+        mhlo.OutputOperandAlias.get(
+            output_tuple_indices=[output_idx] if len(out_shapes) > 1 else [],
+            operand_index=input_idx,
+            operand_tuple_indices=[],
+        )
+    )
+
+  results = mhlo.CustomCallOp(
+      out_types,
       array_args,
       call_target_name=ir.StringAttr.get(call_name),
       has_side_effect=ir.BoolAttr.get(False),
       backend_config=ir.StringAttr.get(kernel_call.descriptor),
-      api_version=ir.IntegerAttr.get(i32_type, 1),
+      api_version=mlir.i32_attr(1),
       called_computations=ir.ArrayAttr.get([]),
       operand_layouts=utils.avals_to_layouts(ctx.avals_in),
       result_layouts=utils.avals_to_layouts(ctx.avals_out),
-      output_operand_aliases=output_operand_aliases,
-  )
-  results = [mhlo.GetTupleElementOp(out, mlir.i32_attr(i)).result
-             for i in range(len(out_shapes))]
+      output_operand_aliases=ir.ArrayAttr.get(output_operand_aliases),
+  ).results
+  assert len(results) == 1
+  if len(out_shapes) > 1:
+    results = [
+        mhlo.GetTupleElementOp(results[0], mlir.i32_attr(i)).result
+        for i in range(len(out_shapes))
+    ]
   return results
 
 
