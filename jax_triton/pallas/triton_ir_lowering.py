@@ -46,6 +46,7 @@ import triton.language as tl
 from triton.language import ir as tl_ir
 import triton._C.libtriton.triton as _triton
 
+from jax_triton import triton_lib
 from jax_triton import triton_kernel_call_lib
 from jax_triton import utils as triton_utils
 from jax_triton.pallas import primitives
@@ -136,7 +137,7 @@ def _process_grid_to_3d_grid(builder, grid_spec: GridSpec):
   assert len(out_indices) == len(grid_spec.grid)
   return new_grid, out_indices
 
-def lower_jaxpr_to_triton_module(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: GridSpec,
+def lower_jaxpr_to_triton_module(jaxpr: jax_core.Jaxpr, num_consts: int, in_shapes, grid_spec: GridSpec,
                                  name: str) -> tl_ir.module:
   jaxpr, _ = pe.dce_jaxpr(jaxpr, [True] * len(jaxpr.outvars), instantiate=True)
   ir_context = tl_ir.context()
@@ -167,11 +168,13 @@ def lower_jaxpr_to_triton_module(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: Gr
                             local_program_ids)
   start_indices = map(partial(_eval_index_map, ctx, program_ids),
                       grid_spec.block_mappings)
-  block_infos = [BlockInfo(shape,
-                 start_idx, block_mapping.block_shape)
-                 if block_mapping is not None else None
-                 for shape, block_mapping, start_idx in
-                 zip(in_shapes, grid_spec.block_mappings, start_indices)]
+  arg_block_infos = [BlockInfo(shape,
+                     start_idx, block_mapping.block_shape)
+                     if block_mapping is not None else None
+                     for shape, block_mapping, start_idx in
+                     zip(in_shapes, grid_spec.block_mappings, start_indices)]
+  const_block_infos = [None] * num_consts
+  block_infos = [*const_block_infos, *arg_block_infos]
   () = lower_jaxpr_to_triton_ir(ctx, jaxpr, block_infos, *args)
   ctx.builder.ret_void()
   ctx.builder.set_insert_block(insert_pt)
@@ -797,22 +800,18 @@ def _while_lowering_rule(ctx: TritonLoweringRuleContext, *args, cond_nconsts,
   return post_args
 triton_lowering_rules[lax.while_p] = _while_lowering_rule
 
-@weakref_lru_cache
-def compile_jaxpr(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: GridSpec,
-                   name: str, num_warps: int, num_stages: int
-                   ) -> TritonCompilationResult:
-  lowering_result = lower_jaxpr_to_triton_module(jaxpr, in_shapes, grid_spec, name)
-  backend = _triton.runtime.backend.CUDA
-  device = 0
-  name, asm, shared_mem = _triton.code_gen.compile_ttir(backend, lowering_result.module, device,
-      num_warps, num_stages, {}, 0)
-  return TritonCompilationResult(name, asm, shared_mem, lowering_result)
+def _mangle_name(name: str):
+  name = name.replace("-", "_")
+  name = name.replace("-", "_")
+  name = name.replace("=", "_")
+  return name
 
 @weakref_lru_cache
-def compile_jaxpr(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: GridSpec,
+def compile_jaxpr(jaxpr: jax_core.Jaxpr, num_consts: int, in_shapes, grid_spec: GridSpec,
                    name: str, num_warps: int, num_stages: int
                    ) -> TritonCompilationResult:
-  lowering_result = lower_jaxpr_to_triton_module(jaxpr, in_shapes, grid_spec, name)
+  name = _mangle_name(name)
+  lowering_result = lower_jaxpr_to_triton_module(jaxpr, num_consts, in_shapes, grid_spec, name)
   backend = _triton.runtime.backend.CUDA
   device = 0
   name, asm, shared_mem = _triton.code_gen.compile_ttir(
@@ -821,59 +820,100 @@ def compile_jaxpr(jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: GridSpec,
 
 
 def pallas_call_lowering(ctx: mlir.LoweringRuleContext, *in_nodes,
-                         jaxpr: jax_core.Jaxpr,
+                         kernels: Sequence[pallas_core.SpecializedKernel],
                          name: str,
                          in_shapes: Tuple[jax.ShapeDtypeStruct, ...],
                          out_shapes: Tuple[jax.ShapeDtypeStruct, ...],
                          which_linear: Tuple[bool, ...],
                          interpret: bool,
                          debug: bool,
-                         input_output_aliases: Tuple[Tuple[int, int], ...],
-                         grid_spec: GridSpec,
-                         **compiler_params: Any):
+                         input_output_aliases: Tuple[Tuple[int, int], ...]):
   if interpret:
     return mlir.lower_fun(pallas_call_p.impl, multiple_results=True)(
-        ctx, *in_nodes, jaxpr=jaxpr, name=name, out_shapes=out_shapes,
+        ctx, *in_nodes, kernels=kernels, name=name, out_shapes=out_shapes,
         in_shapes=in_shapes,
         which_linear=which_linear,
         interpret=interpret, debug=debug,
-        input_output_aliases=input_output_aliases,
-        grid_spec=grid_spec, **compiler_params)
-  num_warps = compiler_params.get("num_warps", 4)
-  num_stages = compiler_params.get("num_stages", 3)
-  compilation_result = compile_jaxpr(jaxpr, tuple((*in_shapes, *out_shapes)),
-                                     grid_spec, name, num_warps, num_stages)
-  name = compilation_result.name
-  asm = compilation_result.asm
-  shared_mem = compilation_result.shared_mem
-  if debug:
-    print(jaxpr)
-    print(grid_spec)
-  lowering_result = compilation_result.lowering_result
-  if debug:
-    lowering_result.module.print()
+        input_output_aliases=input_output_aliases)
+  lowered_kernels = []
+  for kernel in kernels:
+    if debug:
+      print(kernel.jaxpr)
+      print(kernel.grid_spec)
+      print(kernel.compiler_params)
+    compiler_params = dict(kernel.compiler_params).get("triton", {})
+    num_warps = compiler_params.pop("num_warps", 4)
+    num_stages = compiler_params.pop("num_stages", 3)
+    if compiler_params:
+      raise ValueError(f"Invalid compiler params: {compiler_params}")
+    compilation_result = compile_jaxpr(kernel.jaxpr, kernel.num_consts,
+                                       tuple((*in_shapes, *out_shapes)),
+                                       kernel.grid_spec, kernel.name, num_warps,
+                                       num_stages)
+    name = compilation_result.name
+    asm = compilation_result.asm
+    shared_mem = compilation_result.shared_mem
+    lowering_result = compilation_result.lowering_result
+    if debug:
+      lowering_result.module.print()
+    lowered_kernels.append((name, asm, shared_mem, lowering_result, num_warps))
   out_type = ir.TupleType.get_tuple([
       ir.RankedTensorType.get(out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype))
       for out_shape in ctx.avals_out])
   i32_type = ir.IntegerType.get_signless(32)
 
-  kernel = triton_kernel_call_lib.TritonKernel(
-      asm["cubin"], name, num_warps, shared_mem
-  )
-
-  grid = triton_utils.normalize_grid(
-      compilation_result.lowering_result.grid, metaparams={})
-  kernel_params = []
-  for _ in range(len(in_shapes) + len(out_shapes)):
-    kernel_params.append(
-        triton_kernel_call_lib.create_array_parameter(
-            0,  # bytes to zero  # TODO(cjfj): Expose through user API.
-            True,  # divisible by 16
-        )
+  if len(lowered_kernels) == 1:
+    name, asm, shared_mem, lowering_result, num_warps = lowered_kernels[0]
+    kernel = triton_kernel_call_lib.TritonKernel(
+        asm["cubin"], name, num_warps, shared_mem
     )
-  kernel_call = triton_kernel_call_lib.TritonKernelCall(
-      kernel, grid[0], grid[1], grid[2], kernel_params
-  )
+    grid = triton_utils.normalize_grid(
+        lowering_result.grid, metaparams={})
+    # All arguments are buffers.
+    kernel_params = []
+    for _ in range(len(in_shapes) + len(out_shapes)):
+      kernel_params.append(
+          triton_kernel_call_lib.create_array_parameter(
+              0,  # bytes to zero  # TODO(cjfj): Expose through user API.
+              True,  # divisible by 16
+          )
+      )
+    kernel_call = triton_kernel_call_lib.TritonKernelCall(
+        kernel, grid[0], grid[1], grid[2], kernel_params
+    )
+  elif len(lowered_kernels) > 1:
+    kernel_calls = []
+    for name, asm, shared_mem, lowering_result, num_warps in lowered_kernels:
+      kernel = triton_kernel_call_lib.TritonKernel(
+          asm["cubin"], name, num_warps, shared_mem
+      )
+      grid = triton_utils.normalize_grid(
+          lowering_result.grid, metaparams={})
+      # All arguments are buffers.
+      kernel_params = []
+      for _ in range(len(in_shapes) + len(out_shapes)):
+        kernel_params.append(
+            triton_kernel_call_lib.create_array_parameter(
+                0,  # bytes to zero  # TODO(cjfj): Expose through user API.
+                True,  # divisible by 16
+            )
+        )
+      kernel_call = triton_kernel_call_lib.TritonKernelCall(
+          kernel, grid[0], grid[1], grid[2], kernel_params
+      )
+      kernel_calls.append(kernel_call)
+    input_output_aliases_with_sizes = tuple(
+        (input_idx, output_idx, triton_lib.aval_size_bytes(ctx.avals_in[input_idx]))
+        for input_idx, output_idx in input_output_aliases
+    )
+
+    kernel_call = triton_kernel_call_lib.TritonAutotunedKernelCall(
+          name,
+          [(call, f"config{i}") for i, call in enumerate(kernel_calls)],
+          input_output_aliases_with_sizes,
+    )
+  else:
+    raise ValueError("Cannot have 0 kernels.")
 
   ctx.module_context.add_keepalive(kernel_call)
   output_operand_aliases = ir.ArrayAttr.get([

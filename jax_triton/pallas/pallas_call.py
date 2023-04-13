@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Module for calling pallas functions from JAX."""
+import dataclasses
 from functools import partial
 import itertools as it
 
@@ -20,7 +21,6 @@ from typing import Any, Callable, Dict, NamedTuple, Optional, Sequence, Tuple, U
 
 import jax
 from jax import api_util
-from jax import linear_util as lu
 from jax import tree_util
 from jax import lax
 from jax.interpreters import ad
@@ -29,18 +29,18 @@ from jax.interpreters import partial_eval as pe
 from jax.interpreters import xla
 from jax._src import ad_util
 from jax._src import core as jax_core
+from jax._src import linear_util as lu
 from jax._src.lib.mlir.dialects import mhlo
 from jax._src import state
 from jax._src.state import discharge as state_discharge
 from jax._src.util import (
-    split_list, safe_map, safe_zip, weakref_lru_cache,
+    split_list, safe_map, safe_zip,
     tuple_insert, partition_list)
-from jax._src.lax.control_flow import for_loop
 import jax.numpy as jnp
 import numpy as np
 
-from jax_triton.utils import avals_to_layouts, normalize_grid
 from jax_triton.pallas import core as pallas_core
+from jax_triton.pallas import tracing_utils
 
 map, unsafe_map = safe_map, map
 zip, unsafe_zip = safe_zip, zip
@@ -49,6 +49,7 @@ Grid = Tuple[int, ...]
 BlockSpec = pallas_core.BlockSpec
 BlockMapping = pallas_core.BlockMapping
 GridSpec = pallas_core.GridSpec
+SpecializedKernel = pallas_core.SpecializedKernel
 
 pallas_call_p = jax_core.Primitive('pallas_call')
 pallas_call_p.multiple_results = True
@@ -77,16 +78,17 @@ def _maybe_dynamic_update_slice(start_idx, block_shape, value, update,
   assert update.shape == block_shape
   return lax.dynamic_update_slice(value, update, start_idx)
 
-def _pallas_call_impl(*args, jaxpr, name, out_shapes, which_linear,
-                      interpret, debug: bool,
+def _pallas_call_impl(*args, kernels: Sequence[SpecializedKernel],
+                      name: str, out_shapes, which_linear: Sequence[bool],
+                      interpret: bool, debug: bool,
                       in_shapes,
-                      input_output_aliases: Tuple[Tuple[int, int], ...],
-                      grid_spec: GridSpec,
-                      **compiler_params: Any):
+                      input_output_aliases: Tuple[Tuple[int, int], ...]):
   if interpret:
     # If we're in interpreter mode, we *scan* over the grid and eval the
     # discharged jaxpr. This should reproduce exactly what compiling to Triton
     # will do.
+    kernel = kernels[0]
+    grid_spec, jaxpr = kernel.grid_spec, kernel.jaxpr
     grid = grid_spec.grid
     discharged_jaxpr, consts = state_discharge.discharge_state(jaxpr, ())
     if debug:
@@ -133,17 +135,23 @@ def _pallas_call_impl(*args, jaxpr, name, out_shapes, which_linear,
                              out_shapes=out_shapes, which_linear=which_linear,
                              grid_spec=grid_spec, interpret=interpret,
                              debug=debug,
-                             input_output_aliases=input_output_aliases,
-                             **compiler_params)
+                             input_output_aliases=input_output_aliases)
 pallas_call_p.def_impl(_pallas_call_impl)
 
 def _pallas_call_abstract_eval(*avals, out_shapes, **_):
   return map(lambda x: jax_core.ShapedArray(x.shape, x.dtype), out_shapes)
 pallas_call_p.def_abstract_eval(_pallas_call_abstract_eval)
 
-def _pallas_call_jvp_rule(primals, tangents, *, jaxpr, name, which_linear,
+def _pallas_call_jvp_rule(
+    primals, tangents, *,
+    kernels: Sequence[SpecializedKernel],
+    name: str,
+    which_linear: Sequence[bool],
     input_output_aliases: Tuple[Tuple[int, int], ...],
-    in_shapes, out_shapes, grid_spec, debug, interpret, **compiler_params: Any):
+    in_shapes: Sequence[jax.ShapeDtypeStruct],
+    out_shapes: Sequence[jax.ShapeDtypeStruct],
+    debug: bool,
+    interpret: bool):
   if input_output_aliases:
     raise NotImplementedError("JVP with aliasing not supported.")
   nonzero_tangents = [not isinstance(t, ad_util.Zero) for t in tangents]
@@ -151,44 +159,48 @@ def _pallas_call_jvp_rule(primals, tangents, *, jaxpr, name, which_linear,
               for t, inst in zip(tangents, nonzero_tangents)]
   tangents = [t for t in tangents if type(t) is not ad_util.Zero]
   nonzero_tangents_with_outputs = nonzero_tangents + [True] * len(out_shapes)
-  closed_jaxpr = jax_core.ClosedJaxpr(jaxpr, ())
-  jvp_jaxpr_, _ = ad.jvp_jaxpr(closed_jaxpr, nonzero_tangents_with_outputs, [])
-  jvp_jaxpr, () = jvp_jaxpr_.jaxpr, jvp_jaxpr_.consts  # TODO consts
-  jvp_which_linear = which_linear + (True,) * len(tangents)
-  jvp_inshapes = (*in_shapes, *in_shapes)
-  jvp_outshapes = (*out_shapes, *out_shapes)
-  if input_output_aliases:
-    raise NotImplementedError("`input_output_aliases` jvp not supported.")
-  # `pallas_call` takes in inputs and returns outputs but its jaxpr *does not*.
-  # `pallas_call` takes in a stateful jaxpr, meaning the jaxpr accepts input
-  # `Ref`s that are read from followed by output `Ref`s that are written to.
-  # This means that when we do `jvp_jaxpr` on the `jaxpr`, we get out a new
-  # jaxpr that has tangents following primals. In order for this jaxpr to be
-  # compatible w/ `pallas_call` (inputs then outputs), we need to shuffle around
-  # the jaxpr's invars.
-  logical_primals, logical_tangents = split_list(
-      jvp_jaxpr.invars, [len(primals) + len(out_shapes)])
-  logical_primal_inputs, logical_primal_outputs = split_list(logical_primals, [len(primals)])
-  logical_tangent_inputs, logical_tangent_outputs = split_list(logical_tangents, [len(tangents)])
-  in_bms, out_bms = split_list(grid_spec.block_mappings, [len(primals)])
-  new_bms = tuple((*in_bms, *in_bms, *out_bms, *out_bms))
-  new_grid_spec = grid_spec.replace(block_mappings=new_bms)
-  jvp_jaxpr = jvp_jaxpr.replace(invars=[*logical_primal_inputs,
-                                        *logical_tangent_inputs,
-                                        *logical_primal_outputs,
-                                        *logical_tangent_outputs])
-  if debug:
-    print(jvp_jaxpr)
-  out_flat = pallas_call_p.bind(*primals, *tangents, jaxpr=jvp_jaxpr,
+  new_kernels = []
+  for kernel in kernels:
+    jaxpr, grid_spec = kernel.jaxpr, kernel.grid_spec
+    closed_jaxpr = jax_core.ClosedJaxpr(jaxpr, ())
+    jvp_jaxpr_, _ = ad.jvp_jaxpr(closed_jaxpr, nonzero_tangents_with_outputs, [])
+    jvp_jaxpr, () = jvp_jaxpr_.jaxpr, jvp_jaxpr_.consts  # TODO consts
+    jvp_which_linear = which_linear + (True,) * len(tangents)
+    jvp_inshapes = (*in_shapes, *in_shapes)
+    jvp_outshapes = (*out_shapes, *out_shapes)
+    if input_output_aliases:
+      raise NotImplementedError("`input_output_aliases` jvp not supported.")
+    # `pallas_call` takes in inputs and returns outputs but its jaxpr *does not*.
+    # `pallas_call` takes in a stateful jaxpr, meaning the jaxpr accepts input
+    # `Ref`s that are read from followed by output `Ref`s that are written to.
+    # This means that when we do `jvp_jaxpr` on the `jaxpr`, we get out a new
+    # jaxpr that has tangents following primals. In order for this jaxpr to be
+    # compatible w/ `pallas_call` (inputs then outputs), we need to shuffle around
+    # the jaxpr's invars.
+    logical_primals, logical_tangents = split_list(
+        jvp_jaxpr.invars, [len(primals) + len(out_shapes)])
+    logical_primal_inputs, logical_primal_outputs = split_list(logical_primals, [len(primals)])
+    logical_tangent_inputs, logical_tangent_outputs = split_list(logical_tangents, [len(tangents)])
+    in_bms, out_bms = split_list(grid_spec.block_mappings, [len(primals)])
+    new_bms = tuple((*in_bms, *in_bms, *out_bms, *out_bms))
+    new_grid_spec = grid_spec.replace(block_mappings=new_bms)
+    jvp_jaxpr = jvp_jaxpr.replace(invars=[*logical_primal_inputs,
+                                          *logical_tangent_inputs,
+                                          *logical_primal_outputs,
+                                          *logical_tangent_outputs])
+    if debug:
+      print(jvp_jaxpr)
+    new_kernels.append(SpecializedKernel(kernel.name, jvp_jaxpr,
+                                         kernel.num_consts, new_grid_spec,
+                                         kernel.compiler_params))
+  out_flat = pallas_call_p.bind(*primals, *tangents, kernels=new_kernels,
                                 name=f"{name}_jvp",
                                 in_shapes=jvp_inshapes,
                                 out_shapes=jvp_outshapes,
-                                grid_spec=new_grid_spec,
                                 which_linear=jvp_which_linear,
                                 interpret=interpret,
                                 debug=debug,
-                                input_output_aliases=(),
-                                **compiler_params)
+                                input_output_aliases=())
   out_primals, out_tangents = split_list(out_flat, [len(out_flat) // 2])
   return out_primals, out_tangents
 ad.primitive_jvps[pallas_call_p] = _pallas_call_jvp_rule
@@ -218,194 +230,232 @@ def _batch_block_mapping(grid: Tuple[int, ...], aval: jax_core.ShapedArray,
                       jax_core.ClosedJaxpr(block_mapping_jaxpr, consts))
 
 def _pallas_call_batching_rule(args, dims, *,
-                               jaxpr: jax_core.Jaxpr,
+                               kernels: Sequence[SpecializedKernel],
                                name: str,
                                in_shapes: Tuple[jax.ShapeDtypeStruct, ...],
                                out_shapes: Tuple[jax.ShapeDtypeStruct, ...],
-                               grid_spec: GridSpec,
                                input_output_aliases: Tuple[Tuple[int, int], ...],
                                debug: bool,
                                interpret: bool,
-                               which_linear: Tuple[bool, ...],
-                               **compiler_params: Any):
+                               which_linear: Tuple[bool, ...]):
   axis_size, = {x.shape[d] for x, d in zip(args, dims)
                 if d is not batching.not_mapped}
-  block_mappings = grid_spec.block_mappings
-  avals = [v.aval for v in jaxpr.invars]
-  # How should we pick output dimensions? This actually matters because XLA
-  # can't optimize our pallas kernels, and this layout impacts performance. For
-  # now, because `vmap` doesn't really offer a way of inferring good output
-  # dimensions. For now, we just use 0.
-  # TODO(sharadmv): explore inferring better output dimensions via a heuristic
-  # TODO(sharadmv): explore a long term solution to output dim inference
+  new_kernels = []
+  for kernel in kernels:
+    jaxpr, grid_spec = kernel.jaxpr, kernel.grid_spec
+    block_mappings = grid_spec.block_mappings
+    avals = [v.aval for v in jaxpr.invars]
+    # How should we pick output dimensions? This actually matters because XLA
+    # can't optimize our pallas kernels, and this layout impacts performance. For
+    # now, because `vmap` doesn't really offer a way of inferring good output
+    # dimensions. For now, we just use 0.
+    # TODO(sharadmv): explore inferring better output dimensions via a heuristic
+    # TODO(sharadmv): explore a long term solution to output dim inference
 
-  # When we have input/output aliasing, since the output will be mapped, we need
-  # to make sure to broadcast the input across that dimension if it is not
-  # mapped.
-  dims_ = list(dims)
-  args_ = list(args)
-  for input_index, _ in input_output_aliases:
-    dim = dims_[input_index]
-    if dim is batching.not_mapped:
-      dims_[input_index] = 0
-      args_[input_index] = batching.broadcast(args_[input_index], axis_size, 0)
-  args = tuple(args_)
-  dims = tuple(dims_)
+    # When we have input/output aliasing, since the output will be mapped, we need
+    # to make sure to broadcast the input across that dimension if it is not
+    # mapped.
+    dims_ = list(dims)
+    args_ = list(args)
+    for input_index, _ in input_output_aliases:
+      dim = dims_[input_index]
+      if dim is batching.not_mapped:
+        dims_[input_index] = 0
+        args_[input_index] = batching.broadcast(args_[input_index], axis_size, 0)
+    args = tuple(args_)
+    dims = tuple(dims_)
 
-  all_dims = list(dims) + [0] * len(out_shapes)
+    all_dims = list(dims) + [0] * len(out_shapes)
 
-  batched_block_mappings = map(partial(_batch_block_mapping, grid_spec.grid),
-                               avals, all_dims, block_mappings)
-  batched_in_shapes = tuple(
-      jax.ShapeDtypeStruct(x.shape if dim is batching.not_mapped else
-                           tuple_insert(x.shape, dim, axis_size),
-                           x.dtype)
-      for x, dim in zip(in_shapes, dims))
-  batched_out_shapes = tuple(
-      jax.ShapeDtypeStruct(tuple_insert(x.shape, 0, axis_size), x.dtype)
-      for x in out_shapes)
+    batched_block_mappings = map(partial(_batch_block_mapping, grid_spec.grid),
+                                 avals, all_dims, block_mappings)
+    batched_in_shapes = tuple(
+        jax.ShapeDtypeStruct(x.shape if dim is batching.not_mapped else
+                             tuple_insert(x.shape, dim, axis_size),
+                             x.dtype)
+        for x, dim in zip(in_shapes, dims))
+    batched_out_shapes = tuple(
+        jax.ShapeDtypeStruct(tuple_insert(x.shape, 0, axis_size), x.dtype)
+        for x in out_shapes)
 
-  batched_grid_spec = grid_spec.replace(grid=(axis_size, *grid_spec.grid),
-                                        block_mappings=tuple(batched_block_mappings),
-                                        mapped_dims=(0,) + tuple(a + 1 for a in
+    batched_grid_spec = grid_spec.replace(grid=(axis_size, *grid_spec.grid),
+                                          block_mappings=tuple(batched_block_mappings),
+                                          mapped_dims=(0,) + tuple(a + 1 for a in
                                                                  grid_spec.mapped_dims))
-  out = pallas_call_p.bind(*args, jaxpr=jaxpr, name=f"batched_{name}",
+    new_kernel = SpecializedKernel(kernel.name, jaxpr, kernel.num_consts,
+                                   batched_grid_spec, kernel.compiler_params)
+    new_kernels.append(new_kernel)
+
+  out = pallas_call_p.bind(*args, kernels=new_kernels, name=f"batched_{name}",
                            in_shapes=batched_in_shapes,
                            out_shapes=batched_out_shapes,
                            which_linear=which_linear,
-                           grid_spec=batched_grid_spec,
                            input_output_aliases=input_output_aliases,
                            debug=debug,
-                           interpret=interpret,
-                           **compiler_params)
+                           interpret=interpret)
   return out, (0,) * len(out)
 batching.primitive_batchers[pallas_call_p] = _pallas_call_batching_rule
 
-@weakref_lru_cache
-def _initial_style_open_jaxpr(fun: Callable, in_tree, in_avals,
-                              primitive_name: Optional[str] = None):
-  wrapped_fun, out_tree_thunk = api_util.flatten_fun_nokwargs(
-      lu.wrap_init(fun), in_tree)
-  debug = pe.debug_info(fun, in_tree, out_tree_thunk, False,
-                        primitive_name or "<unknown>")
-  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(wrapped_fun, in_avals, debug)
-  jaxpr = for_loop._hoist_consts_to_refs(jaxpr)
-  return jaxpr, consts, out_tree_thunk()
+Kernel = Callable[..., Any]
+MaybeSpec = Optional[Union[pallas_core.BlockSpec,
+                           Callable[..., pallas_core.BlockSpec]]]
+Platform = str
+CompilerParams = dict[Platform, dict[str, Any]]
 
-def _preprocess_grid(grid: Optional[Union[Grid, int]]) -> Grid:
-  if grid is None:
-    return ()
-  if isinstance(grid, int):
-    return (grid,)
-  return grid
+def specialize_kernel(config: pallas_core.KernelConfig,
+                      func: Callable,
+                      name: str,
+                      in_avals: tuple[jax_core.ShapedArray, ...],
+                      out_avals: tuple[jax_core.ShapedArray, ...],
+                      in_tree: tree_util.PyTreeDef,
+                      compiler_params: CompilerParams,
+                      ) -> tuple[SpecializedKernel, ...]:
+  grid = config.grid
+  if grid == ():
+    in_ref_avals = [state.shaped_array_ref(arg.shape, arg.dtype)
+                    for arg in in_avals]
+    out_ref_avals = [state.shaped_array_ref(arg.shape, arg.dtype)
+                     for arg in out_avals]
+  else:
+    in_ref_avals = [
+        state.shaped_array_ref(
+          pallas_core.compute_shape_from_block_spec(block_spec, aval.shape),
+          aval.dtype)
+        for block_spec, aval in zip(config.in_specs, in_avals)]
+    out_ref_avals = [
+        state.shaped_array_ref(
+          pallas_core.compute_shape_from_block_spec(block_spec, aval.shape),
+          aval.dtype)
+        for block_spec, aval in zip(config.out_specs, out_avals)]
+  in_block_mappings = map(
+      partial(pallas_core.convert_block_spec_to_block_mapping, grid),
+      config.in_specs)
+  out_block_mappings = map(
+      partial(pallas_core.convert_block_spec_to_block_mapping, grid),
+      config.out_specs)
+  grid_spec = pallas_core.GridSpec(grid, (*in_block_mappings, *out_block_mappings), ())
+  jaxpr, consts, out_tree = tracing_utils.initial_style_open_jaxpr(
+      func, in_tree, tuple((*in_ref_avals, *out_ref_avals)), "pallas_call", **config.meta)
+  if config.name is not None:
+    name = f"{name}_{config.name}"
+  return SpecializedKernel(name, jaxpr, len(consts), grid_spec,
+                           dict(compiler_params, **config.compiler_params)), consts, out_tree
 
-def _extract_function_name(f: Callable, name: Optional[str]) -> str:
-  if name is None:
-    name = f.__name__ if hasattr(f, "__name__") and f.__name__ else "func"
-  return name
+def _canonicalize_kernel_config(
+    maybe_kernel_config: Optional[pallas_core.KernelConfig],
+    in_avals: Sequence[jax_core.AbstractValue],
+    out_avals: Sequence[jax_core.AbstractValue],
+    in_specs: Optional[Sequence[Optional[BlockSpec]]],
+    out_specs: Optional[Sequence[Optional[BlockSpec]]],
+    grid: Optional[Union[Grid, int]],
+    compiler_params: dict[str, Any],
+    ) -> pallas_core.KernelConfig:
+  if not maybe_kernel_config:
+    config = pallas_core.KernelConfig(in_specs=in_specs, out_specs=out_specs,
+                                      grid=grid,
+                                      compiler_params=compiler_params)
+  else:
+    config = maybe_kernel_config
+    config = config.replace(compiler_params=dict(compiler_params,
+                                                 **config.compiler_params))
+    grid = maybe_kernel_config.grid
+  grid, in_specs, out_specs = config.grid, config.in_specs, config.out_specs
+  grid = pallas_core.preprocess_grid(grid)
+  if in_specs is not None and not isinstance(in_specs, (tuple, list)):
+    in_specs = (in_specs,)
+  if out_specs is not None and not isinstance(out_specs, (tuple, list)):
+    out_specs = (out_specs,)
+  if in_specs is None:
+    in_specs = [None] * len(in_avals)
+  if out_specs is None:
+    out_specs = [None] * len(out_avals)
+  return config.replace(grid=grid, in_specs=in_specs, out_specs=out_specs)
 
-def _convert_block_spec_to_block_mapping(
-    grid: Grid, block_spec: Optional[BlockSpec]) -> Optional[BlockMapping]:
-  if block_spec is None:
-    return None
-  in_avals = [jax_core.ShapedArray((), jnp.int32) for _ in grid]
-  block_shape = tuple(
-      pallas_core.mapped if s is None else s for s in block_spec.block_shape)
-  jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(
-      lu.wrap_init(block_spec.compute_index), in_avals)
-  return BlockMapping(block_shape, jax_core.ClosedJaxpr(jaxpr, consts))
-
-def _compute_shape_from_block_spec(block_spec: Optional[BlockSpec],
-                                   arg_shape: Tuple[int, ...]
-                                   ) -> Tuple[int, ...]:
-  if block_spec is None:
-    return arg_shape
-  return tuple(s for s in block_spec.block_shape if s is not None)
-
-def pallas_call(f: Callable, out_shape: Any, *, debug: bool = False,
+def pallas_call(f: Callable, out_shape: Any, *,
                 grid: Optional[Grid] = None,
+                config: Optional[pallas_core.KernelConfig] = None,
                 in_specs: Optional[Sequence[Optional[BlockSpec]]] = None,
                 out_specs: Optional[Sequence[Optional[BlockSpec]]] = None,
                 input_output_aliases: Dict[int, int] = {},
                 interpret: bool = False,
                 name: Optional[str] = None,
-                **compiler_params: Any):
-  if grid is None:
-    if in_specs is not None:
-      raise ValueError("Cannot specify `in_specs` with a `None` grid.")
-    if out_specs is not None:
-      raise ValueError("Cannot specify `out_specs` with a `None` grid.")
-  grid = _preprocess_grid(grid)
-  name = _extract_function_name(f, name)
+                autotuning_configs: Optional[Sequence[pallas_core.KernelConfig]] = None,
+                debug: bool = False,
+                compiler_params: Optional[CompilerParams] = None):
+  if config is not None:
+    if grid is not None or in_specs is not None or out_specs is not None:
+      raise ValueError("Cannot specify both `config` and any of `grid`, "
+                       "`in_specs`, or `out_specs`.")
+    if autotuning_configs is not None:
+      raise ValueError("Cannot specify both `config` and `autotuning_configs`")
+  if autotuning_configs is not None:
+    if grid is not None or in_specs is not None or out_specs is not None:
+      raise ValueError("Cannot specify both `autotuning_configs` and any of `grid`, "
+                       "`in_specs`, or `out_specs`.")
+  if compiler_params is None:
+    compiler_params = {}
   singleton = False
   if not isinstance(out_shape, (tuple, list)):
     out_shape = (out_shape,)
     singleton = True
   if not isinstance(out_shape, tuple):
     out_shape = tuple(out_shape)
-  flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
-  if out_specs is not None and not isinstance(out_specs, (tuple, list)):
-    out_specs = (out_specs,)
-  if out_specs is not None and not isinstance(out_specs, tuple):
-    out_specs = tuple(out_specs)
-  flat_out_shapes = [jax.ShapeDtypeStruct(x.shape, x.dtype)
-                     for x in flat_out_shapes]
+  if not name:
+    name = f.__name__ if hasattr(f, "__name__") else "unnamed"
+
   @jax.jit
   def wrapped(*args):
     flat_args, in_tree = tree_util.tree_flatten(args)
-    if grid is None:
-      flat_in_specs = [None] * len(flat_args)
-      flat_out_specs = [None] * len(flat_out_shapes)
-      in_ref_avals = [state.shaped_array_ref(arg.shape, arg.dtype)
-                      for arg in flat_args]
-      out_ref_avals = [state.shaped_array_ref(arg.shape, arg.dtype)
-                       for arg in flat_out_shapes]
-    else:
-      if in_specs is None:
-        flat_in_specs = [None for arg in flat_args]
-      else:
-        flat_in_specs, in_block_tree = tree_util.tree_flatten(tuple(in_specs))
-        if in_block_tree != in_tree:
-          raise ValueError(
-              "Pytree specs for arguments and `in_specs` must match: "
-              f"{in_tree} vs. {in_block_tree}")
-      if out_specs is None:
-        flat_out_specs = [None for arg in flat_out_shapes]
-      else:
-        flat_out_specs, out_block_tree = tree_util.tree_flatten(out_specs)
-        if out_block_tree != out_tree:
-          raise ValueError("Pytree specs for `out_shape` and `out_specs` must match: "
-                           f"{out_tree} vs. {out_block_tree}")
-      in_ref_avals = [
-          state.shaped_array_ref(
-            _compute_shape_from_block_spec(block_spec, arg.shape), arg.dtype)
-          for block_spec, arg in zip(flat_in_specs, flat_args)]
-      out_ref_avals = [
-          state.shaped_array_ref(
-            _compute_shape_from_block_spec(block_spec, arg.shape), arg.dtype)
-          for block_spec, arg in zip(flat_out_specs, flat_out_shapes)]
-    in_block_mappings = map(partial(_convert_block_spec_to_block_mapping, grid),
-                            flat_in_specs)
-    out_block_mappings = map(partial(_convert_block_spec_to_block_mapping, grid),
-                             flat_out_specs)
+    flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
+
     jaxpr_in_tree = tree_util.tree_structure((*args, *out_shape))
-    jaxpr, consts, _ = _initial_style_open_jaxpr(
-        f, jaxpr_in_tree, tuple((*in_ref_avals, *out_ref_avals)),
-        primitive_name="pallas_call")
-    flat_in_specs = it.chain([None] * len(consts), flat_in_specs)
-    grid_spec = GridSpec(grid, tuple((*in_block_mappings,
-                                      *out_block_mappings)),
-                         ())
+    flat_in_avals = tuple(jax_core.raise_to_shaped(jax_core.get_aval(a))
+                          for a in flat_args)
+    flat_out_avals = tuple(jax_core.ShapedArray(a.shape, a.dtype)
+                           for a in flat_out_shapes)
+    canonicalized_configs = []
+    if autotuning_configs is None:
+      canonicalized_configs.append(_canonicalize_kernel_config(config,
+                                                               flat_in_avals,
+                                                               flat_out_avals,
+                                                               in_specs,
+                                                               out_specs,
+                                                               grid,
+                                                               compiler_params))
+    else:
+      canonicalized_configs.extend(map(partial(_canonicalize_kernel_config,
+                                               in_avals=flat_in_avals,
+                                               out_avals=flat_out_avals,
+                                               in_specs=in_specs,
+                                               out_specs=out_specs,
+                                               grid=grid,
+                                               compiler_params=compiler_params),
+                                       autotuning_configs))
+    kernels = []
+    all_consts = []
+    if len(canonicalized_configs) == 0:
+      raise ValueError("Cannot pass in empty autotuning configs")
+    for canonicalized_config in canonicalized_configs:
+      specialized_kernel, consts, jaxpr_out_tree = specialize_kernel(
+          canonicalized_config, f, name, flat_in_avals,
+          flat_out_avals, jaxpr_in_tree, compiler_params)
+      kernels.append(specialized_kernel)
+      all_consts.extend(consts)
+    if all_consts:
+      raise NotImplementedError("Cannot handle consts.")
+    del jaxpr_out_tree
     which_linear = (False,) * len(flat_args)
     out_flat = pallas_call_p.bind(
-        *consts, *flat_args, jaxpr=jaxpr, name=name, which_linear=which_linear,
+        *all_consts, *flat_args,
+        kernels=kernels,
+        name=name,
+        which_linear=which_linear,
         in_shapes=tuple(jax.ShapeDtypeStruct(a.shape, a.dtype)
                         for a in flat_args),
-        out_shapes=tuple(flat_out_shapes), debug=debug,
+        out_shapes=tuple(flat_out_shapes),
+        debug=debug,
         interpret=interpret,
-        grid_spec=grid_spec,
-        input_output_aliases=tuple(input_output_aliases.items()),
-        **compiler_params)
+        input_output_aliases=tuple(input_output_aliases.items()))
     out = tree_util.tree_unflatten(out_tree, out_flat)
     if singleton:
       return out[0]

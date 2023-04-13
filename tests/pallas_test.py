@@ -33,9 +33,10 @@ from jax.interpreters import partial_eval as pe
 import jax.numpy as jnp
 import jax_triton as jt
 from jax_triton import pallas as pl
-from jax_triton.pallas.pallas_call import _initial_style_open_jaxpr
 from jax_triton.pallas.ops import attention
 from jax_triton.pallas.ops import layer_norm
+from jax_triton.pallas.ops import matmul as matmul_ops
+from jax_triton.pallas.tracing_utils import initial_style_open_jaxpr
 try:
   from jax_triton.pallas.triton_ir_lowering import compile_jaxpr
 except ModuleNotFoundError:
@@ -123,7 +124,7 @@ class PallasTest(parameterized.TestCase):
     super().setUp()
     if compile_jaxpr:
       compile_jaxpr.cache_clear()
-    _initial_style_open_jaxpr.cache_clear()
+    initial_style_open_jaxpr.cache_clear()
 
   def pallas_call(self, *args, **kwargs):
     return pl.pallas_call(*args, **kwargs, interpret=self.INTERPRET)
@@ -850,6 +851,95 @@ class PallasPrimitivesTest(parameterized.TestCase):
     jaxpr, _ , _ = pe.trace_to_jaxpr_dynamic(
         lu.wrap_init(body), [state.shaped_array_ref((4, 3, 2), jnp.int32)])
     self.assertIn(expected, jaxpr.pretty_print(use_color=False))
+
+class PallasAutotuningTest(PallasTest):
+  
+  def test_basic_autotuning(self):
+
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), jnp.float32),
+        autotuning_configs=[
+          pl.KernelConfig(meta=dict(block_size=block_size),
+                          grid=8 // block_size)
+          for block_size in [1, 2, 4, 8]
+        ])
+    def add_one(x_ref, o_ref, *, block_size):
+      idx = pl.program_id(0) * block_size + jnp.arange(block_size)
+      o_ref[idx] = x_ref[idx] + 1.
+
+    x = jnp.arange(8.)
+    np.testing.assert_allclose(add_one(x), x + 1.)
+
+  def test_basic_autotuning_with_block_spec(self):
+
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), jnp.float32),
+        autotuning_configs=[
+          pl.KernelConfig(name=f"block_size={block_size}_num_warps={num_warps}_num_stages={num_stages}",
+                          meta=dict(block_size=block_size),
+                          in_specs=[
+                            pl.BlockSpec(lambda i: i, (block_size,))
+                          ],
+                          out_specs=[
+                            pl.BlockSpec(lambda i: i, (block_size,))
+                          ],
+                          grid=8 // block_size,
+                          compiler_params=dict(triton=dict(num_warps=num_warps,
+                                                           num_stages=num_stages)))
+          for block_size in [4, 8]
+          for num_warps, num_stages in zip([4, 4], [3, 2])
+        ],
+        debug=True)
+    def add_one(x_ref, o_ref, *, block_size):
+      del block_size
+      o_ref[...] = x_ref[...] + 1.
+
+    x = jnp.arange(8.)
+    np.testing.assert_allclose(add_one(x), x + 1.)
+
+  @parameterized.parameters(
+      (256, 256, 256),
+      (1024, 1024, 1024),
+      (1024, 512, 1024),
+      (1024, 512, 512),
+  )
+  def test_matmul_autotuned(self, m, n, k):
+    key = random.PRNGKey(0)
+    k1, k2 = random.split(key)
+    x = random.normal(k1, (m, k), dtype=jnp.float16)
+    y = random.normal(k2, (k, n), dtype=jnp.float16)
+    np.testing.assert_allclose(matmul_ops.matmul(x, y, debug=True),
+                               matmul_ops.matmul_reference(x, y),
+                               atol=0.05, rtol=0.05)
+
+
+  def test_vmap_of_autotuned_kernel(self):
+
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), jnp.float32),
+        autotuning_configs=[
+          pl.KernelConfig(name=f"block_size={block_size}_num_warps={num_warps}_num_stages={num_stages}",
+                          meta=dict(block_size=block_size),
+                          in_specs=[
+                            pl.BlockSpec(lambda i: i, (block_size,)),
+                            pl.BlockSpec(lambda i: i, (block_size,))
+                          ],
+                          out_specs=[
+                            pl.BlockSpec(lambda i: i, (block_size,))
+                          ],
+                          grid=8 // block_size,
+                          compiler_params=dict(triton=dict(num_warps=num_warps,
+                                                           num_stages=num_stages)))
+          for block_size in [4, 8]
+          for num_warps, num_stages in zip([4, 4], [3, 2])
+        ],
+        debug=True)
+    def add(x_ref, y_ref, o_ref, *, block_size):
+      del block_size
+      o_ref[...] = x_ref[...] + y_ref[...]
+
+    x = jnp.arange(16.).reshape((2, 8))
+    np.testing.assert_allclose(jax.vmap(add)(x, x), x + x)
 
 class FusedAttentionTest(parameterized.TestCase):
 
