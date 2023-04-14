@@ -27,7 +27,6 @@ from jax_triton import pallas as pl
 def mha_forward_kernel(
     q_ref, k_ref, v_ref,  # Input arrays
     o_ref, # Output
-    tmp_ref, # Temporary scratch space to deal with compiler bug
     *residual_refs, # Residual outputs
     sm_scale: float, block_q: int, block_d: int, block_k: int):
   seq_len = q_ref.shape[0]
@@ -35,10 +34,10 @@ def mha_forward_kernel(
 
   # acc is the buffer where we accumulate the output on sram.
   # m_i and l_i (see FlashAttention paper) are updated during the k,v loop.
-  m_i = jnp.zeros([block_q], dtype=jnp.float32) - float('inf')
-  l_i = jnp.zeros([block_q], dtype=jnp.float32)
+  m_i = jnp.zeros(block_q, dtype=jnp.float32) - float('inf')
+  l_i = jnp.zeros(block_q, dtype=jnp.float32)
   # acc is the buffer where we accumulate the output on sram.
-  acc = jnp.zeros([block_q, block_d], dtype=jnp.float32)
+  acc = jnp.zeros((block_q, block_d), dtype=jnp.float32)
 
   # Load q: it will stay in L1 throughout. Indices form a matrix because we
   # read, compute, and write all in 2d chunks. 1 element ~= 1 CUDA thread index.
@@ -49,51 +48,34 @@ def mha_forward_kernel(
   # Here we only loop over blocks of kv to process entire seq_len, the loop over
   # blocks of q is carried out by the grid.
   def body(i, refs):
-    acc_ref, m_i_ref, l_i_ref = refs
-    acc, m_i, l_i = acc_ref[:], m_i_ref[:], l_i_ref[:]
-    start_k = pl.multiple_of(i * block_k, block_k)
-    k = pl.load(k_ref, (pl.dslice(start_k, block_k), pl.dslice(block_d)))
-    p_ij = jnp.zeros([block_q, block_k], dtype=jnp.float32)
-    if sm_scale == 1.0:
-      p_ij += pl.dot(q, k, trans_b=True)   # [block_q, block_k]
-    else:
-      p_ij += sm_scale * pl.dot(q, k, trans_b=True)  # [block_q, block_k]
+    start_k = i * block_k
+    acc_ref, m_ref, l_ref = refs
+    acc, m_prev, l_prev = acc_ref[()], m_ref[()], l_ref[()]
+
+    k = pl.load(k_ref, (pl.dslice(start_k, block_k), slice(None)))
+    qk = jnp.zeros([block_q, block_k], dtype=jnp.float32)
+    qk += pl.dot(q, k.T)   # [block_q, block_k]
+    if sm_scale != 1.:
+      qk *= sm_scale # [block_q, block_k]
+
     # Bring closer to XLA:GPU numerics.
-    p_ij = p_ij.astype(q_ref.dtype)
-    p_ij = p_ij.astype(jnp.float32)
-    # -- compute m_ij, p, l_ij
-    m_ij = jnp.max(p_ij, axis=1)  # Row max, shape [block_q].
-    p_ij_sub = p_ij - m_ij[:, None]  # Shape [block_q, block_k].
-    p_ij = jnp.exp(p_ij_sub)
-    l_ij = jnp.sum(p_ij, axis=1)  # Shape [block_q].
+    qk = qk.astype(q_ref.dtype)
+    qk = qk.astype(jnp.float32)
+    m_curr = jnp.maximum(jnp.max(qk, axis=1), m_prev)
+    l_prev *= jnp.exp(m_prev - m_curr)
+    p = jnp.exp(qk - m_curr[:, None])
+    l_curr = jnp.sum(p, axis=1) + l_prev
 
-    # NOTE: Flash attention begins.
-    # -- update m_i and l_i
-    m_i_new = jnp.maximum(m_i, m_ij)  # Shape [block_q].
-    alpha = jnp.exp(m_i - m_i_new)  # Shape [block_q].
-    beta = jnp.exp(m_ij - m_i_new)  # Shape [block_q].
-    l_i_new = alpha * l_i + beta * l_ij  # Shape [block_q].
-    # -- update output accumulator --
-    # The two terms in the accumulation of o are processed separately.
-    p_scale = beta / l_i_new  # Shape [block_q].
-    p_ij = p_ij * p_scale[:, None]  # Shape [block_q].
-    # Update the scaling of the output buffer acc.
-    acc_scale = l_i / l_i_new * alpha  # Shape [block_q].
-    # Compiler bug! Use tmp real quick
+    l_rcp = 1. / l_curr
+    p = p * l_rcp[:, None]
+    acc *= (l_prev * l_rcp)[:, None]
+    p = p.astype(jnp.float16)
 
-    tmp_idx = (pl.dslice(start_q * block_q, block_q),)
-    pl.store(tmp_ref, tmp_idx, acc_scale)
-    acc_scale = pl.load(tmp_ref, tmp_idx)
-
-    acc = acc * acc_scale[:, None]
-    l_i_ref[:] = l_i_new  # Update m_i and l_i for the next block_k.
-    m_i_ref[:] = m_i_new
-    # # NOTE: Flash attention ends.
-
-    # Add the new block of attention weights.
     v = pl.load(v_ref, (pl.dslice(start_k, block_k), pl.dslice(block_d)))
-    acc_ref[()] = acc + jnp.dot(p_ij.astype(q_ref.dtype), v)
-  acc, m_i, l_i = for_loop(seq_len // block_k, body, (acc, m_i, l_i))
+    acc_ref[()] = acc + pl.dot(p.astype(v.dtype), v)
+    l_ref[()] = l_curr
+    m_ref[()] = m_curr
+  acc, m_i, l_i = for_loop(jt.cdiv(seq_len, block_k), body, (acc, m_i, l_i))
 
   if residual_refs:
     l_ref, m_ref = residual_refs
@@ -114,7 +96,7 @@ def mha(q, k, v,
         block_k: int = 128,
         backward_pass_impl: str = "triton",
         num_warps: Optional[int] = None,
-        num_stages: int = 1,
+        num_stages: int = 2,
         grid=None,
         interpret: bool = False,
         debug: bool = False):
@@ -133,12 +115,8 @@ def mha(q, k, v,
   kernel = functools.partial(mha_forward_kernel, sm_scale=sm_scale,
                              block_q=block_q, block_k=block_k,
                              block_d=head_dim)
-  out_shape = [
-      jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
-      jax.ShapeDtypeStruct(shape=(batch_size, num_heads, seq_len),
-                           dtype=jnp.float32)
-  ]
-  out, _ = pl.pallas_call(
+  out_shape = jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype)
+  return pl.pallas_call(
       kernel,
       grid=grid_,
       in_specs=[
@@ -146,17 +124,13 @@ def mha(q, k, v,
         pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
         pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
       ],
-      out_specs=[
-        pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-        pl.BlockSpec(lambda _, j, k: (j, k, 0), (None, None, seq_len)),
-      ],
+      out_specs=pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
       num_warps=num_warps_,
       num_stages=num_stages,
       out_shape=out_shape,
       debug=debug,
       interpret=interpret,
       name="mha_forward")(q, k, v)
-  return out
 
 def _mha_forward(q, k, v, sm_scale: float, block_q: int, block_k: int,
                  backward_pass_impl: str,
@@ -179,14 +153,12 @@ def _mha_forward(q, k, v, sm_scale: float, block_q: int, block_k: int,
                              block_d=head_dim)
   out_shape = [
       jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype), # out
-      jax.ShapeDtypeStruct(shape=(batch_size, num_heads, seq_len), # tmp
-                           dtype=jnp.float32),
       jax.ShapeDtypeStruct(shape=(batch_size, num_heads, seq_len), # l
                            dtype=jnp.float32),
       jax.ShapeDtypeStruct(shape=(batch_size, num_heads, seq_len), # m
                            dtype=jnp.float32)
   ]
-  out, _, l, m = pl.pallas_call(
+  out, l, m = pl.pallas_call(
       kernel,
       grid=grid_,
       in_specs=[
@@ -196,7 +168,6 @@ def _mha_forward(q, k, v, sm_scale: float, block_q: int, block_k: int,
       ],
       out_specs=[
         pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-        pl.BlockSpec(lambda _, j, k: (j, k, 0), (None, None, seq_len)),
         pl.BlockSpec(lambda _, j, k: (j, k, 0), (None, None, seq_len)),
         pl.BlockSpec(lambda _, j, k: (j, k, 0), (None, None, seq_len)),
       ],
@@ -275,7 +246,7 @@ def mha_backward_kernel(
     def inner_loop(start_q, refs):
       dv_ref, dk_ref = refs
       q = pl.load(q_ref, (pl.ds(start_q * block_q, block_q), slice(None)))
-      qk = pl.dot(q, k, trans_b=True)
+      qk = pl.dot(q, k.T)
       qk = qk.astype(q_ref.dtype)
       qk = qk.astype(jnp.float32)
       if sm_scale != 1.0:
@@ -283,14 +254,14 @@ def mha_backward_kernel(
       m = pl.load(m_ref, (pl.ds(start_q * block_q, block_q),))
       p = jnp.exp(qk - m[:, None])
       do = pl.load(do_scaled_ref, (pl.ds(start_q * block_q, block_q), slice(None)))
-      dv_ref[()] += pl.dot(p.astype(do.dtype), do, trans_a=True)
+      dv_ref[()] += pl.dot(p.astype(do.dtype).T, do)
       di = pl.load(delta_ref, (pl.ds(start_q * block_q, block_q),))
       dp = jnp.zeros((block_q, block_k), dtype=jnp.float32) - di[:, None]
-      dp = dp + pl.dot(do, v, trans_b=True)
+      dp = dp + pl.dot(do, v.T)
       ds = p * dp
       if sm_scale != 1.0:
         ds = ds * sm_scale
-      dk_ref[:] += pl.dot(ds.astype(q_ref.dtype), q, trans_a=True)
+      dk_ref[:] += pl.dot(ds.astype(q_ref.dtype).T, q)
       dq = pl.load(dq_ref, (pl.ds(start_q * block_q, block_q),
                             slice(None)), eviction_policy="evict_last")
       dq = dq + pl.dot(ds.astype(k.dtype), k).astype(dq.dtype)

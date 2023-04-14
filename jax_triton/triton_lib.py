@@ -17,7 +17,6 @@ import collections
 import functools
 import math
 import os
-import pickle
 import types
 import weakref
 
@@ -45,9 +44,11 @@ import numpy as np
 CAN_USE_TRITON = False
 try:
   import triton
-  import triton.compiler as tc
+  from triton.compiler import code_generator as code_gen
+  from triton.compiler import compiler as tc
   import triton.language as tl
   from triton.runtime import autotuner
+  import triton._C.libtriton.triton as _triton
   CAN_USE_TRITON = True
 except ModuleNotFoundError:
   pass
@@ -128,6 +129,41 @@ def aval_size_bytes(aval):
 # alive by the jitted JAX function.
 _COMPILED_KERNEL_CACHE = weakref.WeakValueDictionary()
 
+def ptx_get_kernel_name(module) -> str:
+  return tc.get_kernel_name(module, pattern='// .globl')
+
+def compile_ttir(
+    ttir,
+    device: int = 0,
+    num_warps: int = 4,
+    num_stages: Optional[int] = None,
+    dump: bool = False) -> Tuple[str, Dict[str, Any], int]:
+  compute_capability = triton_kernel_call_lib.get_compute_capability(device)
+  if num_stages is None:
+    num_stages = 3 if compute_capability >= 75 else 2
+  if dump:
+    ttir.dump()
+  try:
+    ttir = tc.optimize_ttir(ttir, compute_capability)
+    ttgir = tc.ttir_to_ttgir(ttir, num_warps)
+    ttgir = tc.optimize_ttgir(ttgir, num_stages, compute_capability)
+  except RuntimeError as e:
+    ttir.dump()
+    raise ValueError("TTIR->TTGIR pass failed!") from e
+  if dump:
+    ttgir.dump()
+  extern_libs = {}
+  try:
+    llir = tc.ttgir_to_llir(ttgir, extern_libs, compute_capability)
+  except RuntimeError as e:
+    ttgir.dump()
+    raise ValueError("TTIR->TTGIR pass failed!") from e
+  shared_mem = _triton.get_shared_memory_size(ttgir)
+  ptx = str(tc.llir_to_ptx(llir, compute_capability))
+  name = ptx_get_kernel_name(ptx)
+  cubin = tc.ptx_to_cubin(ptx, compute_capability)
+  asm = dict(ttir=ttir, ttgir=ttgir, llir=llir, ptx=ptx, cubin=cubin)
+  return name, asm, shared_mem
 
 def get_or_create_triton_kernel(
     fn,
@@ -137,7 +173,7 @@ def get_or_create_triton_kernel(
     num_warps,
     num_stages,
     metaparams,
-    dump_binary_path,
+    dump: bool,
 ) -> Tuple[triton_kernel_call_lib.TritonKernel, Any]:
   signature = dict(enumerate(arg_dtypes))
   # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
@@ -170,21 +206,12 @@ def get_or_create_triton_kernel(
     # TODO(sharadmv): handle multiple devices, right now we assume device 0
     # which is fine when we have multiple of the same GPU but this won't work in
     # general.
-    asm, shared_mem, name = tc._compile(
-        fn,
-        signature=signature,
-        device=0,
-        specialization=specialization,
-        constants=constants,
-        num_warps=num_warps,
-        num_stages=num_stages,
-        extern_libs={},
-        output="cubin",
-    )
-
-    if dump_binary_path is not None:
-      with open(dump_binary_path, "wb") as fp:
-        pickle.dump(dict(asm=asm, shared_mem=shared_mem, name=name), fp)
+    device = 0
+    ttir = code_gen.ast_to_ttir(fn, signature, specialization, constants,
+                                debug=dump)
+    name, asm, shared_mem = compile_ttir(
+        ttir, device=device, num_warps=num_warps,
+        num_stages=num_stages, dump=dump)
 
     kernel = triton_kernel_call_lib.TritonKernel(
         asm["cubin"], name, num_warps, shared_mem
@@ -207,9 +234,9 @@ def triton_kernel_call_lowering(
     grid,
     num_warps,
     num_stages,
-    dump_binary_path,
     input_output_aliases,
     zeroed_outputs,
+    debug,
     **metaparams,
 ):
   if jaxlib.version.__version_info__ < (0, 3, 22) and input_output_aliases:
@@ -314,7 +341,7 @@ def triton_kernel_call_lowering(
           num_warps=params["num_warps"],
           num_stages=params["num_stages"],
           metaparams=dict(params["metaparams"]),
-          dump_binary_path=dump_binary_path,
+          dump=debug,
       )
 
       kernel_params = []
@@ -424,11 +451,11 @@ def triton_call(
     call_name: str = "triton_kernel_call",
     num_warps: int = 4,
     num_stages: int = 2,
-    dump_binary_path: Optional[str] = None,
     input_output_aliases: Optional[Dict[int, int]] = None,
     zeroed_outputs: Union[
         Sequence[int], Callable[[Dict[str, Any]], Sequence[int]]
     ] = (),
+    debug: bool = False,
     **metaparams: Any,
 ) -> Any:
   """Calls a Triton kernel with `jax.Array` arguments.
@@ -502,6 +529,7 @@ def triton_call(
       indices, for outputs that should be zeroed before the kernel is launched.
     num_warps: The number of warps used to execute the Triton kernel.
     num_stages: The number of stages emitted by the Triton compiler.
+    debug: Prints out intermediate IRs if True for debugging purposes.
     **metaparams: Additional keyword arguments that will be provided to a `grid`
       (if it is a function) and to the Triton kernel as `constexpr` arguments.
 
@@ -541,9 +569,9 @@ def triton_call(
       grid=grid,
       num_warps=num_warps,
       num_stages=num_stages,
-      dump_binary_path=dump_binary_path,
       input_output_aliases=tuple(input_output_aliases.items()),
       zeroed_outputs=zeroed_outputs,
+      debug=debug,
       **metaparams,
   )
   return tree_util.tree_unflatten(out_tree, out_flat)

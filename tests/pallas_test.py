@@ -221,6 +221,8 @@ class PallasCallTest(PallasTest):
     ((64,), (32, 2)),
   ])
   def test_reshape(self, in_shape, out_shape):
+    # TODO(sharadmv): re-enable when `reshape` works again
+    self.skipTest("Reshape not yet supported in Triton-MLIR")
     @functools.partial(
         self.pallas_call, out_shape=jax.ShapeDtypeStruct(out_shape, jnp.float32),
         grid=1)
@@ -246,12 +248,12 @@ class PallasCallTest(PallasTest):
       if block_size_m <= m and block_size_n <= n and block_size_k <= k
     ])
   def test_matmul(self, m, n, k, dtype, bm, bn, bk, gm):
-
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Matmul only works on GPUs with capability >= sm70")
-
+    if (jt.get_compute_capability(0) <= 75
+        and (bm > 128 or bn > 128 or bk > 32)):
+      raise unittest.SkipTest("Block sizes too big for sm70.")
     k1, k2 = random.split(random.PRNGKey(0))
     x = random.normal(k1, (m, k), dtype=dtype)
     y = random.normal(k2, (k, n), dtype=dtype)
@@ -273,11 +275,12 @@ class PallasCallTest(PallasTest):
       if block_size_m <= m and block_size_n <= n and block_size_k <= k
     ])
   def test_matmul_block_spec(self, m, n, k, dtype, bm, bn, bk):
-
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Matmul only works on GPUs with capability >= sm70")
+    if (jt.get_compute_capability(0) <= 75
+        and (bm > 128 or bn > 128 or bk > 32)):
+      raise unittest.SkipTest("Block sizes too big for sm70.")
 
     k1, k2 = random.split(random.PRNGKey(0))
     x = random.normal(k1, (m, k), dtype=dtype)
@@ -292,8 +295,7 @@ class PallasCallTest(PallasTest):
       for dtype in ["float32", "float16"]
   ))
   def test_dot(self, size, dtype):
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Matmul only works on GPUs with capability >= sm70")
 
@@ -427,8 +429,7 @@ class PallasCallTest(PallasTest):
     ("min_f32", pl.atomic_min, np.array([1, 2, 3, 4], np.float32), np.min),
   ])
   def test_scalar_atomic(self, op, value, numpy_op):
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Atomic ops onl works on GPUs with capability >= sm70")
 
@@ -461,8 +462,7 @@ class PallasCallTest(PallasTest):
 
   @parameterized.parameters(*[(0,), (1,)])
   def test_array_atomic_add(self, axis):
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Atomic ops onl works on GPUs with capability >= sm70")
 
@@ -617,6 +617,82 @@ class PallasCallTest(PallasTest):
     np.testing.assert_allclose(count, num_threads)
 
 class PallasCallInterpreterTest(PallasCallTest):
+  INTERPRET = True
+
+class PallasControlFlowTest(PallasTest):
+
+  def setUp(self):
+    super().setUp()
+    if self.INTERPRET:
+      self.skipTest("Control flow not supported in interpreter mode yet.")
+
+  def test_simple_while(self):
+
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct((), jnp.int32))
+    def f(x_ref, y_ref):
+      x = x_ref[...]
+      y_ref[...] = 0
+      def cond(x):
+        return x < 5
+      def body(x):
+        y_ref[...] += 1
+        return x + 1
+      lax.while_loop(cond, body, x)
+    y = f(0)
+    self.assertEqual(y, 5)
+
+  def test_simple_while_with_only_values(self):
+
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct((), jnp.int32))
+    def f(y_ref):
+      def cond(acc):
+        return acc < 5
+      def body(acc):
+        acc += 1
+        return acc
+      acc = lax.while_loop(cond, body, 0)
+      y_ref[...] = acc
+    y = f()
+    self.assertEqual(y, 5)
+
+  def test_while_with_dynamic_condition(self):
+
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct((), jnp.int32))
+    def f(i_ref, y_ref):
+      y_ref[...] = 0
+      n_iter = i_ref[...]
+      def cond(i):
+        return i < n_iter
+      def body(i):
+        y_ref[...] += 1
+        return i + 1
+      _ = lax.while_loop(cond, body, 0)
+
+    self.assertEqual(f(1), 1)
+    self.assertEqual(f(4), 4)
+    self.assertEqual(f(100), 100)
+
+  def test_vmap_of_while_with_dynamic_condition(self):
+
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct((), jnp.int32))
+    def f(i_ref, y_ref):
+      y_ref[...] = 0
+      n_iter = i_ref[...]
+      def cond(i):
+        return i < n_iter
+      def body(i):
+        y_ref[...] += 1
+        return i + 1
+      _ = lax.while_loop(cond, body, 0)
+
+    x = jnp.array([1, 4, 100])
+    np.testing.assert_array_equal(jax.vmap(f)(x), x)
+
+class PallasControlFlowInterpreterTest(PallasControlFlowTest):
   INTERPRET = True
 
 class PallasCallAutodifferentiationTest(PallasTest):
@@ -854,13 +930,11 @@ class PallasPrimitivesTest(parameterized.TestCase):
 class FusedAttentionTest(parameterized.TestCase):
 
   @parameterized.parameters(*[
-    (1, 384, 1, 32),
-    (2, 384, 2, 32),
+    (1, 384, 1, 64),
+    (2, 384, 2, 64),
   ])
   def test_fused_attention_fwd(self, batch_size, seq_len, num_heads, head_dim):
-    self.skipTest("Not yet working on V100")
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (8, 0):
+    if jt.get_compute_capability(0) < 80:
       raise unittest.SkipTest(
           "Fused attention only works on GPUs with capability >= sm80")
 
@@ -878,9 +952,7 @@ class FusedAttentionTest(parameterized.TestCase):
     (2, 384, 2, 32),
   ])
   def test_fused_attention_bwd(self, batch_size, seq_len, num_heads, head_dim):
-    self.skipTest("Not yet working on V100")
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (8, 0):
+    if jt.get_compute_capability(0) < 80:
       raise unittest.SkipTest(
           "Fused attention only works on GPUs with capability >= sm80")
 
@@ -909,7 +981,7 @@ class FusedLayerNormTest(parameterized.TestCase):
     (2, 384, 192),
   ])
   def test_fused_layernorm_fwd(self, batch_size, seq_len, embed_dim):
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Fused layernorm only works on GPUs with capability >= sm70")
     k1, k2, k3 = random.split(random.PRNGKey(0), 3)
@@ -926,7 +998,7 @@ class FusedLayerNormTest(parameterized.TestCase):
     (2, 384, 192),
   ])
   def test_fused_layernorm_bwd(self, batch_size, seq_len, embed_dim):
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       raise unittest.SkipTest(
           "Fused layernorm only works on GPUs with capability >= sm70")
     k1, k2, k3 = random.split(random.PRNGKey(0), 3)

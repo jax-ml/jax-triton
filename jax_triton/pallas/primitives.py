@@ -494,7 +494,8 @@ def swap(x_ref, idx, val, *, mask=None, eviction_policy="") -> Any:
 def store(x_ref, idx, val, *, mask=None, eviction_policy="") -> None:
   _ = swap(x_ref, idx, val, mask=mask, eviction_policy=eviction_policy)
 
-def dot(a, b, trans_a=False, trans_b=False, allow_tf32: bool | None = None, precision=None):
+def dot(a, b, trans_a: bool = False, trans_b: bool = False,
+        allow_tf32: bool | None = None, precision=None):
   lhs_contract_dim = 0 if trans_a else 1
   rhs_contract_dim = 0 if not trans_b else 1
   if allow_tf32 is not None:

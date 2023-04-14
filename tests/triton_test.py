@@ -71,7 +71,7 @@ def tanh_kernel(
   # Load x and y from DRAM, masking out any extra elements in case the input is not a
   # multiple of the block size
   x = tl.load(x_ptr + offsets, mask=mask)
-  output = tl.libdevice.tanh(x)
+  output = tl.math.tanh(x)
   # Write x + y back to DRAM
   tl.store(output_ptr + offsets, output, mask=mask)
 

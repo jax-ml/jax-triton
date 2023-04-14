@@ -21,11 +21,12 @@ import jax
 from jax import random
 from jax.config import config
 import jax.numpy as jnp
-import jax_triton as jt
 import numpy as np
 import triton
-import triton.compiler as tc
+from triton.compiler import code_generator as code_gen
 import triton.language as tl
+import jax_triton as jt
+from jax_triton import triton_lib
 try:
   import torch
 except ModuleNotFoundError:
@@ -298,7 +299,7 @@ class TritonKernelCallTest(parameterized.TestCase):
     x1, y1 = create_random_inputs([42])
     x2, y2 = create_random_inputs([43])
 
-    triton_compile_fn = triton.compiler._compile
+    triton_compile_fn = triton_lib.compile_ttir
 
     call_count = [0]
 
@@ -306,7 +307,7 @@ class TritonKernelCallTest(parameterized.TestCase):
       call_count[0] += 1
       return triton_compile_fn(*args, **kwargs)
 
-    with mock.patch.object(triton.compiler, "_compile", new=my_triton_compile):
+    with mock.patch.object(triton_lib, "compile_ttir", new=my_triton_compile):
       _ = fn1(x1, y1)
       self.assertEqual(call_count[0], 1)
       _ = fn2(x2, y2)
@@ -453,7 +454,7 @@ class TritonKernelCallTest(parameterized.TestCase):
     m, n, k = 128, 128, 99
     x, y = create_random_inputs([m, k], [k, n])
 
-    with mock.patch.object(tc, "_compile") as mock_compile:
+    with mock.patch.object(code_gen, "ast_to_ttir") as mock_compile:
       try:
         _ = matmul(
             x,
@@ -462,12 +463,13 @@ class TritonKernelCallTest(parameterized.TestCase):
             BLOCK_SIZE_M=32,
             BLOCK_SIZE_N=32,
             BLOCK_SIZE_K=32,
+            # K_EXACTLY_DIVISIBLE_BY_BLOCK=False,
         )
-      except ValueError:
+      except TypeError:
         pass  # Error thrown as the mocked method's return value is invalid.
 
     mock_compile.assert_called_once()
-    specialization = mock_compile.call_args.kwargs["specialization"]
+    specialization = mock_compile.call_args.args[2]
 
     # Pointers are assumed to divide by 16, as do `M`, `N`, `stride_{bk,cm}`.
     # However, we've marked `a_ptr`, `M`, `stride_bk`, and `c_ptr` as "do not

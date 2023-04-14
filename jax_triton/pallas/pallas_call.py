@@ -39,7 +39,6 @@ from jax._src.lax.control_flow import for_loop
 import jax.numpy as jnp
 import numpy as np
 
-from jax_triton.utils import avals_to_layouts, normalize_grid
 from jax_triton.pallas import core as pallas_core
 
 map, unsafe_map = safe_map, map
@@ -52,8 +51,6 @@ GridSpec = pallas_core.GridSpec
 
 pallas_call_p = jax_core.Primitive('pallas_call')
 pallas_call_p.multiple_results = True
-
-pallas_call_p.def_impl(partial(xla.apply_primitive, pallas_call_p))
 
 def _maybe_dynamic_slice(start_idx, block_shape, value, is_indexing):
   if start_idx is None:
