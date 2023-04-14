@@ -23,3 +23,5 @@ from jax_triton.version import __version_info__
 from jax_triton import pallas
 
 get_compute_capability = triton_kernel_call_lib.get_compute_capability
+
+# trailer
