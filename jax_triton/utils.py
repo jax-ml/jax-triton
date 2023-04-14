@@ -34,6 +34,7 @@ def normalize_grid(grid: GridOrLambda, metaparams) -> Tuple[int, int, int]:
     raise ValueError("`grid` should have three or fewer dimensions.")
   return tuple(grid) + (1,) * (3 - len(grid))
 
+
 def aval_to_layout(aval):
   arange = np.arange(aval.ndim, dtype="int64")[::-1].copy()
   return ir.DenseIntElementsAttr.get(arange, type=ir.IndexType.get())
@@ -42,8 +43,10 @@ def aval_to_layout(aval):
 def avals_to_layouts(avals):
   return ir.ArrayAttr.get([aval_to_layout(a) for a in avals])
 
+
 def cdiv(a: int, b: int) -> int:
   return (a + b - 1) // b
+
 
 def strides_from_shape(shape: Tuple[int, ...]) -> Tuple[int, ...]:
   size = np.prod(shape)
