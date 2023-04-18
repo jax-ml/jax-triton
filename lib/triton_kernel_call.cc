@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "absl/base/optimization.h"
+#include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
@@ -115,10 +116,11 @@ class TritonKernel {
     }
 
     CUDA_RETURN_IF_ERROR(cuCtxPushCurrent(context));
+    absl::Cleanup ctx_restorer = [] { cuCtxPopCurrent(nullptr); };
+
     CUmodule module;
     CUDA_RETURN_IF_ERROR(cuModuleLoadData(&module, module_image_.c_str()));
     modules_.push_back(OwnedCUmodule(module, CuModuleDeleter()));
-    CUDA_RETURN_IF_ERROR(cuCtxPopCurrent(nullptr));
 
     CUfunction function;
     CUDA_RETURN_IF_ERROR(
