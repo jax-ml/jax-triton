@@ -392,9 +392,6 @@ def triton_kernel_call_lowering(
       for shape in out_shapes
   ]
 
-  if len(out_types) > 1:
-    out_types = [ir.TupleType.get_tuple(out_types)]
-
   output_operand_aliases = []
   for input_idx, output_idx in input_output_aliases:
     if (len(out_shapes) == 1) and (output_idx != 0):
@@ -408,7 +405,7 @@ def triton_kernel_call_lowering(
         )
     )
 
-  results = mhlo.CustomCallOp(
+  return mhlo.CustomCallOp(
       out_types,
       array_args,
       call_target_name=ir.StringAttr.get(call_name),
@@ -420,13 +417,6 @@ def triton_kernel_call_lowering(
       result_layouts=utils.avals_to_layouts(ctx.avals_out),
       output_operand_aliases=ir.ArrayAttr.get(output_operand_aliases),
   ).results
-  assert len(results) == 1
-  if len(out_shapes) > 1:
-    results = [
-        mhlo.GetTupleElementOp(results[0], mlir.i32_attr(i)).result
-        for i in range(len(out_shapes))
-    ]
-  return results
 
 
 mlir.register_lowering(triton_kernel_call_p, triton_kernel_call_lowering)
