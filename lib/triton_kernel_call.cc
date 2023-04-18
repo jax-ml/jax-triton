@@ -36,18 +36,6 @@
 #include "pybind11/stl.h"  // IWYU pragma: keep
 #include "pybind11_abseil/status_casters.h"  // IWYU pragma: keep
 
-#define CHECK_CUDA(expr)                                                  \
-  do {                                                                    \
-    CUresult result = (expr);                                             \
-    if (result != CUDA_SUCCESS) {                                         \
-      const char* error_string = "unknown error";                         \
-      cuGetErrorString(result, &error_string);                            \
-      std::cerr << "CUDA call failed (" << #expr << "): " << error_string \
-                << std::endl;                                             \
-      abort();                                                            \
-    }                                                                     \
-  } while (false)
-
 #define RETURN_IF_ERROR(expr)               \
   do {                                      \
     absl::Status status = (expr);           \
@@ -476,12 +464,12 @@ PYBIND11_MODULE(triton_kernel_call_lib, m) {
       py::overload_cast<py::float_, std::string_view>(&EncodeKernelParameter));
   m.def("create_scalar_parameter",
         py::overload_cast<py::bool_, std::string_view>(&EncodeKernelParameter));
-  m.def("get_compute_capability", [](int device) {
+  m.def("get_compute_capability", [](int device) -> absl::StatusOr<int> {
     int major, minor;
-    CHECK_CUDA(cuInit(device));
-    CHECK_CUDA(cuDeviceGetAttribute(
+    CUDA_RETURN_IF_ERROR(cuInit(device));
+    CUDA_RETURN_IF_ERROR(cuDeviceGetAttribute(
         &major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device));
-    CHECK_CUDA(cuDeviceGetAttribute(
+    CUDA_RETURN_IF_ERROR(cuDeviceGetAttribute(
         &minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device));
     return major * 10 + minor;
   });
