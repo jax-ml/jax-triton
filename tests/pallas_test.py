@@ -36,6 +36,7 @@ from jax_triton import pallas as pl
 from jax_triton.pallas.pallas_call import _initial_style_open_jaxpr
 from jax_triton.pallas.ops import attention
 from jax_triton.pallas.ops import layer_norm
+from jax_triton.pallas.ops import rms_norm
 try:
   from jax_triton.pallas.triton_ir_lowering import compile_jaxpr
 except ModuleNotFoundError:
@@ -1011,6 +1012,51 @@ class FusedLayerNormTest(parameterized.TestCase):
 
     def f_ref(x, w, b):
       return layer_norm.layer_norm_reference(x, w, b).sum()
+
+    dx, dw, db = jax.grad(f, argnums=(0, 1, 2))(x, w, b)
+    dx_ref, dw_ref, db_ref = jax.grad(f_ref, argnums=(0, 1, 2))(x, w, b)
+    np.testing.assert_allclose(dx, dx_ref, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(dw, dw_ref, rtol=1e-2, atol=1e-2)
+    np.testing.assert_allclose(db, db_ref, rtol=1e-2, atol=1e-2)
+
+
+class RmsNormTest(parameterized.TestCase):
+
+  @parameterized.parameters(*[
+    (1, 384, 192),
+    (2, 384, 192),
+  ])
+  def test_rms_fwd(self, batch_size, seq_len, embed_dim):
+    if jt.get_compute_capability(0) < 70:
+      raise unittest.SkipTest(
+          "Rms norm only works on GPUs with capability >= sm70")
+    k1, k2, k3 = random.split(random.PRNGKey(0), 3)
+    x = random.normal(k1, (batch_size, seq_len, embed_dim), dtype=jnp.float32)
+    w = jax.random.normal(k2, (embed_dim,), dtype=jnp.float32)
+    b = jax.random.normal(k3, (embed_dim,), dtype=jnp.float32)
+
+    o = rms_norm.rms_norm(x, w, b)
+    o_ref = rms_norm.rms_norm_reference(x, w, b)
+    np.testing.assert_allclose(o, o_ref, atol=1e-5)
+
+  @parameterized.parameters(*[
+    (1, 384, 192),
+    (2, 384, 192),
+  ])
+  def test_rms_norm_bwd(self, batch_size, seq_len, embed_dim):
+    if jt.get_compute_capability(0) < 70:
+      raise unittest.SkipTest(
+          "Rms norm only works on GPUs with capability >= sm70")
+    k1, k2, k3 = random.split(random.PRNGKey(0), 3)
+    x = random.normal(k1, (batch_size, seq_len, embed_dim), dtype=jnp.float32)
+    w = jax.random.normal(k2, (embed_dim,), dtype=jnp.float32)
+    b = jax.random.normal(k3, (embed_dim,), dtype=jnp.float32)
+
+    def f(x, w, b):
+      return rms_norm.rms_norm(x, w, b).sum()
+
+    def f_ref(x, w, b):
+      return rms_norm.rms_norm_reference(x, w, b).sum()
 
     dx, dw, db = jax.grad(f, argnums=(0, 1, 2))(x, w, b)
     dx_ref, dw_ref, db_ref = jax.grad(f_ref, argnums=(0, 1, 2))(x, w, b)
