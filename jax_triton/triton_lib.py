@@ -159,7 +159,11 @@ def compile_ttir(
     ttgir.dump()
     raise ValueError("TTIR->TTGIR pass failed!") from e
   shared_mem = _triton.get_shared_memory_size(ttgir)
+  if dump:
+    print(llir)
   ptx = str(tc.llir_to_ptx(llir, compute_capability))
+  if dump:
+    print(ptx)
   name = ptx_get_kernel_name(ptx)
   cubin = tc.ptx_to_cubin(ptx, compute_capability)
   asm = dict(ttir=ttir, ttgir=ttgir, llir=llir, ptx=ptx, cubin=cubin)
