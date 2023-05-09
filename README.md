@@ -13,7 +13,7 @@ Documentation can be found [here](https://jax-ml.github.io/jax-triton).
 The main function of interest is `jax_triton.triton_call` for applying Triton
 functions to JAX arrays, including inside `jax.jit`-compiled functions. For
 example, we can define [a kernel from the Triton
-tutorial](https://triton-lang.org/master/getting-started/tutorials/01-vector-add.html#sphx-glr-getting-started-tutorials-01-vector-add-py):
+tutorial](https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html#sphx-glr-getting-started-tutorials-01-vector-add-py):
 
 ```python
 import triton
