@@ -36,7 +36,7 @@ from jax_triton.pallas.primitives import swap
 from jax_triton.utils import cdiv
 
 try:
-  from jax_triton.pallas import triton_ir_lowering
-  del triton_ir_lowering
+  from jax_triton.pallas import triton_lowering
+  del triton_lowering
 except (ImportError, ModuleNotFoundError):
   pass
