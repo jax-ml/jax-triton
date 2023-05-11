@@ -381,6 +381,22 @@ class TritonKernelCallTest(parameterized.TestCase):
     out = add(x, y, kernel=kernel)
     np.testing.assert_allclose(out, expected)
 
+  def test_regression_issue_128(self):
+    autotune_configs = [
+        triton.Config({"BLOCK_SIZE": 1024}, num_warps=1),
+        triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
+    ]
+    kernel = triton.autotune(autotune_configs, key=("n_elements",))(add_kernel)
+
+    x, y = create_random_inputs([1024])
+    expected = x + y
+
+    # Keep alive so each iteration is written to an uninitialized buffer.
+    outs = []
+    for _ in range(10):
+      outs.append(add(x, y, kernel=kernel))
+      np.testing.assert_allclose(outs[-1], expected)
+
   def test_autotune_pre_hook_error(self):
     autotune_configs = [
         triton.Config({"BLOCK_SIZE": 32}, num_warps=1, pre_hook=lambda _: None),

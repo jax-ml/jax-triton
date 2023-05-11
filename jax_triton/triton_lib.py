@@ -304,7 +304,7 @@ def triton_kernel_call_lowering(
   config_params = []
   for config in configs:
     config_metaparams = {**metaparams, **config.kwargs}
-    grid = utils.normalize_grid(grid, config_metaparams)
+    config_grid = utils.normalize_grid(grid, config_metaparams)
 
     config_zeroed_outputs = zeroed_outputs
     if callable(zeroed_outputs):
@@ -320,7 +320,7 @@ def triton_kernel_call_lowering(
             metaparams=tuple(sorted(config_metaparams.items())),
             num_warps=config.num_warps,
             num_stages=config.num_stages,
-            grid=grid,
+            grid=config_grid,
             zeroed_params_with_sizes=tuple(zeroed_params_with_sizes.items()),
         )
     )
