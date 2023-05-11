@@ -230,6 +230,12 @@ class TritonAutotunedKernelCall : public TritonKernelCallBase {
 
   absl::Status Launch(CUstream stream, void** buffers) override {
     if (configs_.size() > 1) {
+      // Ensure a valid context for driver calls that don't take the stream.
+      CUcontext context;
+      CUDA_RETURN_IF_ERROR(cuStreamGetCtx(stream, &context));
+      CUDA_RETURN_IF_ERROR(cuCtxPushCurrent(context));
+      absl::Cleanup ctx_restorer = [] { cuCtxPopCurrent(nullptr); };
+
       // If an input aliases with an output, it will get overwritten during the
       // kernel execution. If the kernel is called repeatedly, as we do during
       // auto-tuning, the final result will be junk, so we take a copy of the
