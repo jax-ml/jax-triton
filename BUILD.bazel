@@ -7,6 +7,7 @@ pybind_extension(
     name = "triton_kernel_call_lib",
     srcs = ["lib/triton_kernel_call.cc"],
     deps = [
+        "@com_google_absl//absl/base",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:flat_hash_map",

@@ -22,6 +22,7 @@
 #include <variant>
 #include <vector>
 
+#include "absl/base/call_once.h"
 #include "absl/base/optimization.h"
 #include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_map.h"
@@ -229,88 +230,94 @@ class TritonAutotunedKernelCall : public TritonKernelCallBase {
         input_output_aliases_(std::move(input_output_aliases)) {}
 
   absl::Status Launch(CUstream stream, void** buffers) override {
-    if (configs_.size() > 1) {
-      // Ensure a valid context for driver calls that don't take the stream.
-      CUcontext context;
-      CUDA_RETURN_IF_ERROR(cuStreamGetCtx(stream, &context));
-      CUDA_RETURN_IF_ERROR(cuCtxPushCurrent(context));
-      absl::Cleanup ctx_restorer = [] { cuCtxPopCurrent(nullptr); };
-
-      // If an input aliases with an output, it will get overwritten during the
-      // kernel execution. If the kernel is called repeatedly, as we do during
-      // auto-tuning, the final result will be junk, so we take a copy of the
-      // input to restore after auto-tuning.
-      std::unordered_map<size_t, std::vector<uint8_t>> input_copies;
-      for (auto [input_idx, output_idx, size] : input_output_aliases_) {
-        if (buffers[input_idx] == buffers[output_idx]) {
-          std::vector<uint8_t> input_copy(size);
-          CUDA_RETURN_IF_ERROR(cuMemcpyDtoHAsync(
-              input_copy.data(),
-              reinterpret_cast<CUdeviceptr>(buffers[input_idx]), size, stream));
-          input_copies[input_idx] = std::move(input_copy);
-        }
+    absl::call_once(autotune_once_, [=]() {
+      if (configs_.size() > 1) {
+        autotune_status_ = Autotune(stream, buffers);
       }
-
-      LOG(INFO) << "Autotuning function: " << name_;
-      // First run a single iteration of each to config to determine how many
-      // iterations to run for benchmarking.
-      float best = std::numeric_limits<float>::infinity();
-      for (Config& config : configs_) {
-        auto& kernel_call = py::cast<TritonKernelCall&>(config.kernel_call);
-        absl::StatusOr<float> t = Benchmark(stream, kernel_call, buffers, 1);
-        RETURN_IF_ERROR(t.status());
-        LOG(INFO) << config.description << ", ran 1 iter in " << *t << " ms";
-        best = std::min(best, *t);
-      }
-
-      int timed_iters =
-          std::max(static_cast<int>(kBenchmarkTimeMillis / best), 1);
-      if (timed_iters > 100) {
-        timed_iters = 100;
-        LOG(INFO) << "Benchmarking with 100 iters (capped at 100)";
-      } else {
-        timed_iters = std::min(timed_iters, 100);
-        LOG(INFO) << "Benchmarking with " << timed_iters
-                  << " iters (target time: " << kBenchmarkTimeMillis << " ms)";
-      }
-
-      best = std::numeric_limits<float>::infinity();
-      for (Config& config : configs_) {
-        auto& kernel_call = py::cast<TritonKernelCall&>(config.kernel_call);
-        absl::StatusOr<float> t =
-            Benchmark(stream, kernel_call, buffers, timed_iters);
-        RETURN_IF_ERROR(t.status());
-        LOG(INFO) << config.description << ", ran " << timed_iters
-                  << " iters in " << *t << " ms";
-
-        if (*t < best) {
-          LOG(INFO) << config.description << " is the new best config";
-          best = *t;
-          std::swap(config, configs_[0]);
-        }
-      }
-
-      // Discard all but the best config.
-      py::gil_scoped_acquire gil;
-      configs_.erase(configs_.begin() + 1, configs_.end());
-
-      // Restore aliased inputs to their original values.
-      for (auto [input_idx, _, size] : input_output_aliases_) {
-        CUDA_RETURN_IF_ERROR(
-            cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(buffers[input_idx]),
-                              input_copies[input_idx].data(), size, stream));
-      }
-      // Synchronize stream to ensure copies are complete before the host copy
-      // is deleted.
-      CUDA_RETURN_IF_ERROR(cuStreamSynchronize(stream));
-    }
-
+    });
+    RETURN_IF_ERROR(autotune_status_);
     auto& kernel_call = py::cast<TritonKernelCall&>(configs_[0].kernel_call);
     return kernel_call.Launch(stream, buffers);
   }
 
  private:
   static constexpr float kBenchmarkTimeMillis = 10.;
+
+  absl::Status Autotune(CUstream stream, void** buffers) {
+    // Ensure a valid context for driver calls that don't take the stream.
+    CUcontext context;
+    CUDA_RETURN_IF_ERROR(cuStreamGetCtx(stream, &context));
+    CUDA_RETURN_IF_ERROR(cuCtxPushCurrent(context));
+    absl::Cleanup ctx_restorer = [] { cuCtxPopCurrent(nullptr); };
+
+    // If an input aliases with an output, it will get overwritten during the
+    // kernel execution. If the kernel is called repeatedly, as we do during
+    // auto-tuning, the final result will be junk, so we take a copy of the
+    // input to restore after auto-tuning.
+    std::unordered_map<size_t, std::vector<uint8_t>> input_copies;
+    for (auto [input_idx, output_idx, size] : input_output_aliases_) {
+      if (buffers[input_idx] == buffers[output_idx]) {
+        std::vector<uint8_t> input_copy(size);
+        CUDA_RETURN_IF_ERROR(cuMemcpyDtoHAsync(
+            input_copy.data(),
+            reinterpret_cast<CUdeviceptr>(buffers[input_idx]), size, stream));
+        input_copies[input_idx] = std::move(input_copy);
+      }
+    }
+
+    LOG(INFO) << "Autotuning function: " << name_;
+    // First run a single iteration of each to config to determine how many
+    // iterations to run for benchmarking.
+    float best = std::numeric_limits<float>::infinity();
+    for (Config& config : configs_) {
+      auto& kernel_call = py::cast<TritonKernelCall&>(config.kernel_call);
+      absl::StatusOr<float> t = Benchmark(stream, kernel_call, buffers, 1);
+      RETURN_IF_ERROR(t.status());
+      LOG(INFO) << config.description << ", ran 1 iter in " << *t << " ms";
+      best = std::min(best, *t);
+    }
+
+    int timed_iters =
+        std::max(static_cast<int>(kBenchmarkTimeMillis / best), 1);
+    if (timed_iters > 100) {
+      timed_iters = 100;
+      LOG(INFO) << "Benchmarking with 100 iters (capped at 100)";
+    } else {
+      timed_iters = std::min(timed_iters, 100);
+      LOG(INFO) << "Benchmarking with " << timed_iters
+                << " iters (target time: " << kBenchmarkTimeMillis << " ms)";
+    }
+
+    best = std::numeric_limits<float>::infinity();
+    for (Config& config : configs_) {
+      auto& kernel_call = py::cast<TritonKernelCall&>(config.kernel_call);
+      absl::StatusOr<float> t =
+          Benchmark(stream, kernel_call, buffers, timed_iters);
+      RETURN_IF_ERROR(t.status());
+      LOG(INFO) << config.description << ", ran " << timed_iters << " iters in "
+                << *t << " ms";
+
+      if (*t < best) {
+        LOG(INFO) << config.description << " is the new best config";
+        best = *t;
+        std::swap(config, configs_[0]);
+      }
+    }
+
+    // Discard all but the best config.
+    py::gil_scoped_acquire gil;
+    configs_.erase(configs_.begin() + 1, configs_.end());
+
+    // Restore aliased inputs to their original values.
+    for (auto [input_idx, _, size] : input_output_aliases_) {
+      CUDA_RETURN_IF_ERROR(
+          cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(buffers[input_idx]),
+                            input_copies[input_idx].data(), size, stream));
+    }
+    // Synchronize stream to ensure copies are complete before the host copy
+    // is deleted.
+    return CUDA_TO_STATUS(cuStreamSynchronize(stream));
+  }
 
   absl::StatusOr<float> Benchmark(CUstream stream,
                                   TritonKernelCall& kernel_call, void** buffers,
@@ -337,6 +344,8 @@ class TritonAutotunedKernelCall : public TritonKernelCallBase {
   std::vector<Config> configs_;
   // (input buffer idx, output buffer idx, size)
   std::vector<std::tuple<size_t, size_t, size_t>> input_output_aliases_;
+  absl::once_flag autotune_once_;
+  absl::Status autotune_status_;
 };
 
 template <typename CppT, typename PyT>
