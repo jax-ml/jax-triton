@@ -1,4 +1,4 @@
-# JAX-Triton documentation
+# JAX-Triton
 
 JAX-Triton is a repository containing containing integrations between [JAX](https://github.com/google/jax)
 and [Triton](https://github.com/openai/triton).

@@ -13,6 +13,17 @@
 # limitations under the License.
 
 """Lowering registrations for pallas_call"""
+import functools
+from jax._src.interpreters import mlir
+from jax_triton.pallas import pallas_call_p
+
+def _pallas_call_cpu_lowering_rule(ctx: mlir.LoweringRuleContext, *args,
+                                   interpret: bool,
+                                   **kwargs):
+  del interpret
+  return mlir.lower_fun(pallas_call_p.impl)(ctx, *args, interpret=True, **kwargs)
+mlir.register_lowering(pallas_call_p, _pallas_call_cpu_lowering_rule,
+                       platform="cpu")
 
 try:
   from jax_triton.pallas import triton_lowering
@@ -20,3 +31,4 @@ try:
 except (ImportError, ModuleNotFoundError):
   pass
 # trailer
+

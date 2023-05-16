@@ -44,6 +44,8 @@ plugins:
 
 nav:
   - "index.md"
-  - "triton_call.md"
+  - Guides:
+    - guides/triton_call.md
+    - guides/pallas.md
 
 strict: true
