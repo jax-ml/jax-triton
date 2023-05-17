@@ -47,6 +47,7 @@ try:
 except ModuleNotFoundError:
   torch = None
 
+config.update("jax_traceback_filtering", "off")
 config.parse_flags_with_absl()
 
 @functools.partial(jax.jit, static_argnames=["bm", "bn", "gm", "bk",
@@ -627,6 +628,78 @@ class PallasControlFlowTest(PallasTest):
     if self.INTERPRET:
       self.skipTest("Control flow not supported in interpreter mode yet.")
 
+  def test_fori_loop_simple(self):
+
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct((), jnp.int32))
+    def f(x_ref, y_ref):
+      y_ref[...] = x_ref[...]
+      def body(i, _):
+        y_ref[...] += 1
+      lax.fori_loop(0, 5, body, None)
+    y = f(0)
+    self.assertEqual(y, 5)
+
+  def test_fori_loop_with_nonzero_lower_bound(self):
+
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct((), jnp.int32))
+    def f(x_ref, y_ref):
+      y_ref[...] = x_ref[...]
+      def body(i, _):
+        y_ref[...] += i
+      lax.fori_loop(2, 5, body, None)
+    y = f(6)
+    self.assertEqual(y, 6 + 2 + 3 + 4)
+  def test_fori_loop_accumulates(self):
+
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct((), jnp.int32))
+    def f(x_ref, y_ref):
+      def body(i, acc):
+        return acc + 1
+      acc = lax.fori_loop(0, 5, body, 0)
+      y_ref[...] = acc
+    y = f(0)
+    self.assertEqual(y, 5)
+
+  def test_fori_loop_accumulates_with_index(self):
+
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct((), jnp.int32))
+    def f(x_ref, y_ref):
+      def body(i, acc):
+        return acc + i
+      acc = lax.fori_loop(0, 5, body, 0)
+      y_ref[...] = acc
+    y = f(0)
+    self.assertEqual(y, 10)
+
+  def test_fori_loop_with_writing_to_index(self):
+
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct((8,), jnp.int32))
+    def f(y_ref):
+      def body(i, _):
+        y_ref[i] = i
+      lax.fori_loop(0, y_ref.shape[0], body, None)
+    y = f()
+    np.testing.assert_allclose(y, jnp.arange(8))
+
+  def test_fori_loop_with_dynamic_indices(self):
+
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct((), jnp.int32))
+    def f(lb_ref, ub_ref, y_ref):
+      y_ref[...] = 0
+      def body(i, _):
+        y_ref[...] += i
+      lax.fori_loop(lb_ref[...], ub_ref[...], body, None)
+    y = f(2, 5)
+    np.testing.assert_allclose(y, 2 + 3 + 4)
+    y = f(1, 8)
+    np.testing.assert_allclose(y, sum(range(1, 8)))
+
   def test_simple_while(self):
 
     @functools.partial(self.pallas_call,
@@ -924,6 +997,26 @@ class PallasPrimitivesTest(parameterized.TestCase):
     def body(x_ref):
       pl.store(x_ref, expr(), pl.load(x_ref, expr()))
       return []
+    jaxpr, _ , _ = pe.trace_to_jaxpr_dynamic(
+        lu.wrap_init(body), [state.shaped_array_ref((4, 3, 2), jnp.int32)])
+    self.assertIn(expected, jaxpr.pretty_print(use_color=False))
+
+  @parameterized.parameters(*[
+    (lambda: (pl.dslice(0, 4), slice(None), slice(None)),
+     "c:i32[4,3,2], a[:,:,:] <-"),
+    (lambda: (pl.dslice(0, 3), slice(None), slice(None)),
+     "c:i32[3,3,2], a[:3,:,:] <-"),
+    (lambda: (pl.dslice(1, 3), slice(None), pl.dslice(0, 4)),
+     "c:i32[3,3,4], a[1:4,:,:4] <-"),
+    (lambda: (jnp.arange(5), slice(None), pl.dslice(0, 4)),
+     "e:i32[5,3,4], a[b,:,:4] <-"),
+    (lambda: (jnp.arange(5), jnp.arange(3), jnp.arange(4)),
+     "o:i32[5,3,4], a[l,m,n] <-"),
+  ])
+  def test_swap_pretty_print(self, expr, expected):
+    def body(x_ref):
+      x = pl.swap(x_ref, expr(), pl.load(x_ref, expr()))
+      return [x]
     jaxpr, _ , _ = pe.trace_to_jaxpr_dynamic(
         lu.wrap_init(body), [state.shaped_array_ref((4, 3, 2), jnp.int32)])
     self.assertIn(expected, jaxpr.pretty_print(use_color=False))
