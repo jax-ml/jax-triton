@@ -1023,11 +1023,18 @@ class PallasPrimitivesTest(parameterized.TestCase):
 
 class FusedAttentionTest(parameterized.TestCase):
 
-  @parameterized.parameters(*[
-    (1, 384, 1, 64),
-    (2, 384, 2, 64),
+  @parameterized.named_parameters(*[
+      (f"{batch_size=}_{seq_len=}_{num_heads=}_{head_dim=}_{causal=}",
+       batch_size, seq_len, num_heads, head_dim, causal)
+      for batch_size, seq_len, num_heads, head_dim, causal in [
+          (1, 384, 1, 64, False),
+          (2, 384, 2, 64, False),
+          (1, 384, 1, 64, True),
+          (2, 384, 2, 64, True),
+      ]
   ])
-  def test_fused_attention_fwd(self, batch_size, seq_len, num_heads, head_dim):
+  def test_fused_attention_fwd(self, batch_size, seq_len, num_heads, head_dim,
+                               causal):
     if jt.get_compute_capability(0) < 80:
       raise unittest.SkipTest(
           "Fused attention only works on GPUs with capability >= sm80")
@@ -1037,29 +1044,39 @@ class FusedAttentionTest(parameterized.TestCase):
     k = random.normal(k2, (batch_size, seq_len, num_heads, head_dim), dtype=jnp.float16)
     v = random.normal(k3, (batch_size, seq_len, num_heads, head_dim), dtype=jnp.float16)
 
-    o = attention.mha(q, k, v)
-    o_ref = attention.mha_reference(q, k, v)
+    o = attention.mha(q, k, v, causal=causal)
+    o_ref = attention.mha_reference(q, k, v, causal=causal)
     np.testing.assert_allclose(o, o_ref, atol=0.05)
 
-  @parameterized.parameters(*[
-    (1, 384, 1, 32),
-    (2, 384, 2, 32),
+  @parameterized.named_parameters(*[
+      (f"{batch_size=}_{seq_len=}_{num_heads=}_{head_dim=}_{causal=}",
+       batch_size, seq_len, num_heads, head_dim, causal)
+      for batch_size, seq_len, num_heads, head_dim, causal in [
+          (1, 384, 1, 32, False),
+          (2, 384, 2, 32, False),
+          (1, 384, 1, 32, True),
+          (2, 384, 2, 32, True),
+      ]
   ])
-  def test_fused_attention_bwd(self, batch_size, seq_len, num_heads, head_dim):
+  def test_fused_attention_bwd(self, batch_size, seq_len, num_heads, head_dim,
+                               causal):
     if jt.get_compute_capability(0) < 80:
       raise unittest.SkipTest(
           "Fused attention only works on GPUs with capability >= sm80")
 
     k1, k2, k3 = random.split(random.PRNGKey(0), 3)
-    q = random.normal(k1, (batch_size, seq_len, num_heads, head_dim), dtype=jnp.float16)
-    k = random.normal(k2, (batch_size, seq_len, num_heads, head_dim), dtype=jnp.float16)
-    v = random.normal(k3, (batch_size, seq_len, num_heads, head_dim), dtype=jnp.float16)
+    q = random.normal(k1, (batch_size, seq_len, num_heads, head_dim),
+                      dtype=jnp.float16)
+    k = random.normal(k2, (batch_size, seq_len, num_heads, head_dim),
+                      dtype=jnp.float16)
+    v = random.normal(k3, (batch_size, seq_len, num_heads, head_dim),
+                      dtype=jnp.float16)
 
     def f(q, k, v):
-      return attention.mha(q, k, v).sum()
+      return attention.mha(q, k, v, causal=causal).sum()
 
     def f_ref(q, k, v):
-      return attention.mha_reference(q, k, v).sum()
+      return attention.mha_reference(q, k, v, causal=causal).sum()
 
     dq, dk, dv = jax.grad(f, argnums=(0, 1, 2))(q, k, v)
     dq_ref, dk_ref, dv_ref = jax.grad(f_ref, argnums=(0, 1, 2))(q, k, v)

@@ -142,7 +142,7 @@ def compile_ttir(
   if num_stages is None:
     num_stages = 3 if compute_capability >= 75 else 2
   if dump:
-    ttir.dump()
+    print(ttir)
   try:
     ttir = tc.optimize_ttir(ttir, compute_capability)
     ttgir = tc.ttir_to_ttgir(ttir, num_warps)
@@ -151,7 +151,7 @@ def compile_ttir(
     ttir.dump()
     raise ValueError("TTIR->TTGIR pass failed!") from e
   if dump:
-    ttgir.dump()
+    print(ttgir)
   extern_libs = {}
   try:
     llir = tc.ttgir_to_llir(ttgir, extern_libs, compute_capability)
