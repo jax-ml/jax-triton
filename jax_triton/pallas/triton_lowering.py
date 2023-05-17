@@ -1125,6 +1125,104 @@ def _for_lowering_rule(
 triton_lowering_rules[for_loop.for_p] = _for_lowering_rule
 
 
+def _scan_lowering_rule(
+    ctx: TritonLoweringRuleContext,
+    *args,
+    jaxpr,
+    linear,
+    length,
+    reverse,
+    unroll,
+    num_consts,
+    num_carry,
+):
+  # Only implements fori_loop-like scans
+  num_extensive = len(args) - num_consts - num_carry
+  if num_extensive: raise NotImplementedError
+  if reverse: raise NotImplementedError
+  if unroll != 1: raise NotImplementedError
+  del linear, num_extensive, unroll, reverse
+
+  builder = ctx.builder
+  jaxpr, consts = jaxpr.jaxpr, jaxpr.consts
+  if num_carry > 0:
+    # Pattern match onto fori_loop:
+    # We expect the first carry argument to the jaxpr to be the loop index and
+    # for the loop index + 1 to be returned as the first value out of the loop.
+    assert not consts
+    in_index_var = jaxpr.invars[num_consts]
+    out_index_var = jaxpr.outvars[0]
+    # Check that the loop index argument is an int32 scalar
+    if in_index_var.aval.shape != () or in_index_var.aval.dtype != jnp.int32:
+      raise NotImplementedError
+    if out_index_var.aval.shape != () or out_index_var.aval.dtype != jnp.int32:
+      raise NotImplementedError
+    # Look for the equation that increments the loop index
+    for i, eqn in enumerate(jaxpr.eqns):
+      if eqn.primitive == lax.add_p:
+        if eqn.invars[0] == in_index_var:
+          if isinstance(eqn.invars[1], jax_core.Literal):
+            if eqn.invars[1].val == 1:
+              if eqn.outvars[0] == out_index_var:
+                eqn_index = i
+                break
+    else:
+      raise NotImplementedError("Unable to match fori_loop pattern")
+    # Delete the equation that increments and remove the loop index from the
+    # output. Incrementing the loop index will be done by the scf.For.
+    jaxpr = jaxpr.replace(
+        eqns=jaxpr.eqns[:eqn_index] + jaxpr.eqns[eqn_index + 1:],
+        outvars=jaxpr.outvars[1:])
+    consts, (lb, *args) = util.split_list(args, [num_consts])
+    lower_bound = lb.handle
+    ub = lb.__add__(tl.constexpr(length), _builder=builder)
+    upper_bound = ub.handle
+    has_loop_index = True
+  else:
+    # If there's no carry, the loop index has been DCEd and the body does *not*
+    # expect a loop index as an argument.
+    consts, args = args, []
+    lower_bound = builder.get_int32(0)
+    upper_bound = builder.get_int32(length)
+    has_loop_index = False
+
+  step = builder.get_int32(1)
+  current_block = builder.get_insertion_block()
+  for_op = builder.create_for_op(
+      lower_bound, upper_bound, step, [arg.handle for arg in args]
+  )
+  loop_block = builder.create_block()
+  builder.set_insertion_point_to_start(loop_block)
+  loop_index = tl.core.tensor(for_op.get_induction_var(), tl.core.int32)
+  # Emit loop body
+  for_body_args = [
+      tl.core.tensor(for_op.get_body(0).arg(i + 1), arg.type)
+      for i, arg in enumerate(args)
+  ]
+  if has_loop_index:
+    jaxpr_args = [*consts, loop_index, *for_body_args]
+  else:
+    jaxpr_args = [*consts, *for_body_args]
+  all_out = lower_jaxpr_to_triton_ir(
+      ctx.context,
+      jaxpr,
+      ctx.block_infos,
+      *jaxpr_args)
+  if all_out:
+    builder.create_yield_op([arg.handle for arg in all_out])
+  loop_block.merge_block_before(for_op.get_body(0))
+  for_results = [for_op.get_result(i) for i in range(len(args))]
+  builder.set_insertion_point_to_end(current_block)
+  for_out = [tl.core.tensor(r, a.type) for r, a in zip(for_results, args)]
+  if has_loop_index:
+    # Need to return the final loop index value if the outer scan expects
+    # it as an output
+    return [tl.core.tensor(builder.get_int32(length), tl.int32), *for_out]
+  return for_out
+
+
+triton_lowering_rules[lax.scan_p] = _scan_lowering_rule
+
 def _while_lowering_rule(
     ctx: TritonLoweringRuleContext,
     *args,
