@@ -44,12 +44,11 @@ git_repository(
   branch = "master",
 )
 
-http_archive(
+git_repository(
   name = "pybind11",
   build_file = "@pybind11_bazel//:pybind11.BUILD",
-  strip_prefix = "pybind11-2.10.4",
-  sha256 = "832e2f309c57da9c1e6d4542dedd34b24e4192ecb4d62f6f4866a737454c9970",
-  urls = ["https://github.com/pybind/pybind11/archive/v2.10.4.tar.gz"],
+  remote = "https://github.com/pybind/pybind11.git",
+  branch = "master",
 )
 
 load("@pybind11_bazel//:python_configure.bzl", "python_configure")
