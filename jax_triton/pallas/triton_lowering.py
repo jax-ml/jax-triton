@@ -479,6 +479,12 @@ def eq_lowering_rule(ctx: TritonLoweringRuleContext, a, b):
 triton_lowering_rules[jax.lax.eq_p] = eq_lowering_rule
 
 
+def ne_lowering_rule(ctx: TritonLoweringRuleContext, a, b):
+  return a.__ne__(b, _builder=ctx.builder)
+
+
+triton_lowering_rules[jax.lax.ne_p] = ne_lowering_rule
+
 def bitwise_and_lowering_rule(ctx: TritonLoweringRuleContext, a, b):
   return a.__and__(b, _builder=ctx.builder)
 

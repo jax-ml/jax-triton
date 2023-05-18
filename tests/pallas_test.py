@@ -969,6 +969,34 @@ class PallasCallVmapTest(PallasTest):
 class PallasCallInterpreterVmapTest(PallasCallVmapTest):
   INTERPRET = True
 
+class PallasOpsTest(PallasTest):
+
+  def test_ne(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), jnp.bool_),
+        grid=1)
+    def ne(x_ref, y_ref, o_ref):
+      o_ref[:] = x_ref[...] != y_ref[...]
+
+    x = jnp.ones(8)
+    y = jnp.arange(8)
+    not_equal = ne(x, y)
+    np.testing.assert_allclose(not_equal, x != y)
+
+  def test_isnan(self):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct((8,), jnp.bool_),
+        grid=1)
+    def isnan(x_ref, o_ref):
+      o_ref[:] = jnp.isnan(x_ref[...])
+
+    x = jnp.arange(8.)
+    x = x.at[3].set(jnp.nan)
+    np.testing.assert_allclose(isnan(x), jnp.isnan(x))
+
+class PallasOpsInterpretTest(PallasOpsTest):
+  INTERPRET = True
+
 class PallasPrimitivesTest(parameterized.TestCase):
 
   @parameterized.parameters(*[
