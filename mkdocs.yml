@@ -24,13 +24,20 @@ theme:
         name: Switch to light mode
 
   features:
+    - navigation.instant
+    - navigation.tabs
+    - navigation.path
     - navigation.sections
-    - toc.integrate
+    - navigation.indexes
+    - toc.follow
+    # - toc.integrate
     - header.autohide
 
 markdown_extensions:
+- admonition
 - pymdownx.highlight:
     anchor_linenums: true
+- pymdownx.details
 - pymdownx.inlinehilite
 - pymdownx.snippets
 - pymdownx.superfences
@@ -46,6 +53,9 @@ nav:
   - "index.md"
   - Guides:
     - guides/triton_call.md
-    - guides/pallas.md
+    - Pallas:
+      - guides/pallas/index.md
+      - guides/pallas/quickstart.md
+      - guides/pallas/concepts.md
 
 strict: true
