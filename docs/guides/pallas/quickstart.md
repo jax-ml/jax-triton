@@ -1,3 +1,5 @@
+# Quickstart
+
 Pallas allows you to write your own custom kernels using JAX directly!
 
 ## Your first Pallas kernel: `add_one`

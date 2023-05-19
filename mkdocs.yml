@@ -26,11 +26,9 @@ theme:
   features:
     - navigation.instant
     - navigation.tabs
-    - navigation.path
     - navigation.sections
     - navigation.indexes
     - toc.follow
-    # - toc.integrate
     - header.autohide
 
 markdown_extensions:
@@ -57,5 +55,6 @@ nav:
       - guides/pallas/index.md
       - guides/pallas/quickstart.md
       - guides/pallas/concepts.md
+      - guides/pallas/pallas_call.md
 
 strict: true
