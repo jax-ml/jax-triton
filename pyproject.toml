@@ -6,14 +6,15 @@ readme = "README.md"
 requires-python = ">=3.7,<3.11"
 dependencies = [
   "absl-py>=1.4.0",
-  "jax>=0.4.2",
-  "triton==2.0.0a2",
+  "jax @ git+https://github.com/google/jax@685ea5be61a00fdb41385047a484f8f6baef010e",
+  "triton @ git+https://github.com/openai/triton@6550c528b7ea57cd1d415a5bf0f2860a8a86e8f2#subdirectory=python",
 ]
 
 [build-system]
 requires = [
     "setuptools",
     "wheel",
+    "cmake",
 ]
 build-backend = "setuptools.build_meta"
 
