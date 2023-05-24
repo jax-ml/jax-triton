@@ -132,15 +132,19 @@ _COMPILED_KERNEL_CACHE = weakref.WeakValueDictionary()
 def ptx_get_kernel_name(module) -> str:
   return tc.get_kernel_name(module, pattern='// .globl')
 
-def compile_ttir(
+
+def compile_ttir_inplace(
     ttir,
     device: int = 0,
     num_warps: int = 4,
     num_stages: Optional[int] = None,
-    dump: bool = False) -> Tuple[str, Dict[str, Any], int]:
+    dump: bool = False,
+) -> Tuple[bytes, str, int, Dict[str, str]]:
+  """Compiles a TTIR module to CUBIN (the TTIR is modified in-place)."""
   compute_capability = triton_kernel_call_lib.get_compute_capability(device)
   if num_stages is None:
     num_stages = 3 if compute_capability >= 75 else 2
+  asm = dict(ttir=str(ttir))
   if dump:
     print(ttir)
   try:
@@ -150,6 +154,7 @@ def compile_ttir(
   except RuntimeError as e:
     ttir.dump()
     raise ValueError("TTIR->TTGIR pass failed!") from e
+  asm["ttgir"] = str(ttgir)
   if dump:
     print(ttgir)
   extern_libs = {}
@@ -157,17 +162,18 @@ def compile_ttir(
     llir = tc.ttgir_to_llir(ttgir, extern_libs, compute_capability)
   except RuntimeError as e:
     ttgir.dump()
-    raise ValueError("TTIR->TTGIR pass failed!") from e
+    raise ValueError("TTGIR->LLIR pass failed!") from e
   shared_mem = _triton.get_shared_memory_size(ttgir)
   if dump:
     print(llir)
-  ptx = str(tc.llir_to_ptx(llir, compute_capability))
+  ptx = tc.llir_to_ptx(llir, compute_capability)
   if dump:
     print(ptx)
   name = ptx_get_kernel_name(ptx)
   cubin = tc.ptx_to_cubin(ptx, compute_capability)
-  asm = dict(ttir=ttir, ttgir=ttgir, llir=llir, ptx=ptx, cubin=cubin)
-  return name, asm, shared_mem
+  asm.update(llir=llir, ptx=ptx)
+  return cubin, name, shared_mem, asm
+
 
 def get_or_create_triton_kernel(
     fn,
@@ -213,12 +219,15 @@ def get_or_create_triton_kernel(
     device = 0
     ttir = code_gen.ast_to_ttir(fn, signature, specialization, constants,
                                 debug=dump)
-    name, asm, shared_mem = compile_ttir(
-        ttir, device=device, num_warps=num_warps,
-        num_stages=num_stages, dump=dump)
-
+    cubin, name, shared_mem, _ = compile_ttir_inplace(
+        ttir,
+        device=device,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        dump=dump,
+    )
     kernel = triton_kernel_call_lib.TritonKernel(
-        asm["cubin"], name, num_warps, shared_mem
+        cubin, name, num_warps, shared_mem
     )
     _COMPILED_KERNEL_CACHE[cache_key] = kernel
 

@@ -316,15 +316,15 @@ class TritonKernelCallTest(parameterized.TestCase):
     x1, y1 = create_random_inputs([42])
     x2, y2 = create_random_inputs([43])
 
-    triton_compile_fn = triton_lib.compile_ttir
+    compile_ttir_inplace = triton_lib.compile_ttir_inplace
 
     call_count = [0]
 
-    def my_triton_compile(*args, **kwargs):
+    def my_compile(*args, **kwargs):
       call_count[0] += 1
-      return triton_compile_fn(*args, **kwargs)
+      return compile_ttir_inplace(*args, **kwargs)
 
-    with mock.patch.object(triton_lib, "compile_ttir", new=my_triton_compile):
+    with mock.patch.object(triton_lib, "compile_ttir_inplace", new=my_compile):
       _ = fn1(x1, y1)
       self.assertEqual(call_count[0], 1)
       _ = fn2(x2, y2)

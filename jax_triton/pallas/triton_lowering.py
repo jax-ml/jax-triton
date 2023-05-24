@@ -46,7 +46,7 @@ from jax_triton import utils as triton_utils
 from jax_triton.pallas import core as pallas_core
 from jax_triton.pallas import pallas_call_p
 from jax_triton.pallas import primitives
-from jax_triton.triton_lib import compile_ttir
+from jax_triton.triton_lib import compile_ttir_inplace
 from jax_triton.triton_lib import get_triton_type
 import numpy as np
 from triton._C.libtriton.triton import ir as tl_ir
@@ -105,6 +105,7 @@ class TritonLoweringResult:
 
 @dataclasses.dataclass
 class TritonCompilationResult:
+  cubin: bytes
   name: str
   asm: Dict[str, str]
   shared_mem: int
@@ -1330,14 +1331,14 @@ def compile_jaxpr(
   )
   device = 0
   ttir = lowering_result.module
-  name, asm, shared_mem = compile_ttir(
+  cubin, name, shared_mem, asm = compile_ttir_inplace(
       ttir,
       device=device,
       num_warps=num_warps,
       num_stages=num_stages,
       dump=debug,
   )
-  return TritonCompilationResult(name, asm, shared_mem, lowering_result)
+  return TritonCompilationResult(cubin, name, asm, shared_mem, lowering_result)
 
 
 def pallas_call_lowering(
@@ -1383,8 +1384,8 @@ def pallas_call_lowering(
       num_stages,
       debug=debug,
   )
+  cubin = compilation_result.cubin
   name = compilation_result.name
-  asm = compilation_result.asm
   shared_mem = compilation_result.shared_mem
   lowering_result = compilation_result.lowering_result
   if debug:
@@ -1399,7 +1400,7 @@ def pallas_call_lowering(
   )
   i32_type = ir.IntegerType.get_signless(32)
   kernel = triton_kernel_call_lib.TritonKernel(
-      asm["cubin"], name, num_warps, shared_mem
+      cubin, name, num_warps, shared_mem
   )
   grid = triton_utils.normalize_grid(
       compilation_result.lowering_result.grid, metaparams={}
