@@ -17,11 +17,12 @@ from jax_triton.utils import cdiv
 from jax_triton.utils import next_power_of_2
 from jax_triton.utils import strides_from_shape
 from jax_triton.triton_lib import triton_call
-from jax_triton.triton_lib import triton_kernel_call_lib
 from jax_triton.version import __version__
 from jax_triton.version import __version_info__
 from jax_triton import pallas
+from jax._src.lib import gpu_triton
 
-get_compute_capability = triton_kernel_call_lib.get_compute_capability
+get_compute_capability = gpu_triton.get_compute_capability
 
 # trailer
+del gpu_triton

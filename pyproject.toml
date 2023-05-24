@@ -3,7 +3,7 @@ name = "jax-triton"
 dynamic = ["version"]
 description = "JAX + OpenAI Triton integration"
 readme = "README.md"
-requires-python = ">=3.7,<3.11"
+requires-python = ">=3.8,<3.11"
 dependencies = [
   "absl-py>=1.4.0",
   "jax @ git+https://github.com/google/jax@685ea5be61a00fdb41385047a484f8f6baef010e",
@@ -11,10 +11,7 @@ dependencies = [
 ]
 
 [build-system]
-requires = [
-    "setuptools",
-    "wheel",
-    "cmake",
+requires = ["setuptools", "setuptools-scm"    "cmake",
 ]
 build-backend = "setuptools.build_meta"
 

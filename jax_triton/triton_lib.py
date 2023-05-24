@@ -13,23 +13,20 @@
 # limitations under the License.
 
 """Module for calling Triton kernels from JAX."""
-import collections
 import functools
-import math
 import os
 import types
-import weakref
-
 from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple, Union
+import weakref
 
 from absl import logging
 import jax
-from jax import core
 import jaxlib
 from jax import tree_util
 from jax._src import core
 from jax._src import state
 from jax._src import util
+from jax._src.lib import gpu_triton as triton_kernel_call_lib
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import mhlo
 import jax.dlpack
@@ -37,7 +34,6 @@ from jax.interpreters import mlir
 from jax.interpreters import xla
 from jax.lib import xla_client as xc
 import jax.numpy as jnp
-from jax_triton import triton_kernel_call_lib
 from jax_triton import utils
 import numpy as np
 

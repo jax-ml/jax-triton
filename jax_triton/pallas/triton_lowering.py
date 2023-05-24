@@ -29,6 +29,7 @@ from jax._src import pjit
 from jax._src import state
 from jax._src import util
 from jax._src.lax.control_flow import for_loop
+from jax._src.lib import gpu_triton as triton_kernel_call_lib
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import mhlo
 from jax._src.state import AbstractRef
@@ -41,7 +42,6 @@ from jax.interpreters import mlir
 from jax.interpreters import partial_eval as pe
 from jax.lib import xla_client as xc
 import jax.numpy as jnp
-from jax_triton import triton_kernel_call_lib
 from jax_triton import utils as triton_utils
 from jax_triton.pallas import core as pallas_core
 from jax_triton.pallas import pallas_call_p
