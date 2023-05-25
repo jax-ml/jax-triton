@@ -151,7 +151,7 @@ def _mha_forward(q, k, v, sm_scale: float, causal: bool, block_q: int,
   # Heuristics.
   grid_ = grid
   if grid_ is None:
-    grid_ = (jt.cdiv(seq_len, block_q), num_heads, batch_size)
+    grid_ = (jt.cdiv(seq_len, block_q), batch_size, num_heads)
 
   num_warps_ = num_warps
   if num_warps_ is None:
