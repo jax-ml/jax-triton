@@ -135,12 +135,11 @@ def compile_ttir_inplace(
     num_warps: int = 4,
     num_stages: Optional[int] = None,
     dump: bool = False,
-) -> Tuple[bytes, str, int, Dict[str, str]]:
+) -> Tuple[bytes, str, int]:
   """Compiles a TTIR module to CUBIN (the TTIR is modified in-place)."""
   compute_capability = triton_kernel_call_lib.get_compute_capability(device)
   if num_stages is None:
     num_stages = 3 if compute_capability >= 75 else 2
-  asm = dict(ttir=str(ttir))
   if dump:
     print(ttir)
   try:
@@ -150,7 +149,6 @@ def compile_ttir_inplace(
   except RuntimeError as e:
     ttir.dump()
     raise ValueError("TTIR->TTGIR pass failed!") from e
-  asm["ttgir"] = str(ttgir)
   if dump:
     print(ttgir)
   extern_libs = {}
@@ -167,8 +165,7 @@ def compile_ttir_inplace(
     print(ptx)
   name = ptx_get_kernel_name(ptx)
   cubin = tc.ptx_to_cubin(ptx, compute_capability)
-  asm.update(llir=llir, ptx=ptx)
-  return cubin, name, shared_mem, asm
+  return cubin, name, shared_mem
 
 
 def get_or_create_triton_kernel(
@@ -215,7 +212,7 @@ def get_or_create_triton_kernel(
     device = 0
     ttir = code_gen.ast_to_ttir(fn, signature, specialization, constants,
                                 debug=dump)
-    cubin, name, shared_mem, _ = compile_ttir_inplace(
+    cubin, name, shared_mem = compile_ttir_inplace(
         ttir,
         device=device,
         num_warps=num_warps,

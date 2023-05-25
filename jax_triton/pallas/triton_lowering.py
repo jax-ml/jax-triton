@@ -107,7 +107,6 @@ class TritonLoweringResult:
 class TritonCompilationResult:
   cubin: bytes
   name: str
-  asm: Dict[str, str]
   shared_mem: int
   lowering_result: TritonLoweringResult
 
@@ -1331,14 +1330,14 @@ def compile_jaxpr(
   )
   device = 0
   ttir = lowering_result.module
-  cubin, name, shared_mem, asm = compile_ttir_inplace(
+  cubin, name, shared_mem = compile_ttir_inplace(
       ttir,
       device=device,
       num_warps=num_warps,
       num_stages=num_stages,
       dump=debug,
   )
-  return TritonCompilationResult(cubin, name, asm, shared_mem, lowering_result)
+  return TritonCompilationResult(cubin, name, shared_mem, lowering_result)
 
 
 def pallas_call_lowering(
