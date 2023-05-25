@@ -692,9 +692,10 @@ class PallasControlFlowTest(PallasTest):
                        out_shape=jax.ShapeDtypeStruct((), jnp.int32))
     def f(lb_ref, ub_ref, y_ref):
       y_ref[...] = 0
-      def body(i, _):
+      def body(i, a):
         y_ref[...] += i
-      lax.fori_loop(lb_ref[...], ub_ref[...], body, None)
+        return a
+      lax.fori_loop(lb_ref[...], ub_ref[...], body, 1)
     y = f(2, 5)
     np.testing.assert_allclose(y, 2 + 3 + 4)
     y = f(1, 8)

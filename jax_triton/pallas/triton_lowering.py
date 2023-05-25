@@ -35,6 +35,7 @@ from jax._src.lib.mlir.dialects import mhlo
 from jax._src.state import AbstractRef
 from jax._src.state import discharge
 from jax._src.state import primitives as sp
+from jax._src.util import split_list
 from jax._src.util import merge_lists
 from jax._src.util import partition_list
 from jax._src.util import weakref_lru_cache
@@ -1130,6 +1131,42 @@ def _for_lowering_rule(
 
 triton_lowering_rules[for_loop.for_p] = _for_lowering_rule
 
+def _lower_jaxpr_to_for_loop(ctx: TritonLoweringRuleContext, jaxpr: jax_core.Jaxpr,
+                             lower_bound, upper_bound, consts, *args,
+                             has_loop_index: bool,
+                             step: int = 1):
+  if step != 1:
+    raise NotImplementedError
+  builder = ctx.builder
+  step = builder.get_int32(step)
+  current_block = builder.get_insertion_block()
+  for_op = builder.create_for_op(
+      lower_bound, upper_bound, step, [arg.handle for arg in args]
+  )
+  loop_block = builder.create_block()
+  builder.set_insertion_point_to_start(loop_block)
+  loop_index = tl.core.tensor(for_op.get_induction_var(), tl.core.int32)
+  # Emit loop body
+  for_body_args = [
+      tl.core.tensor(for_op.get_body(0).arg(i + 1), arg.type)
+      for i, arg in enumerate(args)
+  ]
+  if has_loop_index:
+    jaxpr_args = [*consts, loop_index, *for_body_args]
+  else:
+    jaxpr_args = [*consts, *for_body_args]
+  all_out = lower_jaxpr_to_triton_ir(
+      ctx.context,
+      jaxpr,
+      ctx.block_infos,
+      *jaxpr_args)
+  if all_out:
+    builder.create_yield_op([arg.handle for arg in all_out])
+  loop_block.merge_block_before(for_op.get_body(0))
+  for_results = [for_op.get_result(i) for i in range(len(args))]
+  builder.set_insertion_point_to_end(current_block)
+  return [tl.core.tensor(r, a.type) for r, a in zip(for_results, args)]
+
 
 def _scan_lowering_rule(
     ctx: TritonLoweringRuleContext,
@@ -1191,43 +1228,82 @@ def _scan_lowering_rule(
     lower_bound = builder.get_int32(0)
     upper_bound = builder.get_int32(length)
     has_loop_index = False
-
-  step = builder.get_int32(1)
-  current_block = builder.get_insertion_block()
-  for_op = builder.create_for_op(
-      lower_bound, upper_bound, step, [arg.handle for arg in args]
-  )
-  loop_block = builder.create_block()
-  builder.set_insertion_point_to_start(loop_block)
-  loop_index = tl.core.tensor(for_op.get_induction_var(), tl.core.int32)
-  # Emit loop body
-  for_body_args = [
-      tl.core.tensor(for_op.get_body(0).arg(i + 1), arg.type)
-      for i, arg in enumerate(args)
-  ]
-  if has_loop_index:
-    jaxpr_args = [*consts, loop_index, *for_body_args]
-  else:
-    jaxpr_args = [*consts, *for_body_args]
-  all_out = lower_jaxpr_to_triton_ir(
-      ctx.context,
-      jaxpr,
-      ctx.block_infos,
-      *jaxpr_args)
-  if all_out:
-    builder.create_yield_op([arg.handle for arg in all_out])
-  loop_block.merge_block_before(for_op.get_body(0))
-  for_results = [for_op.get_result(i) for i in range(len(args))]
-  builder.set_insertion_point_to_end(current_block)
-  for_out = [tl.core.tensor(r, a.type) for r, a in zip(for_results, args)]
+  for_out = _lower_jaxpr_to_for_loop(
+    ctx, jaxpr, lower_bound, upper_bound, consts, *args,
+    has_loop_index=has_loop_index, step=1)
   if has_loop_index:
     # Need to return the final loop index value if the outer scan expects
     # it as an output
-    return [tl.core.tensor(builder.get_int32(length), tl.int32), *for_out]
+    return [tl.core.tensor(upper_bound, tl.int32), *for_out]
   return for_out
 
-
 triton_lowering_rules[lax.scan_p] = _scan_lowering_rule
+
+def _maybe_pattern_match_fori_loop(ctx: TritonLoweringRuleContext, *args,
+                                   cond_nconsts, cond_jaxpr, body_nconsts, body_jaxpr
+                                   ):
+  if cond_nconsts:
+    return None
+  _, cond_invars = split_list(cond_jaxpr.jaxpr.invars, [cond_nconsts])
+  cond_in_avals = [v.aval for v in cond_invars]
+  if len(cond_in_avals) < 2:
+    return None
+  # Check that the first two carry values are scalar ints
+  a1, a2 = cond_in_avals[:2]
+  if a1.shape != () or a1.dtype != jnp.int32:
+    return None
+  if a2.shape != () or a2.dtype != jnp.int32:
+    return None
+  # Check that the only eqn in the cond checks the loop index condition
+  v1, v2 = cond_invars[:2]
+  outvar = cond_jaxpr.jaxpr.outvars[0]
+  assert outvar.aval.dtype == jnp.bool_
+  if len(cond_jaxpr.jaxpr.eqns) != 1:
+    return None
+  eqn = cond_jaxpr.jaxpr.eqns[0]
+  if eqn.primitive != lax.lt_p:
+    return None
+  if eqn.outvars != [outvar]:
+    return None
+  if eqn.invars != [v1, v2]:
+    return None
+  # Check that the carry is updated in the body appropriately
+  _, body_invars = split_list(body_jaxpr.jaxpr.invars, [body_nconsts])
+  v1, v2 = body_invars[:2]
+  vo1, vo2 = body_jaxpr.jaxpr.outvars[:2]
+  # Upper bound should be constant
+  if v2 is not vo2:
+    return None
+  # Check that we increment the loop index in the body
+  for i, eqn in enumerate(body_jaxpr.jaxpr.eqns):
+    if eqn.primitive is lax.add_p:
+      if eqn.invars[0] is v1:
+        if isinstance(eqn.invars[1], jax_core.Literal):
+          if eqn.invars[1].val == 1:
+            if eqn.outvars[0] == vo1:
+              eqn_index = i
+              break
+  else:
+    return None
+  jaxpr = body_jaxpr.jaxpr
+  new_invars = tuple((*jaxpr.invars[:body_nconsts],
+                      jaxpr.invars[body_nconsts],
+                      *jaxpr.invars[body_nconsts + 2:]))
+  new_outvars = tuple(jaxpr.outvars[2:])
+  jaxpr = jaxpr.replace(
+      eqns=jaxpr.eqns[:eqn_index] + jaxpr.eqns[eqn_index + 1:],
+      invars=new_invars,
+      outvars=new_outvars)
+  _, body_consts, carry = split_list(args, [cond_nconsts, body_nconsts])
+  (lb, ub), args = carry[:2], carry[2:]
+  const_block_infos, args_block_infos = split_list(ctx.block_infos,
+                                                   [body_nconsts])
+  ctx = ctx.replace(block_infos=[*const_block_infos, None,
+                                 *args_block_infos[2:]])
+  for_out = _lower_jaxpr_to_for_loop(ctx, jaxpr, lb.handle, ub.handle,
+                                     body_consts, *args, has_loop_index=True,
+                                     step=1)
+  return [ub, ub, *for_out]
 
 def _while_lowering_rule(
     ctx: TritonLoweringRuleContext,
@@ -1237,6 +1313,13 @@ def _while_lowering_rule(
     body_nconsts,
     body_jaxpr
 ):
+  # First, try to pattern match to fori_loop and lower to scf.for if possible
+  result = _maybe_pattern_match_fori_loop(ctx, *args, cond_nconsts=cond_nconsts,
+                                          body_nconsts=body_nconsts, cond_jaxpr=cond_jaxpr,
+                                          body_jaxpr=body_jaxpr)
+  if result is not None:
+    return result
+  # Fall back to default while lowering
   num_args = len(args)
   cond_consts, body_consts, carry = util.split_list(
       args, [cond_nconsts, body_nconsts]
