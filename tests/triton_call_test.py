@@ -21,16 +21,11 @@ import jax
 from jax import random
 from jax.config import config
 import jax.numpy as jnp
+import jax_triton as jt
 import numpy as np
 import triton
 from triton.compiler import code_generator as code_gen
 import triton.language as tl
-import jax_triton as jt
-from jax_triton import triton_lib
-try:
-  import torch
-except ModuleNotFoundError:
-  torch = None
 
 config.parse_flags_with_absl()
 
@@ -201,8 +196,7 @@ class TritonKernelCallTest(parameterized.TestCase):
       block_size_n,
       block_size_k,
   ):
-    # TODO(sharadmv): expose this information in `jaxlib`
-    if torch is not None and torch.cuda.get_device_capability() < (7, 0):
+    if jt.get_compute_capability(0) < 70:
       self.skipTest("Matmul only works on GPUs with capability >= sm70")
 
     x, y = create_random_inputs([m, k], [k, n], dtype=dtype)
@@ -316,7 +310,7 @@ class TritonKernelCallTest(parameterized.TestCase):
     x1, y1 = create_random_inputs([42])
     x2, y2 = create_random_inputs([43])
 
-    compile_ttir_inplace = triton_lib.compile_ttir_inplace
+    compile_ttir_inplace = jt.triton_lib.compile_ttir_inplace
 
     call_count = [0]
 
@@ -324,7 +318,9 @@ class TritonKernelCallTest(parameterized.TestCase):
       call_count[0] += 1
       return compile_ttir_inplace(*args, **kwargs)
 
-    with mock.patch.object(triton_lib, "compile_ttir_inplace", new=my_compile):
+    with mock.patch.object(
+        jt.triton_lib, "compile_ttir_inplace", new=my_compile
+    ):
       _ = fn1(x1, y1)
       self.assertEqual(call_count[0], 1)
       _ = fn2(x2, y2)
