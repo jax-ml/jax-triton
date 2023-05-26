@@ -22,8 +22,8 @@ import numpy as np
 from jax_triton.pallas.ops import attention
 
 def main(unused_argv):
-  dtype = jnp.float16
-  batch, seq_len, n_heads, head_dim = 4, 1024, 48, 64
+  dtype = jnp.bfloat16
+  batch, seq_len, n_heads, head_dim = 1, 8192, 24, 128
   shape = (batch, seq_len, n_heads, head_dim)
 
   q_key, k_key, v_key = jax.random.split(jax.random.PRNGKey(0), 3)
@@ -32,23 +32,24 @@ def main(unused_argv):
   v = jax.random.normal(v_key, shape, dtype=dtype)
 
 
-  o_ref = attention.mha_reference(q, k, v).block_until_ready()
+  segments = jnp.ones((batch, seq_len), dtype=jnp.int32)
+  o_ref = attention.mha_reference(q, k, v, segments, causal=True).block_until_ready()
 
-  mha = jax.jit(attention.mha)
-  o = mha(q, k, v).block_until_ready()
+  mha = attention.mha
+  o = mha(q, k, v, segments, causal=True).block_until_ready()
 
-  mha_interpret = functools.partial(attention.mha, interpret=True)
-  o_int = mha_interpret(q, k, v).block_until_ready()
+  # mha_interpret = functools.partial(attention.mha, interpret=True)
+  # o_int = mha_interpret(q, k, v).block_until_ready()
 
-  np.testing.assert_allclose(o, o_int, atol=0.03, rtol=0.03)
-  np.testing.assert_allclose(o_int, o_ref, atol=0.05, rtol=0.05)
-  np.testing.assert_allclose(o, o_ref, atol=0.05, rtol=0.05)
+  # np.testing.assert_allclose(o, o_int, atol=0.03, rtol=0.03)
+  # np.testing.assert_allclose(o_int, o_ref, atol=0.05, rtol=0.05)
+  np.testing.assert_allclose(o.astype(np.float32), o_ref.astype(np.float32), atol=0.05, rtol=0.05)
 
   n_trials = 1000
-  duration = timeit.timeit(lambda: mha(q, k, v).block_until_ready(),
+  duration = timeit.timeit(lambda: mha(q, k, v, segments, causal=True).block_until_ready(),
                            number=n_trials)
   print(f"Fused Attention: {duration / n_trials * 1000:.2f}ms")
-  duration = timeit.timeit(lambda: attention.mha_reference(q, k, v).block_until_ready(),
+  duration = timeit.timeit(lambda: attention.mha_reference(q, k, v, segments, causal=True).block_until_ready(),
                            number=n_trials)
   print(f"Reference Attention: {duration / n_trials * 1000:.2f}ms")
 

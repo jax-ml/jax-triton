@@ -25,7 +25,7 @@ import jax_triton as jt
 from jax_triton import pallas as pl
 
 def mha_forward_kernel(
-    q_ref, k_ref, v_ref,  # Input arrays
+    q_ref, k_ref, v_ref, segment_ids_ref, # Input arrays
     o_ref, # Output
     *residual_refs, # Residual outputs
     sm_scale: float, causal: bool,
@@ -44,6 +44,7 @@ def mha_forward_kernel(
   # read, compute, and write all in 2d chunks. 1 element ~= 1 CUDA thread index.
   # q tile has shape [block_q, block_d], block_d == head_dim.
   q = pl.load(q_ref, (pl.dslice(start_q * block_q, block_q), pl.dslice(None)))
+  q_segments = pl.load(segment_ids_ref, (pl.dslice(start_q * block_q, block_q),))
   # In FlashAttention algorithm 1 there are 2 loops: slow over tiles of kv (size
   # (Bc == block_k here), and fast over blocks of q (size Br == block_q here).
   # Here we only loop over blocks of kv to process entire seq_len, the loop over
@@ -51,16 +52,20 @@ def mha_forward_kernel(
   def body(start_k, carry):
     acc, m_prev, l_prev = carry
 
-    k = pl.load(k_ref, (pl.dslice(start_k * block_k, block_k), slice(None)))
+    k = pl.load(k_ref, (slice(None), pl.dslice(start_k * block_k, block_k)))
+    k_segments = pl.load(segment_ids_ref, (pl.dslice(start_k, block_k),))
     qk = jnp.zeros([block_q, block_k], dtype=jnp.float32)
-    qk += pl.dot(q, k.T)   # [block_q, block_k]
+    qk += pl.dot(q, k)   # [block_q, block_k]
     if sm_scale != 1.:
       qk *= sm_scale # [block_q, block_k]
 
+    mask = q_segments[:, None] == k_segments[None, :]
     if causal:
       span_q = start_q * block_q + jnp.arange(block_q)
       span_k = start_k * block_k + jnp.arange(block_k)
-      qk = jnp.where(span_q[:, None] >= span_k[None, :], qk, float('-inf'))
+      causal_mask = span_q[:, None] >= span_k[None, :]
+      mask = jnp.logical_and(mask, causal_mask)
+    qk = jnp.where(mask, qk, float('-inf'))
     # Bring closer to XLA:GPU numerics.
     qk = qk.astype(q_ref.dtype)
     qk = qk.astype(jnp.float32)
@@ -72,8 +77,6 @@ def mha_forward_kernel(
     l_rcp = 1. / l_curr
     p = p * l_rcp[:, None]
     acc *= (l_prev * l_rcp)[:, None]
-    p = p.astype(jnp.float16)
-
     v = pl.load(v_ref, (pl.dslice(start_k * block_k, block_k), pl.dslice(block_d)))
     acc = acc + pl.dot(p.astype(v.dtype), v)
     return acc, m_curr, l_curr
@@ -92,12 +95,12 @@ def mha_forward_kernel(
   acc = acc.astype(o_ref.dtype)
   pl.store(o_ref, (pl.dslice(start_q * block_q, block_q), pl.dslice(None)), acc)
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=[3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+@functools.partial(jax.custom_vjp, nondiff_argnums=[4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
 @functools.partial(jax.jit, static_argnames=["sm_scale", "causal", "block_q", "block_k",
                                              "backward_pass_impl",
                                              "num_warps", "num_stages", "grid",
                                              "interpret", "debug"])
-def mha(q, k, v,
+def mha(q, k, v, segment_ids,  # [batch_size, seq_len]
         sm_scale: float = 1.0,
         causal: bool = False,
         block_q: int = 128,
@@ -125,13 +128,15 @@ def mha(q, k, v,
                              block_d=head_dim,
                              causal=causal)
   out_shape = jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype)
+  k = k.swapaxes(1, 3)
   return pl.pallas_call(
       kernel,
       grid=grid_,
       in_specs=[
         pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
+        pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, head_dim, None, seq_len)),
         pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-        pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
+        pl.BlockSpec(lambda _, j, k: (j, 0), (None, seq_len)),
       ],
       out_specs=pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
       num_warps=num_warps_,
@@ -139,7 +144,7 @@ def mha(q, k, v,
       out_shape=out_shape,
       debug=debug,
       interpret=interpret,
-      name="mha_forward")(q, k, v)
+      name="mha_forward")(q, k, v, segment_ids)
 
 def _mha_forward(q, k, v, sm_scale: float, causal: bool, block_q: int,
                  block_k: int, backward_pass_impl: str, num_warps: Optional[int],
@@ -353,13 +358,14 @@ mha.defvjp(_mha_forward, _mha_backward)
 
 
 @functools.partial(jax.jit, static_argnames=['sm_scale', 'causal'])
-def mha_reference(q, k, v, sm_scale=1.0, causal: bool = False):
+def mha_reference(q, k, v, segment_ids, sm_scale=1.0, causal: bool = False):
   q_seq_len = q.shape[1]
   kv_seq_len = k.shape[1]
   logits = jnp.einsum('bqhc,bkhc->bhqk', q, k).astype(jnp.float32)
+  mask = (segment_ids[..., :, None] == segment_ids[..., None, :])[:, None]
   if causal:
-    mask = jnp.tril(jnp.ones((1, 1, q_seq_len, kv_seq_len), dtype=bool))
-    mask = jnp.broadcast_to(mask, logits.shape)
-    logits = jnp.where(mask, logits, float('-inf'))
+    causal_mask = jnp.tril(jnp.ones((1, 1, q_seq_len, kv_seq_len), dtype=bool))
+    mask = jnp.logical_and(causal_mask, mask)
+  logits = jnp.where(mask, logits, float('-inf'))
   weights = jax.nn.softmax(logits * sm_scale).astype(q.dtype)
   return jnp.einsum('bhqk,bkhc->bqhc', weights, v)
