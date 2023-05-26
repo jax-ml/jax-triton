@@ -37,6 +37,7 @@ from jax_triton.pallas.pallas_call import _initial_style_open_jaxpr
 from jax_triton.pallas.ops import attention
 from jax_triton.pallas.ops import layer_norm
 from jax_triton.pallas.ops import rms_norm
+from jax_triton.pallas.ops import softmax
 try:
   from jax_triton.pallas.triton_ir_lowering import compile_jaxpr
 except ModuleNotFoundError:
@@ -1211,6 +1212,34 @@ class RmsNormTest(parameterized.TestCase):
     np.testing.assert_allclose(dx, dx_ref, rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(dw, dw_ref, rtol=1e-2, atol=1e-2)
     np.testing.assert_allclose(db, db_ref, rtol=1e-2, atol=1e-2)
+
+
+class SoftmaxTest(parameterized.TestCase):
+
+  @parameterized.parameters(
+      (shape, dtype)
+      for shape in [(1024, 125), (4, 1024, 125)]
+      for dtype in (jnp.bfloat16, jnp.float16, jnp.float32)
+  )
+  def test_softmax(self, shape, dtype):
+    # TODO(bchetioui): add Triton bug reference when filed
+    if dtype == jnp.bfloat16:
+      raise absltest.SkipTest("Disabled due to Triton lowering bug")
+
+    x = jax.random.normal(random.PRNGKey(0), shape, dtype=dtype)
+
+    atol, rtol = {
+        jnp.bfloat16: (1e-2, 1e-4),
+        jnp.float16: (1e-2, 1e-4),
+        jnp.float32: (1e-7, 1e-6),
+    }[dtype]
+
+    np.testing.assert_allclose(
+        softmax.softmax(x, axis=-1),
+        jax.nn.softmax(x, axis=-1),
+        atol=atol,
+        rtol=rtol,
+    )
 
 
 if __name__ == "__main__":
