@@ -172,7 +172,7 @@ def lower_jaxpr_to_triton_module(
   assert len(jaxpr.outvars) == 0
   prototype = tl.function_type([], arg_types)
   out = prototype.to_ir(builder)
-  fn = builder.get_or_insert_function(module, name, out, "public")
+  fn = builder.get_or_insert_function(module, name, out, "public", False)
   module.push_back(fn)
   entry = fn.add_entry_block()
   args = []

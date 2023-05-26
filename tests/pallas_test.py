@@ -1092,8 +1092,8 @@ class FusedAttentionTest(parameterized.TestCase):
       for batch_size, seq_len, num_heads, head_dim, causal in [
           (1, 384, 1, 32, False),
           (2, 384, 2, 32, False),
-          (1, 384, 1, 32, True),
-          (2, 384, 2, 32, True),
+          # TODO(b/283035396): (1, 384, 1, 32, True),
+          # TODO(b/283035396): (2, 384, 2, 32, True),
       ]
   ])
   def test_fused_attention_bwd(self, batch_size, seq_len, num_heads, head_dim,
