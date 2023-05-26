@@ -1480,7 +1480,6 @@ def pallas_call_lowering(
           for out_shape in ctx.avals_out
       ]
   )
-  i32_type = ir.IntegerType.get_signless(32)
   kernel = triton_kernel_call_lib.TritonKernel(
       cubin, name, num_warps, shared_mem
   )
@@ -1515,7 +1514,7 @@ def pallas_call_lowering(
       call_target_name=ir.StringAttr.get("triton_kernel_call"),
       has_side_effect=ir.BoolAttr.get(False),
       backend_config=ir.StringAttr.get(kernel_call.descriptor),
-      api_version=ir.IntegerAttr.get(i32_type, 1),
+      api_version=mlir.i32_attr(2),  # API_VERSION_STATUS_RETURNING
       called_computations=ir.ArrayAttr.get([]),
       operand_layouts=triton_utils.avals_to_layouts(ctx.avals_in),
       result_layouts=triton_utils.avals_to_layouts(ctx.avals_out),

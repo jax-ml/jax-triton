@@ -417,7 +417,7 @@ def triton_kernel_call_lowering(
       call_target_name=ir.StringAttr.get(call_name),
       has_side_effect=ir.BoolAttr.get(False),
       backend_config=ir.StringAttr.get(kernel_call.descriptor),
-      api_version=mlir.i32_attr(1),
+      api_version=mlir.i32_attr(2),  # API_VERSION_STATUS_RETURNING
       called_computations=ir.ArrayAttr.get([]),
       operand_layouts=utils.avals_to_layouts(ctx.avals_in),
       result_layouts=utils.avals_to_layouts(ctx.avals_out),
