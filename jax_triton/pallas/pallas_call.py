@@ -319,14 +319,37 @@ def _compute_shape_from_block_spec(block_spec: Optional[BlockSpec],
     return arg_shape
   return tuple(s for s in block_spec.block_shape if s is not None)
 
-def pallas_call(f: Callable, out_shape: Any, *, debug: bool = False,
+def pallas_call(f: Callable, *, out_shape: Any, debug: bool = False,
                 grid: Optional[Grid] = None,
                 in_specs: Optional[Sequence[Optional[BlockSpec]]] = None,
                 out_specs: Optional[Sequence[Optional[BlockSpec]]] = None,
                 input_output_aliases: Dict[int, int] = {},
                 interpret: bool = False,
                 name: Optional[str] = None,
-                **compiler_params: Any):
+                **compiler_params: Any) -> Any:
+  """Executes a Pallas kernel on input JAX arrays.
+
+  Args:
+    f: A kernel function. It should accept input `Ref`s first, followed by
+      output `Ref`s afterwards.
+    out_shape: A Pytree of `ShapeDtypeStruct`s (or values that have `.shape` and
+      `.dtype` properties). An output `Ref` is passed into `f` for each value
+      in `out_shape`.
+    debug: Prints out debugging information about the kernel when `True`.
+    interpret: Emulates kernel execution in HLO if `True`.
+    name: A string name for the kernel.
+    grid: An optional tuple of integers that determines the schedule by which
+      the kernel is executed. If not provided, the grid is empty.
+    in_specs: a list of optional `BlockSpecs` for each of the inputs to the
+      kernel.
+    out_specs: a list of optional `BlockSpecs` for each of the outputs from the
+      kernel.
+    input_output_aliases: A mapping of input indices to output indices,
+      indicating which inputs should be aliased to which outputs.
+    **compiler_params: A dictionary mapping compiler name to compiler options.
+  Returns:
+    A Pytree of JAX Arrays
+  """
   if grid is None:
     if in_specs is not None:
       raise ValueError("Cannot specify `in_specs` with a `None` grid.")
