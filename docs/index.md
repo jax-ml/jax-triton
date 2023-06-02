@@ -14,13 +14,43 @@ You can install JAX-Triton with `pip`. This will also install a compatible JAX a
 ```bash
 $ pip install jax-triton
 ```
+
 JAX-Triton only works with JAX on GPU, so you'll need to make sure you have a CUDA-compatible `jaxlib` installed.
 For example you could run:
 ```bash
 $ pip install "jax[cuda11_cudnn82]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 ```
-
 Check out the [JAX installation guide](https://github.com/google/jax#pip-installation-gpu-cuda) for details.
+
+### Installation at HEAD
+
+JAX-Triton and Pallas are developed at JAX and Jaxlib HEAD and close to Triton HEAD. To get a bleeding edge installation of JAX-Triton, run:
+```bash
+$ pip install 'jax-triton @ git+https://github.com/jax-ml/jax-triton.git'
+```
+This should install compatible versions of JAX and Triton.
+
+JAX-Triton does depend on Jaxlib but it's usually a more stable dependency. You might be able to get away with using a recent jaxlib release:
+```bash
+$ pip install jaxlib[cuda]
+$ # or
+$ pip install jaxlib[cuda11_pip]
+$ # or
+$ pip install jaxlib[cuda12_pip]
+```
+
+If you find there are issues with the latest Jaxlib release, you can try using a Jaxlib nightly.
+To install a new jaxlib, you can find a link to a [CUDA 11 nightly](https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda_releases.html) or [CUDA 12 nightly](https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda12_releases.html). Then install it via:
+```bash
+$ pip install 'jaxlib @ <link to nightly>'
+```
+or to install CUDA via pip automatically, you can do:
+```bash
+$ pip install 'jaxlib[cuda11_pip] @ <link to nightly>'
+$ # or
+$ pip install 'jaxlib[cuda12_pip] @ <link to nightly>'
+```
+
 
 ### Quickstart
 

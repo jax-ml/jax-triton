@@ -26,7 +26,6 @@ from jax import tree_util
 from jax._src import core
 from jax._src import state
 from jax._src import util
-from jax._src.lib import gpu_triton as triton_kernel_call_lib
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import mhlo
 import jax.dlpack
@@ -48,6 +47,12 @@ try:
   CAN_USE_TRITON = True
 except ModuleNotFoundError:
   pass
+try:
+  from jax._src.lib import gpu_triton as triton_kernel_call_lib
+except ImportError:
+  raise ValueError(
+    "Cannot import jaxlib triton library. You may need a newer version of jaxlib. Try installing a nightly wheel from: https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda_releases.html or https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda12_releases.html"
+    )
 
 os.environ["TRITON_CACHE_DIR"] = ""
 map, unsafe_map = util.safe_map, map
