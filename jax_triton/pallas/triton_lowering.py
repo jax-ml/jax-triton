@@ -344,7 +344,7 @@ triton_lowering_rules[lax.log_p] = _log_lowering_rule
 
 
 def _log1p_lowering_rule(ctx: TritonLoweringRuleContext, a):
-  return tl.libdevice.log1p(a, _builder=ctx.builder)
+  return tl.math.log1p(a, _builder=ctx.builder)
 
 
 triton_lowering_rules[lax.log1p_p] = _log1p_lowering_rule
@@ -417,15 +417,15 @@ def _integer_pow_lowering_rule(ctx: TritonLoweringRuleContext, a, *, y):
   if y == 3:
     return a.__mul__(a.__mul__(a, _builder=ctx.builder), _builder=ctx.builder)
   if y == -2:
-    return tl.libdevice.rsqrt(a, _builder=ctx.builder)
-  return tl.libdevice.pow(a, y, _builder=ctx.builder)
+    return tl.math.rsqrt(a, _builder=ctx.builder)
+  return tl.math.pow(a, y, _builder=ctx.builder)
 
 
 triton_lowering_rules[lax.integer_pow_p] = _integer_pow_lowering_rule
 
 
 def _tanh_lowering_rule(ctx: TritonLoweringRuleContext, a):
-  return tl.libdevice.tanh(a, _builder=ctx.builder)
+  return tl.math.tanh(a, _builder=ctx.builder)
 
 
 triton_lowering_rules[lax.tanh_p] = _tanh_lowering_rule
