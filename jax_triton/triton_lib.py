@@ -15,6 +15,7 @@
 """Module for calling Triton kernels from JAX."""
 import functools
 import os
+import sys
 import types
 from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple, Union
 import weakref
@@ -134,6 +135,20 @@ def ptx_get_kernel_name(module) -> str:
   return tc.get_kernel_name(module, pattern='// .globl')
 
 
+# From https://en.wikipedia.org/wiki/CUDA#Technical_Specification
+# "Amount of shared memory per multiprocessor". In bytes.
+_SHARED_MEMORY_PER_SM = {
+    70: 98304,
+    72: 98304,
+    75: 65536,
+    80: 167936,
+    86: 102400,
+    87: 167936,
+    89: 102400,
+    90: 233472,
+}
+
+
 def compile_ttir_inplace(
     ttir,
     device: int = 0,
@@ -163,6 +178,8 @@ def compile_ttir_inplace(
     ttgir.dump()
     raise ValueError("TTGIR->LLIR pass failed!") from e
   shared_mem = _triton.get_shared_memory_size(ttgir)
+  if shared_mem > _SHARED_MEMORY_PER_SM.get(compute_capability, sys.maxsize):
+    raise RuntimeError("Shared memory requested exceeds device resources.")
   if dump:
     print(llir)
   ptx = tc.llir_to_ptx(llir, compute_capability)
