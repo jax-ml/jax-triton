@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import itertools
 import os
 import unittest
 
@@ -47,6 +48,11 @@ try:
   import torch
 except ModuleNotFoundError:
   torch = None
+
+
+# TODO(sharadmv): Update signatures of pallas_call to correct inputs/outputs.
+# pylint: disable=no-value-for-parameter
+
 
 config.update("jax_traceback_filtering", "off")
 config.parse_flags_with_absl()
@@ -629,6 +635,124 @@ class PallasControlFlowTest(PallasTest):
     if self.INTERPRET:
       self.skipTest("Control flow not supported in interpreter mode yet.")
 
+  def test_cond_simple(self):
+    arg = jnp.float32(0.)
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct(arg.shape, jnp.float32),
+                       debug=False)
+    def f(branch_ref, x_ref, y_ref):
+      y_ref[...] = lax.switch(
+          branch_ref[...],
+          (lambda x: x**2, lambda x: -x),
+          x_ref[...])
+    y = f(jnp.int32(0), arg + 3.)
+    self.assertEqual(y, 9.)
+    y = f(jnp.int32(1), arg + 2.)
+    self.assertEqual(y, -2.)
+
+  def test_cond_threebranch(self):
+    arg = jnp.float32(0.)
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct(arg.shape, jnp.float32),
+                       grid=1,
+                       debug=False)
+    def f(branch_ref, x_ref, y_ref):
+      y_ref[...] = lax.switch(
+          branch_ref[...],
+          (lambda x: x**2, lambda x: -x, lambda x: -x**2),
+          x_ref[...])
+    y = f(jnp.int32(0), arg + 3.)
+    self.assertEqual(y, 9.)
+    y = f(jnp.int32(1), arg + 2.)
+    self.assertEqual(y, -2.)
+    y = f(jnp.int32(2), arg + 4.)
+    self.assertEqual(y, -16.)
+
+  @parameterized.parameters(1, 2, 4, 8)
+  def test_cond_vectors(self, block_size):
+    arg = jnp.float32([0.] * 8)
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct(arg.shape, jnp.float32),
+                       in_specs=[pl.BlockSpec(lambda _: (), ()),
+                                 pl.BlockSpec(lambda i: i, (block_size,))],
+                       out_specs=pl.BlockSpec(lambda i: i, (block_size,)),
+                       grid=jt.cdiv(arg.shape[0], block_size),
+                       debug=False)
+    def f(branch_ref, x_ref, y_ref):
+      y_ref[...] = lax.switch(
+          branch_ref[...],
+          (lambda x: x**2, lambda x: -x),
+          x_ref[...])
+    y = f(jnp.int32(0), arg + 3.)
+    np.testing.assert_allclose(y, arg + 9.)
+    y = f(jnp.int32(1), arg + 2.)
+    np.testing.assert_allclose(y, arg - 2.)
+
+  @parameterized.parameters(1, 2, 4, 8)
+  def test_cond_threebranch_vectors(self, block_size):
+    arg = jnp.float32([0.] * 8)
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct(arg.shape, jnp.float32),
+                       in_specs=[pl.BlockSpec(lambda _: (), ()),
+                                 pl.BlockSpec(lambda i: i, (block_size,))],
+                       out_specs=pl.BlockSpec(lambda i: i, (block_size,)),
+                       grid=jt.cdiv(arg.shape[0], block_size),
+                       debug=False)
+    def f(branch_ref, x_ref, y_ref):
+      y_ref[...] = lax.switch(
+          branch_ref[...],
+          (lambda x: x**2, lambda x: -x, lambda x: -x**2),
+          x_ref[...])
+    y = f(jnp.int32(0), arg + 3.)
+    np.testing.assert_allclose(y, arg + 9.)
+    y = f(jnp.int32(1), arg + 2.)
+    np.testing.assert_allclose(y, arg - 2.)
+    y = f(jnp.int32(2), arg + 4.)
+    np.testing.assert_allclose(y, arg - 16.)
+
+  @parameterized.parameters(*itertools.product([1, 8], [1, 2, 4]))
+  def test_cond_threebranch_matrix_out(self, bx, by):
+    x = jnp.arange(64.)[:, None]
+    y = jnp.arange(128.)[None, :]
+    # TODO(sharadmv): Renaming in_specs->in_spec silently breaks.
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((x.shape[0], y.shape[1]), jnp.float32),
+        in_specs=[
+            pl.BlockSpec(lambda _, __: (), ()),
+            pl.BlockSpec(lambda i, _: (i, 0), (bx, 1)),
+            pl.BlockSpec(lambda _, j: (0, j), (1, by))],
+        out_specs=pl.BlockSpec(lambda i, j: (i, j), (bx, by)),
+        grid=(jt.cdiv(x.shape[0], bx), jt.cdiv(y.shape[1], by)),
+        debug=True)
+    def f(branch_ref, x_ref, y_ref, o_ref):
+      o_ref[...] = lax.switch(
+          branch_ref[...],
+          (lambda x, y: (x - y)**2,
+           lambda x, y: -jnp.abs(x - y),
+           lambda x, y: jnp.sqrt(jnp.abs(x - y))),
+          x_ref[...],
+          y_ref[...])
+    np.testing.assert_allclose(f(jnp.int32(0), x, y), (x - y)**2)
+    np.testing.assert_allclose(f(jnp.int32(1), x, y), -jnp.abs(x - y))
+    np.testing.assert_allclose(f(jnp.int32(2), x, y), jnp.sqrt(jnp.abs(x - y)))
+
+  def test_conditional_write(self):
+    arg = jnp.arange(8, dtype=jnp.int32)
+    @functools.partial(self.pallas_call,
+                       out_shape=jax.ShapeDtypeStruct(arg.shape, jnp.int32),
+                       debug=True)
+    def f(branch_ref, x_ref, out_ref):
+      out_ref[...] = -x_ref[...]
+      def if_true(x):
+        out_ref[4] = x
+        return ()
+      jax.lax.cond(branch_ref[...], if_true, lambda x: (), x_ref[6])
+    np.testing.assert_allclose(f(jnp.bool_(True), arg),
+                               jnp.int32([0, -1, -2, -3, 6, -5, -6, -7]))
+    np.testing.assert_allclose(f(jnp.bool_(False), arg),
+                               -arg)
+
   def test_fori_loop_simple(self):
 
     @functools.partial(self.pallas_call,
@@ -652,6 +776,7 @@ class PallasControlFlowTest(PallasTest):
       lax.fori_loop(2, 5, body, None)
     y = f(6)
     self.assertEqual(y, 6 + 2 + 3 + 4)
+
   def test_fori_loop_accumulates(self):
 
     @functools.partial(self.pallas_call,
