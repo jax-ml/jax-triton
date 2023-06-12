@@ -59,7 +59,7 @@ zip, unsafe_zip = util.safe_zip, zip
 partial = functools.partial
 Grid = Tuple[int, ...]
 NDIndexer = primitives.NDIndexer
-GridSpec = pallas_core.GridSpec
+GridMapping = pallas_core.GridMapping
 BlockMapping = pallas_core.BlockMapping
 
 
@@ -70,7 +70,7 @@ class TritonModuleContext:
   ir_context: tl_ir.context
   builder: tl_ir.builder
   module: tl_ir.module
-  grid_spec: GridSpec
+  grid_mapping: GridMapping
   program_ids: Sequence[tl.tensor]
 
 
@@ -131,15 +131,15 @@ def _eval_index_map(
 triton_lowering_rules = {}
 
 
-def _process_grid_to_3d_grid(builder, grid_spec: GridSpec):
-  if len(grid_spec.grid) <= 3:
+def _process_grid_to_3d_grid(builder, grid_mapping: GridMapping):
+  if len(grid_mapping.grid) <= 3:
     program_ids = [
         tl.program_id(axis=i, _builder=builder)
-        for i in range(len(grid_spec.grid))
+        for i in range(len(grid_mapping.grid))
     ]
-    return grid_spec.grid, program_ids
-  grid_prefix = grid_spec.grid[:-2]
-  grid_suffix = grid_spec.grid[-2:]
+    return grid_mapping.grid, program_ids
+  grid_prefix = grid_mapping.grid[:-2]
+  grid_suffix = grid_mapping.grid[-2:]
   total_axis_size = np.prod(grid_prefix)
   new_grid = (total_axis_size, *grid_suffix)
   out_indices = [0] * len(grid_prefix)
@@ -154,12 +154,12 @@ def _process_grid_to_3d_grid(builder, grid_spec: GridSpec):
       tl.program_id(1, _builder=builder),
       tl.program_id(2, _builder=builder),
   ]
-  assert len(out_indices) == len(grid_spec.grid)
+  assert len(out_indices) == len(grid_mapping.grid)
   return new_grid, out_indices
 
 
 def lower_jaxpr_to_triton_module(
-    jaxpr: jax_core.Jaxpr, in_shapes, grid_spec: GridSpec, name: str
+    jaxpr: jax_core.Jaxpr, in_shapes, grid_mapping: GridMapping, name: str
 ) -> tl_ir.module:
   jaxpr, _ = pe.dce_jaxpr(jaxpr, [True] * len(jaxpr.outvars), instantiate=True)
   ir_context = tl_ir.context()
@@ -181,15 +181,18 @@ def lower_jaxpr_to_triton_module(
     ptr = tl.tensor(fn.args(i), prototype.param_types[i])
     args.append(ptr)
   builder.set_insertion_point_to_start(entry)
-  new_grid, program_ids = _process_grid_to_3d_grid(builder, grid_spec)
+  new_grid, program_ids = _process_grid_to_3d_grid(builder, grid_mapping)
   local_program_ids = [
-      pid for i, pid in enumerate(program_ids) if i not in grid_spec.mapped_dims
+      pid for i, pid in enumerate(program_ids) if i not in grid_mapping.mapped_dims
   ]
   ctx = TritonModuleContext(
-      name, ir_context, builder, module, grid_spec, local_program_ids
+      name, ir_context, builder, module, grid_mapping, local_program_ids
   )
+  if grid_mapping.num_index_operands:
+    raise NotImplementedError(
+        "Scalar prefetch not supported in Triton lowering.")
   start_indices = map(
-      partial(_eval_index_map, ctx, program_ids), grid_spec.block_mappings
+      partial(_eval_index_map, ctx, program_ids), grid_mapping.block_mappings
   )
   block_infos = [
       BlockInfo(
@@ -200,7 +203,7 @@ def lower_jaxpr_to_triton_module(
       if block_mapping is not None
       else None
       for shape_dtype, block_mapping, start_idx in zip(
-          in_shapes, grid_spec.block_mappings, start_indices
+          in_shapes, grid_mapping.block_mappings, start_indices
       )
   ]
   () = lower_jaxpr_to_triton_ir(ctx, jaxpr, block_infos, *args)
@@ -1481,14 +1484,14 @@ triton_lowering_rules[lax.cond_p] = _cond_lowering_rule
 def compile_jaxpr(
     jaxpr: jax_core.Jaxpr,
     in_shapes,
-    grid_spec: GridSpec,
+    grid_mapping: GridMapping,
     name: str,
     num_warps: int,
     num_stages: int,
     debug: bool,
 ) -> TritonCompilationResult:
   lowering_result = lower_jaxpr_to_triton_module(
-      jaxpr, in_shapes, grid_spec, name
+      jaxpr, in_shapes, grid_mapping, name
   )
   device = 0
   ttir = lowering_result.module
@@ -1513,7 +1516,7 @@ def pallas_call_lowering(
     interpret: bool,
     debug: bool,
     input_output_aliases: Tuple[Tuple[int, int], ...],
-    grid_spec: GridSpec,
+    grid_mapping: GridMapping,
     **compiler_params: Any
 ):
   if interpret:
@@ -1528,18 +1531,18 @@ def pallas_call_lowering(
         interpret=interpret,
         debug=debug,
         input_output_aliases=input_output_aliases,
-        grid_spec=grid_spec,
+        grid_mapping=grid_mapping,
         **compiler_params
     )
   num_warps = compiler_params.get("num_warps", 4)
   num_stages = compiler_params.get("num_stages", 3)
   if debug:
     print(jaxpr)
-    print(grid_spec)
+    print(grid_mapping)
   compilation_result = compile_jaxpr(
       jaxpr,
       tuple((*in_shapes, *out_shapes)),
-      grid_spec,
+      grid_mapping,
       name,
       num_warps,
       num_stages,

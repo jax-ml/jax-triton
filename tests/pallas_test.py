@@ -44,10 +44,6 @@ try:
 except ModuleNotFoundError:
   compile_jaxpr = None
 import numpy as np
-try:
-  import torch
-except ModuleNotFoundError:
-  torch = None
 
 
 # TODO(sharadmv): Update signatures of pallas_call to correct inputs/outputs.
