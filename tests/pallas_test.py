@@ -821,7 +821,7 @@ class PallasControlFlowTest(PallasTest):
             pl.BlockSpec(lambda i: (i,), (bx,))],  # x
         out_specs=pl.BlockSpec(lambda i: (i,), (bx,)),
         grid=jt.cdiv(x.shape[0], bx),
-        debug=True)
+        debug=False)
     def f(program_ref, params_ref, x_ref, out_ref):
       x = x_ref[...]
 
