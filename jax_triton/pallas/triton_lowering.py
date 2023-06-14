@@ -441,6 +441,13 @@ def _integer_pow_lowering_rule(ctx: TritonLoweringRuleContext, a, *, y):
 triton_lowering_rules[lax.integer_pow_p] = _integer_pow_lowering_rule
 
 
+def _pow_lowering_rule(ctx: TritonLoweringRuleContext, a, y):
+  return tl.math.pow(a, y, _builder=ctx.builder)
+
+
+triton_lowering_rules[lax.pow_p] = _pow_lowering_rule
+
+
 def _tanh_lowering_rule(ctx: TritonLoweringRuleContext, a):
   return tl.math.tanh(a, _builder=ctx.builder)
 
@@ -591,7 +598,40 @@ def _reshape_lowering_rule(
     ctx: TritonLoweringRuleContext, a, *, new_sizes, dimensions
 ):
   del new_sizes, dimensions
-  shape = [tl.constexpr(s) for s in ctx.avals_out[0].shape]
+  # Short-circuit to avoid unneeded reshape.
+  dst_shp = ctx.avals_out[0].shape
+  if tuple(s.value for s in a.shape) == dst_shp:
+    return a
+  if not a.type.is_block():
+    return tl.broadcast_to(a, [tl.constexpr(s) for s in dst_shp],
+                           _builder=ctx.builder)
+  # Expand-dims or reduce-sum to handle singleton dims.
+  if ([s.value for s in a.shape if s.value != 1] ==
+      [s for s in dst_shp if s != 1]):
+    # Eliminate one difference and recurse.
+    for i in range(max(len(a.shape), len(dst_shp))):
+      if (i < len(a.shape) and i < len(dst_shp) and
+          a.shape[i].value == dst_shp[i]):
+        continue
+      # Use expand_dims to add a singleton dim.
+      if i < len(dst_shp) and dst_shp[i] == 1:
+        return _reshape_lowering_rule(
+            ctx, tl.semantic.expand_dims(a, i, builder=ctx.builder),
+            new_sizes=None, dimensions=None)
+      # Use a reduction to eliminate singleton dim.
+      if a.shape[i].value == 1:
+        reduce_ctx = ctx.replace(
+            avals_in=[ctx.avals_in[0].update(
+                shape=tuple(d.value for d in a.shape))],
+            avals_out=[ctx.avals_in[0].update(
+                shape=tuple(d.value for di, d in enumerate(a.shape)
+                            if di != i))])
+        return _reshape_lowering_rule(
+            ctx,
+            _reduce_lowering(jnp.add, reduce_ctx, a, axes=(i,)),
+            new_sizes=None, dimensions=None)
+
+  shape = [tl.constexpr(s) for s in dst_shp]
   return tl.reshape(a, shape, _builder=ctx.builder)
 
 
@@ -833,12 +873,12 @@ def _masked_swap_lowering_rule(
       if ptr.type.is_block()
       else ptr.type.element_ty
   )
-  assert ptr_type == value.type.element_ty, (ptr_type, value.type.element_ty)
+  value_type = value.type.element_ty if value.type.is_block() else value.type
+  assert ptr_type == value_type, (ptr_type, value_type)
   ref_block_info, *_ = ctx.block_infos
   idx, *mask_other = tree_util.tree_unflatten(args_tree, args)
   avals_in = ctx.avals_in
   idx_avals, *_ = tree_util.tree_unflatten(args_tree, avals_in[2:])
-  is_scalar = [hasattr(a, "shape") and a.shape == () for a in idx_avals.indices]
   ptr = _compute_pointers_from_indices(
       ptr, ref_block_info, idx, avals_in[0].shape, ctx.builder
   )
@@ -921,8 +961,6 @@ triton_lowering_rules[lax.dot_general_p] = _dot_general_lowering
 
 
 def _reduction_lowering(body, ctx: TritonLoweringRuleContext, args, axes):
-  if len(axes) != 1:
-    raise ValueError("`pallas` reduce operations only support one reduce axis.")
   flat_args = tree_util.tree_leaves(args)
   (axis,) = axes
   mapped_avals = [
@@ -973,6 +1011,22 @@ def _reduction_lowering(body, ctx: TritonLoweringRuleContext, args, axes):
 
 
 def _reduce_lowering(body, ctx: TritonLoweringRuleContext, a, *, axes):
+  assert isinstance(axes, tuple)
+  if not axes:
+    return a
+  while len(axes) > 1:
+    axis = max(axes)
+    dst_avals = tuple(v.update(shape=v.shape[:axis] + v.shape[axis + 1:])
+                      for v in ctx.avals_in)
+    a = _reduce_lowering(
+        body, ctx.replace(avals_out=dst_avals), a, axes=(axis,))
+    # Adding an intervening -(-reduce(.)) introduces a convert_layout between
+    # reduces, which seems necessary for correctness.
+    # TODO(bjp): Get rid of the double negation.
+    #     https://github.com/openai/triton/issues/1776
+    a = a.__neg__(_builder=ctx.builder).__neg__(_builder=ctx.builder)
+    ctx = ctx.replace(avals_in=dst_avals)
+    axes = tuple(ax for ax in axes if ax != axis)
   return _reduction_lowering(body, ctx, a, axes=axes)[0]
 
 

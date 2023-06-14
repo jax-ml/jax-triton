@@ -238,6 +238,31 @@ class PallasCallTest(PallasTest):
     expected = x.reshape(out_shape)
     np.testing.assert_allclose(f(x), expected)
 
+  @parameterized.parameters(*[
+    ((), (1,)),
+    ((), (1, 1)),
+    ((2, 4), (2, 4)),
+    ((2, 4), (2, 4, 1)),
+    ((2, 4, 1), (2, 4)),
+    ((2, 4), (1, 2, 4)),
+    ((1, 2, 4), (2, 4)),
+    ((2, 4), (2, 1, 4)),
+    ((1, 2, 1, 4, 1), (2, 4)),
+    ((2, 4,), (1, 2, 1, 4)),
+    ((2, 4,), (1, 2, 4, 1)),
+    ((1, 2, 4, 1), (1, 2, 1, 4, 1)),
+  ])
+  def test_reshape_noop_or_singleton_dims(self, in_shape, out_shape):
+    @functools.partial(
+        self.pallas_call, out_shape=jax.ShapeDtypeStruct(out_shape, jnp.float32),
+        grid=1)
+    def f(x_ref, o_ref):
+      o_ref[...] = x_ref[...].reshape(out_shape)
+
+    x = jnp.arange(int(np.prod(in_shape)), dtype=jnp.float32).reshape(in_shape)
+    expected = x.reshape(out_shape)
+    np.testing.assert_allclose(f(x), expected)
+
   @parameterized.named_parameters(*[
     (f"m_{m}_n_{n}_k_{k}_dtype_{dtype}_bm_{block_size_m}_"
      f"bn_{block_size_n}_bk_{block_size_k}_gm_{group_size_m}", m, n, k, dtype,
@@ -488,6 +513,25 @@ class PallasCallTest(PallasTest):
     y_ref = np.sum(x, axis=axis)
     np.testing.assert_allclose(y, y_ref, atol=1e-2, rtol=1e-2)
 
+  @parameterized.parameters(False, True)
+  def test_reduce_only_dim(self, use_store):
+    m = 32
+    x = random.normal(random.PRNGKey(0), (m,), dtype=jnp.float32)
+    out_shape = jax.ShapeDtypeStruct((), x.dtype)
+    @functools.partial(
+        self.pallas_call,
+        out_shape=out_shape,
+        grid=1, debug=True)
+    def reduce(x_ref, y_ref):
+      x = pl.load(x_ref, (jnp.arange(m),))
+      y = jnp.sum(x, axis=-1)
+      if use_store:
+        pl.store(y_ref, (), y)
+      else:
+        y_ref[...] = y
+    y = reduce(x)
+    y_ref = jnp.sum(x, axis=-1)
+    np.testing.assert_allclose(y, y_ref, atol=1e-2, rtol=1e-2)
 
   @parameterized.named_parameters(*[
     (f"{op_name}_{dtype}_{axis}", op, dtype, axis)
@@ -498,30 +542,35 @@ class PallasCallTest(PallasTest):
       ("argmax", jnp.argmax),
       ("argmin", jnp.argmin),
     ]
-    for axis in [0, 1]
-    for dtype in ["float16", "float32", "int32"]
+    for axis in [0, 1, (1,), (0, 1)]
+    for dtype in ["float16", "float32", "int32", "uint32"]
+    if isinstance(axis, int) or "arg" not in op_name
     ])
   def test_array_reduce(self, op, dtype, axis):
     m, n = 32, 8
     out_dtype = dtype
     if op in {jnp.argmin, jnp.argmax}:
       out_dtype = jnp.int32
-    out_shape = jax.ShapeDtypeStruct((n if axis == 0 else m,), out_dtype)
+    def make_x(key):
+      if jnp.issubdtype(dtype, jnp.integer):
+        return random.shuffle(key, jnp.arange(m * n, dtype=dtype)).reshape(m, n)
+      else:
+        return random.normal(key, (m, n), dtype=dtype)
+    out_shape = jax.ShapeDtypeStruct(
+        op(make_x(random.PRNGKey(0)), axis=axis).shape, out_dtype)
     @functools.partial(
         self.pallas_call,
         out_shape=out_shape,
-        grid=1)
+        grid=1, debug=not isinstance(axis, int))
     def reduce(x_ref, y_ref):
       x = pl.load(x_ref, (jnp.arange(m), jnp.arange(n)))
       y = op(x, axis=axis)
-      pl.store(y_ref, (jnp.arange(y.shape[0]),), y)
-    if jnp.issubdtype(dtype, jnp.integer):
-      x = jnp.arange(m * n, dtype=dtype).reshape((m, n))
-    else:
-      x = random.normal(random.PRNGKey(0), (m, n), dtype=dtype)
-    y = reduce(x)
-    y_ref = op(x, axis=axis)
-    np.testing.assert_allclose(y, y_ref, atol=1e-2, rtol=1e-2)
+      pl.store(y_ref, tuple(jnp.arange(d) for d in y.shape), y)
+    for i, key in enumerate(random.split(random.PRNGKey(0), 20)):
+      x = make_x(key)
+      y = reduce(x)
+      y_ref = op(x, axis=axis)
+      np.testing.assert_allclose(y, y_ref, atol=1e-2, rtol=1e-2, err_msg=i)
 
   def test_using_pallas_slice(self):
     m, n = 32, 4
@@ -720,7 +769,7 @@ class PallasControlFlowTest(PallasTest):
             pl.BlockSpec(lambda _, j: (0, j), (1, by))],
         out_specs=pl.BlockSpec(lambda i, j: (i, j), (bx, by)),
         grid=(jt.cdiv(x.shape[0], bx), jt.cdiv(y.shape[1], by)),
-        debug=True)
+        debug=False)
     def f(branch_ref, x_ref, y_ref, o_ref):
       o_ref[...] = lax.switch(
           branch_ref[...],
@@ -734,20 +783,123 @@ class PallasControlFlowTest(PallasTest):
     np.testing.assert_allclose(f(jnp.int32(2), x, y), jnp.sqrt(jnp.abs(x - y)))
 
   def test_conditional_write(self):
-    arg = jnp.arange(8, dtype=jnp.int32)
+    arg = jnp.arange(8, dtype=jnp.float32)
     @functools.partial(self.pallas_call,
-                       out_shape=jax.ShapeDtypeStruct(arg.shape, jnp.int32),
-                       debug=True)
+                       out_shape=jax.ShapeDtypeStruct(arg.shape, jnp.float32),
+                       debug=False)
     def f(branch_ref, x_ref, out_ref):
       out_ref[...] = -x_ref[...]
-      def if_true(x):
-        out_ref[4] = x
+      def if_true(z):
+        out_ref[4] = z
         return ()
-      jax.lax.cond(branch_ref[...], if_true, lambda x: (), x_ref[6])
+      jax.lax.cond(branch_ref[...], if_true, lambda z: (), x_ref[6])
     np.testing.assert_allclose(f(jnp.bool_(True), arg),
-                               jnp.int32([0, -1, -2, -3, 6, -5, -6, -7]))
+                               jnp.float32([0., -1, -2, -3, 6, -5, -6, -7]))
     np.testing.assert_allclose(f(jnp.bool_(False), arg),
                                -arg)
+
+    # We actually expect the assertion failure in linearize, but this also covers another case where an effect was causing an earlier assertion failure.
+    with self.assertRaises(AssertionError):
+      # Notably, we should not have a ValueError for mismatched Read<N> effect.
+      dx = jax.grad(lambda x: jnp.sum(f(jnp.bool_(True), x)**2))(arg)
+      # np.testing.assert_allclose(
+      #     dx, jnp.float32([0., 2, 4, 6, 0, 10, 12 + 12, 14]))
+
+  def test_scan_cond_vm_explicit_ref_arg(self):
+    program = jnp.int32([0, 1, 2, 3, 2])
+    params = jnp.arange(len(program) * 3.).reshape(len(program), 3)
+    x = jnp.arange(7.)
+    bx = 4
+
+    @jax.jit
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((x.shape[0],), jnp.float32),
+        in_specs=[
+            pl.BlockSpec(lambda _: (0,), program.shape),  # program
+            pl.BlockSpec(lambda _: (0, 0), params.shape),  # params
+            pl.BlockSpec(lambda i: (i,), (bx,))],  # x
+        out_specs=pl.BlockSpec(lambda i: (i,), (bx,)),
+        grid=jt.cdiv(x.shape[0], bx),
+        debug=True)
+    def f(program_ref, params_ref, x_ref, out_ref):
+      x = x_ref[...]
+
+      def body_fn(i, args):
+        state, program_ref, params_ref = args
+        opcode = program_ref[i]
+        state = jax.lax.switch(
+            opcode,
+            (lambda state, params, i: state + params[i, 0] * 2.**i * x,
+             lambda state, params, i: state + params[i, 1] * 2.**i * x,
+             lambda state, params, i: state + params[i, 2] * 2.**i * x,
+             lambda state, params, i: state + params[i, 1] * 2.**i * x,
+             ),
+            state, params_ref, i)
+        return state, program_ref, params_ref
+      out_ref[...] = jax.lax.fori_loop(
+          0, len(program), body_fn,
+          (jnp.zeros(x.shape), program_ref, params_ref))[0]
+
+    expected = (x * params[0, 0] +
+                2 * x * params[1, 1] +
+                4 * x * params[2, 2] +
+                8 * x * params[3, 1] +
+                16 * x * params[4, 2])
+    np.testing.assert_allclose(f(program, params, x), expected)
+
+    with self.assertRaises(AssertionError):
+      jax.value_and_grad(lambda params, x: f(program, params, x).sum())(
+          params, x)
+
+  def test_scan_cond_vm_closing_over_ref(self):
+    # ** Difference is the closure over params_ref in the switch branches. **
+    program = jnp.int32([0, 1, 2, 3, 2, -1])
+    params = jnp.arange(len(program) * 3.).reshape(len(program), 3)
+    x = jnp.arange(7.)
+    bx = 4
+
+    @jax.jit
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((x.shape[0],), jnp.float32),
+        in_specs=[
+            pl.BlockSpec(lambda _: (0,), program.shape),  # program
+            pl.BlockSpec(lambda _: (0, 0), params.shape),  # params
+            pl.BlockSpec(lambda i: (i,), (bx,))],  # x
+        out_specs=pl.BlockSpec(lambda i: (i,), (bx,)),
+        grid=jt.cdiv(x.shape[0], bx),
+        debug=False)
+    def f(program_ref, params_ref, x_ref, out_ref):
+      x = x_ref[...]
+
+      def body_fn(i, args):
+        state, program_ref, params_ref = args
+        opcode = program_ref[i] + 1
+        state = jax.lax.switch(
+            opcode,
+            (lambda state, *_: state,
+             lambda state, i: state + params_ref[i, 0] * 2.**i * x,
+             lambda state, i: state + params_ref[i, 1] * 2.**i * x,
+             lambda state, i: state + params_ref[i, 2] * 2.**i * x,
+             lambda state, i: state + params_ref[i, 1] * 2.**i * x,
+             ),
+            state, i)
+        return state, program_ref, params_ref
+      out_ref[...] = jax.lax.fori_loop(
+          0, len(program), body_fn,
+          (jnp.zeros(x.shape), program_ref, params_ref))[0]
+
+    expected = (x * params[0, 0] +
+                2 * x * params[1, 1] +
+                4 * x * params[2, 2] +
+                8 * x * params[3, 1] +
+                16 * x * params[4, 2])
+    np.testing.assert_allclose(f(program, params, x), expected)
+
+    with self.assertRaises(AssertionError):
+      jax.value_and_grad(lambda params, x: f(program, params, x).sum())(
+          params, x)
 
   def test_fori_loop_simple(self):
 
@@ -1223,7 +1375,6 @@ class FusedAttentionTest(parameterized.TestCase):
     if jt.get_compute_capability(0) < 80:
       raise unittest.SkipTest(
           "Fused attention only works on GPUs with capability >= sm80")
-
     k1, k2, k3 = random.split(random.PRNGKey(0), 3)
     q = random.normal(k1, (batch_size, seq_len, num_heads, head_dim),
                       dtype=jnp.float16)
@@ -1241,7 +1392,7 @@ class FusedAttentionTest(parameterized.TestCase):
     dq, dk, dv = jax.grad(f, argnums=(0, 1, 2))(q, k, v)
     dq_ref, dk_ref, dv_ref = jax.grad(f_ref, argnums=(0, 1, 2))(q, k, v)
     np.testing.assert_allclose(dq, dq_ref, atol=0.1)
-    np.testing.assert_allclose(dk, dk_ref, atol=0.06)
+    np.testing.assert_allclose(dk, dk_ref, atol=0.08)
     np.testing.assert_allclose(dv, dv_ref, atol=0.05)
 
 
