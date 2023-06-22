@@ -16,7 +16,9 @@
 import dataclasses
 import functools
 import operator
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Optional, Sequence, Tuple
+import zlib
+
 import jax
 from jax import lax
 from jax import tree_util
@@ -1679,12 +1681,13 @@ def pallas_call_lowering(
       ]
   )
 
+  compressed_proto = zlib.compress(kernel_call.to_proto(b""))
   out = mhlo.CustomCallOp(
       [out_type],
       in_nodes,
       call_target_name=ir.StringAttr.get("triton_kernel_call"),
       has_side_effect=ir.BoolAttr.get(False),
-      backend_config=ir.StringAttr.get(kernel_call.to_proto(b"")),
+      backend_config=ir.StringAttr.get(compressed_proto),
       api_version=mlir.i32_attr(2),  # API_VERSION_STATUS_RETURNING
       called_computations=ir.ArrayAttr.get([]),
       operand_layouts=triton_utils.avals_to_layouts(ctx.avals_in),

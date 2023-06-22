@@ -17,6 +17,7 @@ import functools
 import os
 import types
 from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple, Union
+import zlib
 
 from absl import logging
 import jax
@@ -401,13 +402,13 @@ def triton_kernel_call_lowering(
         )
     )
 
-  serialized = kernel_call.to_proto(serialized_metadata)
+  compressed_proto = zlib.compress(kernel_call.to_proto(serialized_metadata))
   return mhlo.CustomCallOp(
       out_types,
       array_args,
       call_target_name=ir.StringAttr.get(call_name),
       has_side_effect=ir.BoolAttr.get(False),
-      backend_config=ir.StringAttr.get(serialized),
+      backend_config=ir.StringAttr.get(compressed_proto),
       api_version=mlir.i32_attr(2),  # API_VERSION_STATUS_RETURNING
       called_computations=ir.ArrayAttr.get([]),
       operand_layouts=utils.avals_to_layouts(ctx.avals_in),
