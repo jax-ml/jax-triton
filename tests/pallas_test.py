@@ -680,6 +680,31 @@ class PallasControlFlowTest(PallasTest):
     if self.INTERPRET:
       self.skipTest("Control flow not supported in interpreter mode yet.")
 
+  def test_loop_with_float64_carry(self):
+    # Test that the jnp.zeros(f64) loop init_val is actually f64, and that
+    # fori_loop handles i64 index variables, i.e. error: 'scf.for' op  along
+    # control flow edge from Region #0 to Region #0: source type #0
+    # 'tensor<4xf64>' should match input type #0 'tensor<4xf32>'
+    orig_val = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+      @functools.partial(self.pallas_call,
+                         out_shape=jax.ShapeDtypeStruct((4,), jnp.float64),
+                         grid=1,
+                         debug=False)
+      def f(x_ref, y_ref):
+        def body(i, acc):
+          # TODO(sharadmv): DCE loop index but retain carry breaks scan pattern.
+          # return acc + x_ref[...]
+          return acc + x_ref[...] + i * 0
+        y_ref[...] = lax.fori_loop(
+            0, 3, body, jnp.zeros((4,), jnp.float64))
+
+      np.testing.assert_allclose(np.arange(1, 5.) * 3,
+                                 f(jnp.arange(1, 5., dtype=jnp.float64)))
+    finally:
+      jax.config.update("jax_enable_x64", orig_val)
+
   def test_cond_simple(self):
     arg = jnp.float32(0.)
     @functools.partial(self.pallas_call,
