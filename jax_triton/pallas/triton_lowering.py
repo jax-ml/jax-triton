@@ -445,7 +445,9 @@ def _integer_pow_lowering_rule(ctx: TritonLoweringRuleContext, a, *, y):
   if y == 3:
     return a.__mul__(a.__mul__(a, _builder=ctx.builder), _builder=ctx.builder)
   if y == -2:
-    return tl.math.rsqrt(a, _builder=ctx.builder)
+    one_ = tl.core._to_tensor(1.0, ctx.builder)
+    a_sq = a.__mul__(a, _builder=ctx.builder)
+    return one_.__truediv__(a_sq, _builder=ctx.builder)
   return tl.math.pow(a, y, _builder=ctx.builder)
 
 
@@ -620,8 +622,10 @@ def _reshape_lowering_rule(
   if tuple(s.value for s in a.shape) == dst_shp:
     return a
   if not a.type.is_block():
-    return tl.broadcast_to(a, [tl.constexpr(s) for s in dst_shp],
-                           _builder=ctx.builder)
+    if dst_shp:
+      return tl.broadcast_to(a, [tl.constexpr(s) for s in dst_shp],
+                             _builder=ctx.builder)
+    return a
   # Expand-dims or reduce-sum to handle singleton dims.
   if ([s.value for s in a.shape if s.value != 1] ==
       [s for s in dst_shp if s != 1]):
