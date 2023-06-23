@@ -455,7 +455,6 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
     out_shapes_q = jax.ShapeDtypeStruct(q.shape, jnp.float32)
 
     grid_q = (batch_size, num_heads, jt.cdiv(seq_len, block_q))
-    # TODO(sharadmv): figure out why num_warps=8 doesn't work!
     num_warps = 8
     dq = pl.pallas_call(
         functools.partial(mha_backward_kernel_dq, block_q=block_q, block_d=head_dim,
