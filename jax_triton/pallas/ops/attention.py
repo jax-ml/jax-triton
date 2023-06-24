@@ -31,7 +31,7 @@ def mha_forward_kernel(
     sm_scale: float, causal: bool,
     block_q: int, block_d: int, block_k: int):
   seq_len = q_ref.shape[0]
-  start_q = pl.program_id(0)
+  start_q = pl.program_id(2)
 
   # acc is the buffer where we accumulate the output on sram.
   # m_i and l_i (see FlashAttention paper) are updated during the k,v loop.
@@ -51,19 +51,16 @@ def mha_forward_kernel(
   def body(start_k, carry):
     acc, m_prev, l_prev = carry
 
-    k = pl.load(k_ref, (pl.dslice(start_k * block_k, block_k), slice(None)))
+    k = pl.load(k_ref, (slice(None), pl.dslice(start_k * block_k, block_k)))
     qk = jnp.zeros([block_q, block_k], dtype=jnp.float32)
-    qk += pl.dot(q, k.T)   # [block_q, block_k]
-    if sm_scale != 1.:
-      qk *= sm_scale # [block_q, block_k]
+    qk += pl.dot(q, k)   # [block_q, block_k]
+    qk *= sm_scale # [block_q, block_k]
 
     if causal:
       span_q = start_q * block_q + jnp.arange(block_q)
       span_k = start_k * block_k + jnp.arange(block_k)
       qk = jnp.where(span_q[:, None] >= span_k[None, :], qk, float('-inf'))
     # Bring closer to XLA:GPU numerics.
-    qk = qk.astype(q_ref.dtype)
-    qk = qk.astype(jnp.float32)
     m_curr = jnp.maximum(jnp.max(qk, axis=1), m_prev)
     l_prev *= jnp.exp(m_prev - m_curr)
     p = jnp.exp(qk - m_curr[:, None])
@@ -72,10 +69,11 @@ def mha_forward_kernel(
     l_rcp = 1. / l_curr
     p = p * l_rcp[:, None]
     acc *= (l_prev * l_rcp)[:, None]
-    p = p.astype(jnp.float16)
+    p = p.astype(q_ref.dtype)
 
-    v = pl.load(v_ref, (pl.dslice(start_k * block_k, block_k), pl.dslice(block_d)))
-    acc = acc + pl.dot(p.astype(v.dtype), v)
+    v = pl.load(v_ref, (pl.dslice(start_k * block_k, block_k),
+                        pl.dslice(block_d)))
+    acc += pl.dot(p, v)
     return acc, m_curr, l_curr
   if causal:
     upper_bound = lax.div(block_q * start_q, block_k) + 1
@@ -115,7 +113,7 @@ def mha(q, k, v,
   # Heuristics.
   grid_ = grid
   if grid_ is None:
-    grid_ = (jt.cdiv(seq_len, block_q), batch_size, num_heads)
+    grid_ = (batch_size, num_heads, jt.cdiv(seq_len, block_q))
 
   num_warps_ = num_warps
   if num_warps_ is None:
@@ -125,15 +123,16 @@ def mha(q, k, v,
                              block_d=head_dim,
                              causal=causal)
   out_shape = jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype)
+  k = k.swapaxes(1, 3)
   return pl.pallas_call(
       kernel,
       grid=grid_,
       in_specs=[
-        pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-        pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-        pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
+        pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
+        pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, head_dim, None, seq_len)),
+        pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
       ],
-      out_specs=pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
+      out_specs=pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
       num_warps=num_warps_,
       num_stages=num_stages,
       out_shape=out_shape,
@@ -151,7 +150,7 @@ def _mha_forward(q, k, v, sm_scale: float, causal: bool, block_q: int,
   # Heuristics.
   grid_ = grid
   if grid_ is None:
-    grid_ = (jt.cdiv(seq_len, block_q), batch_size, num_heads)
+    grid_ = (batch_size, num_heads, jt.cdiv(seq_len, block_q))
 
   num_warps_ = num_warps
   if num_warps_ is None:
@@ -166,18 +165,19 @@ def _mha_forward(q, k, v, sm_scale: float, causal: bool, block_q: int,
       jax.ShapeDtypeStruct(shape=(batch_size, num_heads, seq_len), # m
                            dtype=jnp.float32)
   ]
+  k = k.swapaxes(1, 3)
   out, l, m = pl.pallas_call(
       kernel,
       grid=grid_,
       in_specs=[
-        pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-        pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-        pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
+        pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
+        pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, head_dim, None, seq_len)),
+        pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
       ],
       out_specs=[
-        pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-        pl.BlockSpec(lambda _, j, k: (j, k, 0), (None, None, seq_len)),
-        pl.BlockSpec(lambda _, j, k: (j, k, 0), (None, None, seq_len)),
+        pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
+        pl.BlockSpec(lambda j, k, _: (j, k, 0), (None, None, seq_len)),
+        pl.BlockSpec(lambda j, k, _: (j, k, 0), (None, None, seq_len)),
       ],
       num_warps=num_warps_,
       num_stages=num_stages,
@@ -249,7 +249,7 @@ def mha_backward_kernel(
 
     dv = jnp.zeros([block_k, block_d], dtype=jnp.float32)
     dk = jnp.zeros([block_k, block_d], dtype=jnp.float32)
-    k = pl.load(k_ref, (pl.ds(start_k * block_k, block_k), slice(None)))
+    k = pl.load(k_ref, (slice(None), pl.ds(start_k * block_k, block_k)))
     v = pl.load(v_ref, (pl.ds(start_k * block_k, block_k), slice(None)))
     span_k = start_k * block_k + jnp.arange(block_k)
 
@@ -315,12 +315,11 @@ def mha_backward_kernel_dq(
 
   def inner_loop(start_k, dq):
     span_k = start_k * block_k + jnp.arange(block_k)
-    k = pl.load(k_ref, (pl.ds(start_k * block_k, block_k), slice(None)))
+    k = pl.load(k_ref, (slice(None), pl.ds(start_k * block_k, block_k)))
     v = pl.load(v_ref, (pl.ds(start_k * block_k, block_k), slice(None)))
 
-    qk = pl.dot(q, k.T)
-    qk = qk.astype(q_ref.dtype)
-    qk = qk.astype(jnp.float32)
+    qk = jnp.zeros((block_q, block_k), dtype=jnp.float32)
+    qk += pl.dot(q, k)
     if sm_scale != 1.0:
       qk *= sm_scale
     if causal:
@@ -338,8 +337,7 @@ def mha_backward_kernel_dq(
   else:
     upper_bound = jt.cdiv(seq_len, block_k)
   dq = lax.fori_loop(0, upper_bound, inner_loop, dq)
-  pl.store(dq_ref, (pl.ds(start_q * block_q, block_q),
-                        slice(None)), dq, eviction_policy="evict_last")
+  pl.store(dq_ref, (pl.ds(start_q * block_q, block_q), slice(None)), dq)
 
 
 def mha_backward_kernel_dkv(
@@ -357,16 +355,15 @@ def mha_backward_kernel_dkv(
 
   dv = jnp.zeros([block_k, block_d], dtype=jnp.float32)
   dk = jnp.zeros([block_k, block_d], dtype=jnp.float32)
-  k = pl.load(k_ref, (pl.ds(start_k * block_k, block_k), slice(None)))
+  k = pl.load(k_ref, (slice(None), pl.ds(start_k * block_k, block_k)))
   v = pl.load(v_ref, (pl.ds(start_k * block_k, block_k), slice(None)))
   span_k = start_k * block_k + jnp.arange(block_k)
 
   def inner_loop(start_q, carry):
     dv, dk = carry
+    qk = jnp.zeros((block_q, block_k), dtype=jnp.float32)
     q = pl.load(q_ref, (pl.ds(start_q * block_q, block_q), slice(None)))
-    qk = pl.dot(q, k.T)
-    qk = qk.astype(q_ref.dtype)
-    qk = qk.astype(jnp.float32)
+    qk += pl.dot(q, k)
     if sm_scale != 1.0:
       qk *= sm_scale
     if causal:
@@ -409,6 +406,7 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
   do_scaled, delta = _preprocess_backward(out, do, l, block_q, debug, interpret)
 
   if backward_pass_impl == "xla":
+    k = k.swapaxes(1, 3)
     return jax.vjp(functools.partial(mha_reference, sm_scale=sm_scale,
                                      causal=causal), q, k, v)[1](do)
   elif backward_pass_impl == "triton":
@@ -430,7 +428,7 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
         out_shape=out_shapes,
         in_specs=[
           pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
+          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, head_dim, None, seq_len)),
           pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
           pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
           pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
@@ -451,7 +449,6 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
         num_stages=1,
         input_output_aliases={8: 0})(q, k, v, out, do_scaled, l, m, delta, dq)
   elif backward_pass_impl == "triton_split":
-    # We accumulate into dq so we need to initialize it to zeros.
     out_shapes_q = jax.ShapeDtypeStruct(q.shape, jnp.float32)
 
     grid_q = (batch_size, num_heads, jt.cdiv(seq_len, block_q))
@@ -463,7 +460,7 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
         out_shape=out_shapes_q,
         in_specs=[
           pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-          pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
+          pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, head_dim, None, seq_len)),
           pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
           pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
           pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
@@ -478,7 +475,7 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
         debug=debug,
         interpret=interpret,
         num_warps=num_warps,
-        num_stages=2)(q, k, v, out, do_scaled, l, m, delta)
+        num_stages=1)(q, k, v, out, do_scaled, l, m, delta)
 
     grid_kv = (batch_size, num_heads, jt.cdiv(seq_len, block_k))
     out_shapes_kv = [
@@ -492,7 +489,7 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
         out_shape=out_shapes_kv,
         in_specs=[
           pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-          pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
+          pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, head_dim, None, seq_len)),
           pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
           pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
           pl.BlockSpec(lambda j, k, _: (j, 0, k, 0), (None, seq_len, None, head_dim)),
@@ -521,7 +518,7 @@ def mha_reference(q, k, v, sm_scale=1.0, causal: bool = False):
   kv_seq_len = k.shape[1]
   logits = jnp.einsum('bqhc,bkhc->bhqk', q, k).astype(jnp.float32)
   if causal:
-    mask = jnp.tril(jnp.ones((1, 1, q_seq_len, kv_seq_len), dtype=bool))
+    mask = (jnp.arange(q_seq_len)[:, None] >= jnp.arange(kv_seq_len)[None, :])[None, None]
     mask = jnp.broadcast_to(mask, logits.shape)
     logits = jnp.where(mask, logits, float('-inf'))
   weights = jax.nn.softmax(logits * sm_scale).astype(q.dtype)
