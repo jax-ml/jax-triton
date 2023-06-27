@@ -1465,8 +1465,8 @@ class FusedAttentionTest(parameterized.TestCase):
     def f_ref(q, k, v, bias):
       return attention.mha_reference(q, k, v, bias, causal=causal, has_bias=True).sum()
 
-    dq, dk, dv = jax.grad(f, argnums=(0, 1, 2))(q, k, v)
-    dq_ref, dk_ref, dv_ref = jax.grad(f_ref, argnums=(0, 1, 2))(q, k, v)
+    dq, dk, dv = jax.grad(f, argnums=(0, 1, 2))(q, k, v, bias)
+    dq_ref, dk_ref, dv_ref = jax.grad(f_ref, argnums=(0, 1, 2))(q, k, v, bias)
     np.testing.assert_allclose(dq, dq_ref, atol=0.1)
     np.testing.assert_allclose(dk, dk_ref, atol=0.08)
     np.testing.assert_allclose(dv, dv_ref, atol=0.05)
