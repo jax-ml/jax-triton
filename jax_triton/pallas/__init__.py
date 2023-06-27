@@ -33,6 +33,7 @@ from jax_triton.pallas.primitives import multiple_of
 from jax_triton.pallas.primitives import program_id
 from jax_triton.pallas.primitives import store
 from jax_triton.pallas.primitives import swap
+from jax_triton.pallas.utils import when
 from jax_triton.utils import cdiv
 
 from jax_triton.pallas import registration
