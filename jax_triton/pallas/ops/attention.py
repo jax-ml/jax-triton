@@ -352,7 +352,7 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
     has_bias = (bias is not None)
 
     if has_bias:
-      bias_block_spec = pl.BlockSpec(lambda _, j, k: (j, k, 0, 0), (None, None, seq_len, seq_len))
+      bias_block_spec = pl.BlockSpec(lambda j, k: (j, k, 0, 0), (None, None, seq_len, seq_len))
     else:
       bias_block_spec = None
 
