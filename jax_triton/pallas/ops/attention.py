@@ -386,7 +386,7 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
         interpret=interpret,
         num_warps=num_warps,
         num_stages=1,
-        input_output_aliases={8: 0})(q, k, v, bias, out, do_scaled, l, m, delta, dq)
+        input_output_aliases={9: 0})(q, k, v, bias, out, do_scaled, l, m, delta, dq)
   else:
     raise ValueError(f"Invalid backward pass implementation: {backward_pass_impl}")
   return dq.astype(q.dtype), dk, dv, None
