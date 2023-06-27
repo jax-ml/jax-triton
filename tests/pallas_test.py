@@ -1372,6 +1372,9 @@ class FusedAttentionTest(parameterized.TestCase):
           (1, 384, 8, 64, True, True),
           (2, 384, 8, 64, True, True),
           (2, 2048, 32, 64, False, False),
+          (2, 2048, 32, 64, False, True),
+          (4, 1024, 72, 64, False, False),
+          (4, 1024, 72, 64, False, True),
       ]
   ])
   def test_fused_attention_fwd_bias(self, batch_size, seq_len, num_heads, head_dim,
