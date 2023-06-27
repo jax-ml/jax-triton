@@ -1450,7 +1450,7 @@ class FusedAttentionTest(parameterized.TestCase):
     if jt.get_compute_capability(0) < 80:
       raise unittest.SkipTest(
           "Fused attention only works on GPUs with capability >= sm80")
-    k1, k2, k3, k4 = random.split(random.PRNGKey(0), 3)
+    k1, k2, k3, k4 = random.split(random.PRNGKey(0), 4)
     q = random.normal(k1, (batch_size, seq_len, num_heads, head_dim),
                       dtype=jnp.float16)
     k = random.normal(k2, (batch_size, seq_len, num_heads, head_dim),
