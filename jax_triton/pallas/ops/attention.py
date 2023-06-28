@@ -352,8 +352,10 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
     has_bias = (bias is not None)
 
     if has_bias:
+      input_output_alias = 9
       bias_block_spec = pl.BlockSpec(lambda j, k: (j, k, 0, 0), (None, None, seq_len, seq_len))
     else:
+      input_output_alias = 8
       bias_block_spec = None
 
     grid = (batch_size, num_heads)
@@ -386,7 +388,7 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
         interpret=interpret,
         num_warps=num_warps,
         num_stages=1,
-        input_output_aliases={9: 0})(q, k, v, bias, out, do_scaled, l, m, delta, dq)
+        input_output_aliases={input_output_alias: 0})(q, k, v, bias, out, do_scaled, l, m, delta, dq)
   else:
     raise ValueError(f"Invalid backward pass implementation: {backward_pass_impl}")
   return dq.astype(q.dtype), dk, dv, None
