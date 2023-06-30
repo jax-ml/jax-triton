@@ -18,7 +18,6 @@ import math
 
 from typing import Any, Callable, Dict, Tuple, Union
 
-from jax._src.lib.mlir import ir
 import numpy as np
 
 Grid = Union[int, Tuple[int], Tuple[int, int], Tuple[int, int, int]]
@@ -35,13 +34,8 @@ def normalize_grid(grid: GridOrLambda, metaparams) -> Tuple[int, int, int]:
   return tuple(grid) + (1,) * (3 - len(grid))
 
 
-def aval_to_layout(aval):
-  arange = np.arange(aval.ndim, dtype="int64")[::-1].copy()
-  return ir.DenseIntElementsAttr.get(arange, type=ir.IndexType.get())
-
-
 def avals_to_layouts(avals):
-  return ir.ArrayAttr.get([aval_to_layout(a) for a in avals])
+  return [list(reversed(range(aval.ndim))) for aval in avals]
 
 
 def cdiv(a: int, b: int) -> int:

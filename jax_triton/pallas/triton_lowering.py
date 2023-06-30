@@ -20,6 +20,7 @@ from typing import Any, Optional, Sequence, Tuple
 import zlib
 
 import jax
+import jaxlib
 from jax import lax
 from jax import tree_util
 from jax._src import ad_checkpoint
@@ -33,7 +34,6 @@ from jax._src import util
 from jax._src.lax.control_flow import for_loop
 from jax._src.lib import gpu_triton as triton_kernel_call_lib
 from jax._src.lib.mlir import ir
-from jax._src.lib.mlir.dialects import mhlo
 from jax._src.state import AbstractRef
 from jax._src.state import discharge
 from jax._src.state import primitives as sp
@@ -1665,44 +1665,20 @@ def pallas_call_lowering(
       kernel, grid[0], grid[1], grid[2], kernel_params
   )
 
-  out_type = ir.TupleType.get_tuple(
-      [
-          ir.RankedTensorType.get(
-              out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype)
-          )
-          for out_shape in ctx.avals_out
-      ]
-  )
+  out_types = [
+      ir.RankedTensorType.get(shape.shape, mlir.dtype_to_ir_type(shape.dtype))
+      for shape in out_shapes
+  ]
 
-  output_operand_aliases = ir.ArrayAttr.get(
-      [
-          mhlo.OutputOperandAlias.get(
-              output_tuple_indices=[output],
-              operand_index=input,
-              operand_tuple_indices=[],
-          )
-          for input, output in input_output_aliases
-      ]
-  )
-
-  compressed_proto = zlib.compress(kernel_call.to_proto(b""))
-  out = mhlo.CustomCallOp(
-      [out_type],
-      in_nodes,
-      call_target_name=ir.StringAttr.get("triton_kernel_call"),
-      has_side_effect=ir.BoolAttr.get(False),
-      backend_config=ir.StringAttr.get(compressed_proto),
-      api_version=mlir.i32_attr(2),  # API_VERSION_STATUS_RETURNING
-      called_computations=ir.ArrayAttr.get([]),
+  return jaxlib.hlo_helpers.custom_call(
+      call_target_name="triton_kernel_call",
+      out_types=out_types,
+      operands=in_nodes,
+      backend_config=zlib.compress(kernel_call.to_proto(b"")),
       operand_layouts=triton_utils.avals_to_layouts(ctx.avals_in),
       result_layouts=triton_utils.avals_to_layouts(ctx.avals_out),
-      output_operand_aliases=output_operand_aliases,
+      operand_output_aliases=dict(input_output_aliases),
   )
-  results = [
-      mhlo.GetTupleElementOp(out, mlir.i32_attr(i)).result
-      for i in range(len(out_shapes))
-  ]
-  return results
 
 
 mlir.register_lowering(pallas_call_p, pallas_call_lowering, platform="cuda")

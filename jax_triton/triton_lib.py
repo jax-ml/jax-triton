@@ -27,7 +27,6 @@ from jax._src import core
 from jax._src import state
 from jax._src import util
 from jax._src.lib.mlir import ir
-from jax._src.lib.mlir.dialects import mhlo
 import jax.dlpack
 from jax.interpreters import mlir
 from jax.interpreters import xla
@@ -389,32 +388,15 @@ def triton_kernel_call_lowering(
       for shape in out_shapes
   ]
 
-  output_operand_aliases = []
-  for input_idx, output_idx in input_output_aliases:
-    if (len(out_shapes) == 1) and (output_idx != 0):
-      raise ValueError("output index out of range")
-
-    output_operand_aliases.append(
-        mhlo.OutputOperandAlias.get(
-            output_tuple_indices=[output_idx] if len(out_shapes) > 1 else [],
-            operand_index=input_idx,
-            operand_tuple_indices=[],
-        )
-    )
-
-  compressed_proto = zlib.compress(kernel_call.to_proto(serialized_metadata))
-  return mhlo.CustomCallOp(
-      out_types,
-      array_args,
-      call_target_name=ir.StringAttr.get(call_name),
-      has_side_effect=ir.BoolAttr.get(False),
-      backend_config=ir.StringAttr.get(compressed_proto),
-      api_version=mlir.i32_attr(2),  # API_VERSION_STATUS_RETURNING
-      called_computations=ir.ArrayAttr.get([]),
+  return jaxlib.hlo_helpers.custom_call(
+      call_target_name=call_name,
+      out_types=out_types,
+      operands=array_args,
+      backend_config=zlib.compress(kernel_call.to_proto(serialized_metadata)),
       operand_layouts=utils.avals_to_layouts(ctx.avals_in),
       result_layouts=utils.avals_to_layouts(ctx.avals_out),
-      output_operand_aliases=ir.ArrayAttr.get(output_operand_aliases),
-  ).results
+      operand_output_aliases=dict(input_output_aliases),
+  )
 
 
 mlir.register_lowering(triton_kernel_call_p, triton_kernel_call_lowering)
