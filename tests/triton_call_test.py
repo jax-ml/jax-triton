@@ -300,7 +300,7 @@ class TritonKernelCallTest(parameterized.TestCase):
     np.testing.assert_array_equal(a, x)
     np.testing.assert_array_equal(a, y)
 
-  def test_kernel_cache(self):
+  def test_kernel_cache_equivalent_kernels(self):
     # Create unique JITFunction to avoid conflicts with other tests.
     my_add_kernel = triton.jit(add_kernel.fn)
     fn1 = jax.jit(lambda x, y: add(x, y, BLOCK_SIZE=32, kernel=my_add_kernel))
@@ -310,16 +310,16 @@ class TritonKernelCallTest(parameterized.TestCase):
     x1, y1 = create_random_inputs([42])
     x2, y2 = create_random_inputs([43])
 
-    compile_ttir_inplace = jt.triton_lib.compile_ttir_inplace
+    compile_ttir_to_ptx_inplace = jt.triton_lib.compile_ttir_to_ptx_inplace
 
     call_count = [0]
 
     def my_compile(*args, **kwargs):
       call_count[0] += 1
-      return compile_ttir_inplace(*args, **kwargs)
+      return compile_ttir_to_ptx_inplace(*args, **kwargs)
 
     with mock.patch.object(
-        jt.triton_lib, "compile_ttir_inplace", new=my_compile
+        jt.triton_lib, "compile_ttir_to_ptx_inplace", new=my_compile
     ):
       _ = fn1(x1, y1)
       self.assertEqual(call_count[0], 1)
@@ -328,7 +328,7 @@ class TritonKernelCallTest(parameterized.TestCase):
       _ = fn3(x1, y1)
       self.assertEqual(call_count[0], 2)  # Third call misses (block size).
 
-  def test_kernel_call_cache(self):
+  def test_kernel_cache_same_kernel_different_params(self):
     @triton.jit
     def silly_add_kernel(x_ptr, y_ptr, output_ptr):
       pid = tl.program_id(axis=0)

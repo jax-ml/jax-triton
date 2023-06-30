@@ -521,7 +521,7 @@ class PallasCallTest(PallasTest):
     @functools.partial(
         self.pallas_call,
         out_shape=out_shape,
-        grid=1, debug=True)
+        grid=1, debug=False)
     def reduce(x_ref, y_ref):
       x = pl.load(x_ref, (jnp.arange(m),))
       y = jnp.sum(x, axis=-1)
@@ -680,6 +680,31 @@ class PallasControlFlowTest(PallasTest):
     if self.INTERPRET:
       self.skipTest("Control flow not supported in interpreter mode yet.")
 
+  def test_loop_with_float64_carry(self):
+    # Test that the jnp.zeros(f64) loop init_val is actually f64, and that
+    # fori_loop handles i64 index variables, i.e. error: 'scf.for' op  along
+    # control flow edge from Region #0 to Region #0: source type #0
+    # 'tensor<4xf64>' should match input type #0 'tensor<4xf32>'
+    orig_val = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+      @functools.partial(self.pallas_call,
+                         out_shape=jax.ShapeDtypeStruct((4,), jnp.float64),
+                         grid=1,
+                         debug=False)
+      def f(x_ref, y_ref):
+        def body(i, acc):
+          # TODO(sharadmv): DCE loop index but retain carry breaks scan pattern.
+          # return acc + x_ref[...]
+          return acc + x_ref[...] + i * 0
+        y_ref[...] = lax.fori_loop(
+            0, 3, body, jnp.zeros((4,), jnp.float64))
+
+      np.testing.assert_allclose(np.arange(1, 5.) * 3,
+                                 f(jnp.arange(1, 5., dtype=jnp.float64)))
+    finally:
+      jax.config.update("jax_enable_x64", orig_val)
+
   def test_cond_simple(self):
     arg = jnp.float32(0.)
     @functools.partial(self.pallas_call,
@@ -821,7 +846,7 @@ class PallasControlFlowTest(PallasTest):
             pl.BlockSpec(lambda i: (i,), (bx,))],  # x
         out_specs=pl.BlockSpec(lambda i: (i,), (bx,)),
         grid=jt.cdiv(x.shape[0], bx),
-        debug=True)
+        debug=False)
     def f(program_ref, params_ref, x_ref, out_ref):
       x = x_ref[...]
 
@@ -1044,15 +1069,23 @@ class PallasControlFlowTest(PallasTest):
 class PallasControlFlowInterpreterTest(PallasControlFlowTest):
   INTERPRET = True
 
-class PallasCallAutodifferentiationTest(PallasTest):
-
-  @parameterized.named_parameters(*[
+AD_TEST_CASES = [
     ("square", lambda x: x * x),
+    ("square_pow", lambda x: x ** 2),
+    ("square_fn", jnp.square),
     ("add_one", lambda x: x + 1.),
     ("exp", jnp.exp),
-    # ("tanh", jnp.tanh),  TODO(sharadmv): re-enable this case when libdevice is
-    # updated
-    ])
+    ("reciprocal", jnp.reciprocal),
+    ("one_over_x", lambda x: 1. / x),
+    ("recip_exp_sq", lambda x: jnp.reciprocal(jnp.exp(x) ** 2)),
+    ("exp_neg_sq", lambda x: jnp.exp(-x) ** 2),
+    ("sin", jnp.sin),
+    ("tanh", jnp.tanh),
+]
+
+class PallasCallAutodifferentiationTest(PallasTest):
+
+  @parameterized.named_parameters(*AD_TEST_CASES)
   def test_jvp(self, impl):
     @functools.partial(
         self.pallas_call, out_shape=jax.ShapeDtypeStruct((), jnp.float32),
@@ -1072,13 +1105,24 @@ class PallasCallAutodifferentiationTest(PallasTest):
                                rtol=1e-5)
     jtu.check_grads(pallas_impl, (x,), modes=["fwd"], order=2)
 
-  @parameterized.named_parameters(*[
-    ("square", lambda x: x * x),
-    ("add_one", lambda x: x + 1.),
-    ("exp", jnp.exp),
-    # ("tanh", jnp.tanh),  TODO(sharadmv): re-enable this case when libdevice is
-    # updated
-    ])
+  @parameterized.named_parameters(*AD_TEST_CASES)
+  def test_pallas_around_grad(self, impl):
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((), jnp.float32),
+        name=self.id().split(".")[-1],
+        debug=True,
+        grid=1)
+    def pallas_impl(x_ref, o_ref):
+      x = x_ref[()]
+      o_ref[()] = jax.grad(impl)(x)
+
+    x = random.normal(random.PRNGKey(0))
+    out_grad = pallas_impl(x)
+    out_grad_ref = jax.grad(impl)(x)
+    np.testing.assert_allclose(out_grad, out_grad_ref, atol=1e-5, rtol=1e-5)
+
+  @parameterized.named_parameters(*AD_TEST_CASES)
   def test_jvp_slice(self, impl):
     @functools.partial(
         self.pallas_call, out_shape=jax.ShapeDtypeStruct((4,), jnp.float32),

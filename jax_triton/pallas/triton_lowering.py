@@ -16,8 +16,11 @@
 import dataclasses
 import functools
 import operator
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Optional, Sequence, Tuple
+import zlib
+
 import jax
+import jaxlib
 from jax import lax
 from jax import tree_util
 from jax._src import ad_checkpoint
@@ -31,13 +34,12 @@ from jax._src import util
 from jax._src.lax.control_flow import for_loop
 from jax._src.lib import gpu_triton as triton_kernel_call_lib
 from jax._src.lib.mlir import ir
-from jax._src.lib.mlir.dialects import mhlo
 from jax._src.state import AbstractRef
 from jax._src.state import discharge
 from jax._src.state import primitives as sp
-from jax._src.util import split_list
 from jax._src.util import merge_lists
 from jax._src.util import partition_list
+from jax._src.util import split_list
 from jax._src.util import weakref_lru_cache
 from jax.interpreters import mlir
 from jax.interpreters import partial_eval as pe
@@ -47,7 +49,7 @@ from jax_triton import utils as triton_utils
 from jax_triton.pallas import core as pallas_core
 from jax_triton.pallas import pallas_call_p
 from jax_triton.pallas import primitives
-from jax_triton.triton_lib import compile_ttir_inplace
+from jax_triton.triton_lib import compile_ttir_to_ptx_inplace
 from jax_triton.triton_lib import get_triton_type
 import numpy as np
 from triton._C.libtriton.triton import ir as tl_ir
@@ -106,9 +108,11 @@ class TritonLoweringResult:
 
 @dataclasses.dataclass
 class TritonCompilationResult:
-  cubin: bytes
-  name: str
-  shared_mem: int
+  kernel_name: str
+  ttir: str
+  ptx: str
+  shared_mem_bytes: int
+  compute_capability: int
   lowering_result: TritonLoweringResult
 
 
@@ -223,7 +227,14 @@ def lower_jaxpr_to_triton_ir(
 
   def read_env(var: jax_core.Atom):
     if type(var) is jax_core.Literal:
-      return tl.core._to_tensor(np.array(var.val).tolist(), builder=ctx.builder)
+      t = tl.core._to_tensor(np.array(var.val).tolist(), builder=ctx.builder)
+      dst_ty = code_gen.str_to_ty(get_triton_type(var.aval)).element_ty
+      if t.type.scalar != dst_ty:
+        # _to_tensor(np.array(var.val).tolist()) can be lossy e.g. np.float64
+        # comes out of .tolist() as list[float], which then comes out of
+        # _to_tensor as a block of f32.
+        t = tl.semantic.cast(t, dst_ty, ctx.builder)
+      return t
     return env[var]
 
   def read_block_info_env(var: jax_core.Atom):
@@ -434,7 +445,9 @@ def _integer_pow_lowering_rule(ctx: TritonLoweringRuleContext, a, *, y):
   if y == 3:
     return a.__mul__(a.__mul__(a, _builder=ctx.builder), _builder=ctx.builder)
   if y == -2:
-    return tl.math.rsqrt(a, _builder=ctx.builder)
+    one_ = tl.core._to_tensor(1.0, ctx.builder)
+    a_sq = a.__mul__(a, _builder=ctx.builder)
+    return one_.__truediv__(a_sq, _builder=ctx.builder)
   return tl.math.pow(a, y, _builder=ctx.builder)
 
 
@@ -470,12 +483,18 @@ def _convert_element_type_lowering_rule(
     return a
   if new_dtype == jnp.float32:
     new_dtype = tl.float32
+  elif new_dtype == jnp.float64:
+    new_dtype = tl.float64
   elif new_dtype == jnp.float16:
     new_dtype = tl.float16
   elif new_dtype == jnp.bfloat16:
     new_dtype = tl.bfloat16
   elif new_dtype == jnp.int32:
     new_dtype = tl.int32
+  elif new_dtype == jnp.int64:
+    new_dtype = tl.int64
+  else:
+    raise ValueError(f"Unhandled dtype: {new_dtype}")
   return tl.semantic.cast(a, new_dtype, ctx.builder)
 
 
@@ -603,8 +622,10 @@ def _reshape_lowering_rule(
   if tuple(s.value for s in a.shape) == dst_shp:
     return a
   if not a.type.is_block():
-    return tl.broadcast_to(a, [tl.constexpr(s) for s in dst_shp],
-                           _builder=ctx.builder)
+    if dst_shp:
+      return tl.broadcast_to(a, [tl.constexpr(s) for s in dst_shp],
+                             _builder=ctx.builder)
+    return a
   # Expand-dims or reduce-sum to handle singleton dims.
   if ([s.value for s in a.shape if s.value != 1] ==
       [s for s in dst_shp if s != 1]):
@@ -1207,11 +1228,15 @@ triton_lowering_rules[for_loop.for_p] = _for_lowering_rule
 def _lower_jaxpr_to_for_loop(ctx: TritonLoweringRuleContext, jaxpr: jax_core.Jaxpr,
                              lower_bound, upper_bound, consts, *args,
                              has_loop_index: bool,
-                             step: int = 1):
+                             step: int = 1,
+                             bound_type: tl.dtype = tl.int32):
   if step != 1:
     raise NotImplementedError
   builder = ctx.builder
-  step = builder.get_int32(step)
+  if bound_type == tl.int64:
+    step = builder.get_int64(step)
+  else:
+    step = builder.get_int32(step)
   current_block = builder.get_insertion_block()
   for_op = builder.create_for_op(
       lower_bound, upper_bound, step, [arg.handle for arg in args]
@@ -1269,10 +1294,14 @@ def _scan_lowering_rule(
     in_index_var = jaxpr.invars[num_consts]
     out_index_var = jaxpr.outvars[0]
     # Check that the loop index argument is an int32 scalar
-    if in_index_var.aval.shape != () or in_index_var.aval.dtype != jnp.int32:
-      raise NotImplementedError
-    if out_index_var.aval.shape != () or out_index_var.aval.dtype != jnp.int32:
-      raise NotImplementedError
+    if (in_index_var.aval.shape != () or
+        in_index_var.aval.dtype not in (jnp.int32, jnp.int64)):
+      raise NotImplementedError(
+          f"not a fori_loop index in: {in_index_var.aval} {jaxpr=}")
+    if (out_index_var.aval.shape != () or
+        out_index_var.aval.dtype not in (jnp.int32, jnp.int64)):
+      raise NotImplementedError(
+          f"not a fori_loop index out: {out_index_var.aval} {jaxpr=}")
     # Look for the equation that increments the loop index
     for i, eqn in enumerate(jaxpr.eqns):
       if eqn.primitive == lax.add_p:
@@ -1293,6 +1322,7 @@ def _scan_lowering_rule(
     lower_bound = lb.handle
     ub = lb.__add__(tl.constexpr(length), _builder=builder)
     upper_bound = ub.handle
+    bound_type = ub.type
     has_loop_index = True
   else:
     # If there's no carry, the loop index has been DCEd and the body does *not*
@@ -1300,14 +1330,15 @@ def _scan_lowering_rule(
     consts, args = args, []
     lower_bound = builder.get_int32(0)
     upper_bound = builder.get_int32(length)
+    bound_type = tl.int32
     has_loop_index = False
   for_out = _lower_jaxpr_to_for_loop(
-    ctx, jaxpr, lower_bound, upper_bound, consts, *args,
-    has_loop_index=has_loop_index, step=1)
+      ctx, jaxpr, lower_bound, upper_bound, consts, *args,
+      has_loop_index=has_loop_index, step=1, bound_type=bound_type)
   if has_loop_index:
     # Need to return the final loop index value if the outer scan expects
     # it as an output
-    return [tl.core.tensor(upper_bound, tl.int32), *for_out]
+    return [tl.core.tensor(upper_bound, bound_type), *for_out]
   return for_out
 
 triton_lowering_rules[lax.scan_p] = _scan_lowering_rule
@@ -1323,9 +1354,9 @@ def _maybe_pattern_match_fori_loop(ctx: TritonLoweringRuleContext, *args,
     return None
   # Check that the first two carry values are scalar ints
   a1, a2 = cond_in_avals[:2]
-  if a1.shape != () or a1.dtype != jnp.int32:
+  if a1.shape != () or a1.dtype not in (jnp.int32, jnp.int64):
     return None
-  if a2.shape != () or a2.dtype != jnp.int32:
+  if a2.shape != () or a2.dtype not in (jnp.int32, jnp.int64):
     return None
   # Check that the only eqn in the cond checks the loop index condition
   v1, v2 = cond_invars[:2]
@@ -1375,7 +1406,7 @@ def _maybe_pattern_match_fori_loop(ctx: TritonLoweringRuleContext, *args,
                                  *args_block_infos[2:]])
   for_out = _lower_jaxpr_to_for_loop(ctx, jaxpr, lb.handle, ub.handle,
                                      body_consts, *args, has_loop_index=True,
-                                     step=1)
+                                     step=1, bound_type=lb.type)
   return [ub, ub, *for_out]
 
 def _while_lowering_rule(
@@ -1548,15 +1579,17 @@ def compile_jaxpr(
       jaxpr, in_shapes, grid_mapping, name
   )
   device = 0
-  ttir = lowering_result.module
-  cubin, name, shared_mem = compile_ttir_inplace(
-      ttir,
+  ttir = str(lowering_result.module)
+  ptx, name, shared_mem_bytes, compute_capability = compile_ttir_to_ptx_inplace(
+      lowering_result.module,
       device=device,
       num_warps=num_warps,
       num_stages=num_stages,
       dump=debug,
   )
-  return TritonCompilationResult(cubin, name, shared_mem, lowering_result)
+  return TritonCompilationResult(
+      name, ttir, ptx, shared_mem_bytes, compute_capability, lowering_result
+  )
 
 
 def pallas_call_lowering(
@@ -1602,65 +1635,50 @@ def pallas_call_lowering(
       num_stages,
       debug=debug,
   )
-  cubin = compilation_result.cubin
-  name = compilation_result.name
-  shared_mem = compilation_result.shared_mem
-  lowering_result = compilation_result.lowering_result
+
   if debug:
-    lowering_result.module.dump()
-  out_type = ir.TupleType.get_tuple(
-      [
-          ir.RankedTensorType.get(
-              out_shape.shape, mlir.dtype_to_ir_type(out_shape.dtype)
-          )
-          for out_shape in ctx.avals_out
-      ]
-  )
+    compilation_result.lowering_result.module.dump()
+
   kernel = triton_kernel_call_lib.TritonKernel(
-      cubin, name, num_warps, shared_mem
+      compilation_result.kernel_name,
+      num_warps,
+      compilation_result.shared_mem_bytes,
+      compilation_result.ptx,
+      compilation_result.ttir,
+      compilation_result.compute_capability,
   )
+
   grid = triton_utils.normalize_grid(
       compilation_result.lowering_result.grid, metaparams={}
   )
+
   kernel_params = []
   for _ in range(len(in_shapes) + len(out_shapes)):
     kernel_params.append(
         triton_kernel_call_lib.create_array_parameter(
             0,  # bytes to zero  # TODO(cjfj): Expose through user API.
-            True,  # divisible by 16
+            16,  # divisible by 16
         )
     )
+
   kernel_call = triton_kernel_call_lib.TritonKernelCall(
       kernel, grid[0], grid[1], grid[2], kernel_params
   )
-  ctx.module_context.add_keepalive(kernel_call)
-  output_operand_aliases = ir.ArrayAttr.get(
-      [
-          mhlo.OutputOperandAlias.get(
-              output_tuple_indices=[output],
-              operand_index=input,
-              operand_tuple_indices=[],
-          )
-          for input, output in input_output_aliases
-      ]
-  )
-  out = mhlo.CustomCallOp(
-      [out_type],
-      in_nodes,
-      call_target_name=ir.StringAttr.get("triton_kernel_call"),
-      has_side_effect=ir.BoolAttr.get(False),
-      backend_config=ir.StringAttr.get(kernel_call.descriptor),
-      api_version=mlir.i32_attr(2),  # API_VERSION_STATUS_RETURNING
-      called_computations=ir.ArrayAttr.get([]),
+
+  out_types = [
+      ir.RankedTensorType.get(shape.shape, mlir.dtype_to_ir_type(shape.dtype))
+      for shape in out_shapes
+  ]
+
+  return jaxlib.hlo_helpers.custom_call(
+      call_target_name="triton_kernel_call",
+      out_types=out_types,
+      operands=in_nodes,
+      backend_config=zlib.compress(kernel_call.to_proto(b"")),
       operand_layouts=triton_utils.avals_to_layouts(ctx.avals_in),
       result_layouts=triton_utils.avals_to_layouts(ctx.avals_out),
-      output_operand_aliases=output_operand_aliases,
+      operand_output_aliases=dict(input_output_aliases),
   )
-  results = [
-      mhlo.GetTupleElementOp(out, mlir.i32_attr(i)).result
-      for i in range(len(out_shapes))
-  ]
-  return results
 
 
 mlir.register_lowering(pallas_call_p, pallas_call_lowering, platform="cuda")
