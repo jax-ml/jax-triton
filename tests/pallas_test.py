@@ -201,6 +201,25 @@ class PallasCallTest(PallasTest):
       idx = jnp.arange(i, i + 2)
       np.testing.assert_allclose(index(x, idx), x[idx])
 
+  def test_where_broadcasting(self):
+    @functools.partial(
+        self.pallas_call,
+        out_shape=jax.ShapeDtypeStruct((4, 2, 2), jnp.float32),
+        grid=1)
+    def copyitem(x_ref, in_idx_ref, out_idx_ref, o_ref):
+      mask = (jnp.arange(o_ref.shape[0]) == out_idx_ref[()])[:, None, None]
+      o_ref[...] = jnp.where(mask, x_ref[in_idx_ref[()]], 0)
+
+    x = jnp.arange(7 * 2 * 2.).reshape(7, 2, 2)
+    for ii in range(7):
+      for oi in range(4):
+        out = copyitem(x, ii, oi)
+        self.assertEqual((4, 2, 2), out.shape)
+        np.testing.assert_allclose(out[:oi], jnp.zeros_like(out[:oi]))
+        np.testing.assert_allclose(out[oi], x[ii])
+        np.testing.assert_allclose(out[oi + 1:], jnp.zeros_like(out[oi + 1:]))
+
+
   @parameterized.parameters(*[
     ((), (2,), ()),
     ((1,), (2,), (0,)),

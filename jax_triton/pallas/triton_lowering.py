@@ -538,6 +538,13 @@ def bitwise_and_lowering_rule(ctx: TritonLoweringRuleContext, a, b):
 triton_lowering_rules[jax.lax.and_p] = bitwise_and_lowering_rule
 
 
+def bitwise_or_lowering_rule(ctx: TritonLoweringRuleContext, a, b):
+  return a.__or__(b, _builder=ctx.builder)
+
+
+triton_lowering_rules[jax.lax.or_p] = bitwise_or_lowering_rule
+
+
 def select_n_lowering_rule(ctx: TritonLoweringRuleContext, pred, a, b):
   return tl.semantic.where(pred, b, a, ctx.builder)
 
@@ -606,8 +613,7 @@ triton_lowering_rules[jax.lax.broadcast_in_dim_p] = (
 
 def _squeeze_lowering_rule(ctx: TritonLoweringRuleContext, a, *, dimensions):
   del dimensions
-  shape = [tl.constexpr(s) for s in ctx.avals_out[0].shape]
-  return tl.reshape(a, shape, _builder=ctx.builder)
+  return _reshape_lowering_rule(ctx, a, new_sizes=None, dimensions=None)
 
 
 triton_lowering_rules[lax.squeeze_p] = _squeeze_lowering_rule
