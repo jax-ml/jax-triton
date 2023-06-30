@@ -69,9 +69,6 @@ def mha_forward_kernel(
       span_q = start_q * block_q + jnp.arange(block_q)
       span_k = start_k * block_k + jnp.arange(block_k)
       qk = jnp.where(span_q[:, None] >= span_k[None, :], qk, float('-inf'))
-    # Bring closer to XLA:GPU numerics.
-    qk = qk.astype(q_ref.dtype)
-    qk = qk.astype(jnp.float32)
     m_curr = jnp.maximum(jnp.max(qk, axis=1), m_prev)
     l_prev *= jnp.exp(m_prev - m_curr)
     p = jnp.exp(qk - m_curr[:, None])
@@ -280,8 +277,6 @@ def mha_backward_kernel(
       dv, dk = carry
       q = pl.load(q_ref, (pl.ds(start_q * block_q, block_q), slice(None)))
       qk = pl.dot(q, k.T)
-      qk = qk.astype(q_ref.dtype)
-      qk = qk.astype(jnp.float32)
       if sm_scale != 1.0:
         qk *= sm_scale
 
