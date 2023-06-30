@@ -116,6 +116,10 @@ class TritonCompilationResult:
   lowering_result: TritonLoweringResult
 
 
+class TritonLoweringException(Exception):
+  pass
+
+
 def _eval_index_map(
     ctx: TritonModuleContext, idx, block_mapping: Optional[BlockMapping]
 ):
@@ -261,7 +265,17 @@ def lower_jaxpr_to_triton_ir(
     rule_ctx = TritonLoweringRuleContext(
         ctx, avals_in, avals_out, eqn_block_infos
     )
-    outvals = rule(rule_ctx, *invals, **eqn.params)
+    try:
+      outvals = rule(rule_ctx, *invals, **eqn.params)
+    except TritonLoweringException:
+      raise  # We only add the extra info to the innermost exception.
+    except Exception as e:
+      raise TritonLoweringException(
+          f"Exception while lowering eqn:\n  {eqn}\n"
+          f"With context:\n  {rule_ctx}\n"
+          f"With inval shapes={map(lambda t: t.shape, invals)}\n"
+          f"With inval types={map(lambda t: t.type, invals)}\n"
+          f"In jaxpr:\n{jaxpr}") from e
     if eqn.primitive.multiple_results:
       map(write_env, eqn.outvars, outvals)
     else:
