@@ -7,7 +7,7 @@ requires-python = ">=3.8,<3.11"
 dependencies = [
   "absl-py>=1.4.0",
   "jax @ git+https://github.com/google/jax@d2d30bc4fdd721632af5d0974588cfd71d10b54b",
-  "triton @ git+https://github.com/openai/triton@acf1ede5bfd0729bb99e848fb8edace0a24da8d4#subdirectory=python",
+  "triton @ git+https://github.com/openai/triton@55eb32dff93f8d63993cfe33c8e66167ca50652f#subdirectory=python",
 ]
 
 [build-system]
