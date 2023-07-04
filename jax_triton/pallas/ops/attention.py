@@ -90,6 +90,7 @@ def mha_forward_kernel(
 
     v = pl.load(v_ref, (pl.dslice(start_k * block_k, block_k), pl.dslice(block_d)))
     acc = acc + pl.dot(p.astype(v.dtype), v)
+    m_prev = m_tmp
 
     return acc, m_prev, l_prev
   if causal:
