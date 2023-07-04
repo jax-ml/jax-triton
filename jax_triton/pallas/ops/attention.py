@@ -74,7 +74,7 @@ def mha_forward_kernel(
       qk = jnp.where(span_q[:, None] >= span_k[None, :], qk, float('-inf'))
 
     m_tmp = m_prev
-    m_prev += jnp.maximum(jnp.max(qk, axis=1), l_prev)
+    m_prev = jnp.maximum(jnp.max(qk, axis=1), l_prev)
     acc *= jnp.exp(m_tmp - m_prev)[:, None]
 
     p = jnp.exp(qk - m_tmp[:, None])
