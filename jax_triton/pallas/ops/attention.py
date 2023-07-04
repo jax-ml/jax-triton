@@ -37,7 +37,7 @@ def mha_forward_kernel(
   # acc is the buffer where we accumulate the output on sram.
   # m_i and l_i (see FlashAttention paper) are updated during the k,v loop.
   m_i = jnp.zeros(block_q, dtype=jnp.float32) - float('inf')
-  l_i = jnp.zeros(block_q, dtype=jnp.float32)
+  l_i = jnp.zeros(block_q, dtype=jnp.float32) - float('inf')
   # acc is the buffer where we accumulate the output on sram.
   acc = jnp.zeros((block_q, block_d), dtype=jnp.float32)
 
