@@ -100,7 +100,7 @@ def mha_forward_kernel(
     pl.store(m_ref, (pl.ds(start_q * block_q, block_q),), m_i)
 
   # Write output to dram.
-  acc *= jnp.exp(-l_i)[:, None]
+  acc *= jnp.exp(jnp.negative(l_i))[:, None]
   acc = acc.astype(o_ref.dtype)
   pl.store(o_ref, (pl.dslice(start_q * block_q, block_q), pl.dslice(None)), acc)
 
