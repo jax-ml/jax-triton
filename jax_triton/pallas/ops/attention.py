@@ -57,8 +57,6 @@ def mha_forward_kernel(
     qk += pl.dot(q, k.T)   # [block_q, block_k]
 
 
-    m_tmp = jnp.zeros(block_q, dtype=jnp.float32)
-
     if sm_scale != 1.:
       qk *= sm_scale # [block_q, block_k]
 
@@ -73,15 +71,15 @@ def mha_forward_kernel(
       span_k = start_k * block_k + jnp.arange(block_k)
       qk = jnp.where(span_q[:, None] >= span_k[None, :], qk, float('-inf'))
 
-    m_tmp = jnp.maximum(jnp.max(qk, axis=1), l_prev)
-    acc *= jnp.exp(m_prev - m_tmp)[:, None]
+    m_curr = jnp.maximum(jnp.max(qk, axis=1), l_prev)
+    acc *= jnp.exp(m_prev - m_curr)[:, None]
 
-    p = jnp.exp(qk - m_tmp[:, None])
-    l_prev += m_prev - m_tmp
+    p = jnp.exp(qk - m_curr[:, None])
+    l_prev += m_prev - m_curr
     l_prev = jnp.exp(l_prev)
     l_prev += jnp.sum(p, axis=1)
     l_prev = jnp.log(l_prev)
-    l_prev += m_tmp
+    l_prev += m_curr
 
     # l_rcp = 1. / l_curr
     # p = p * l_rcp[:, None]
@@ -90,9 +88,8 @@ def mha_forward_kernel(
 
     v = pl.load(v_ref, (pl.dslice(start_k * block_k, block_k), pl.dslice(block_d)))
     acc = acc + pl.dot(p.astype(v.dtype), v)
-    m_prev = m_tmp
 
-    return acc, m_prev, l_prev
+    return acc, m_curr, l_prev
   if causal:
     upper_bound = lax.div(block_q * start_q, block_k) + 1
   else:
