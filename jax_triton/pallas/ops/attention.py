@@ -291,6 +291,7 @@ def mha_backward_kernel(
         span_q = start_q * block_q + jnp.arange(block_q)
         qk = jnp.where(span_q[:, None] >= span_k[None, :], qk, float('-inf'))
       m = pl.load(m_ref, (pl.ds(start_q * block_q, block_q),))
+      l = pl.load(l_ref, (pl.ds(start_q * block_q, block_q),))
       p = jnp.exp(qk - m[:, None] - l[:, None])
       do = pl.load(do_scaled_ref, (pl.ds(start_q * block_q, block_q), slice(None)))
       dv = dv + pl.dot(p.astype(do.dtype).T, do)
