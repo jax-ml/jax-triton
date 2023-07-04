@@ -239,7 +239,7 @@ def _preprocess_backward(out, do, block_q: int,
       jax.ShapeDtypeStruct(shape=(batch_size, num_heads, seq_len), #
                            dtype=jnp.float32),
   ]
-  do_scaled, delta = pl.pallas_call(
+  delta = pl.pallas_call(
       functools.partial(_preprocess_backward_kernel, block_q=block_q),
       grid=(jt.cdiv(seq_len, block_q), batch_size, num_heads),
       in_specs=[
