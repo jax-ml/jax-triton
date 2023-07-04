@@ -75,7 +75,7 @@ def mha_forward_kernel(
     acc *= jnp.exp(m_prev - m_curr)[:, None]
 
     p = jnp.exp(qk - m_curr[:, None])
-    l_prev += m_prev - m_curr
+    l_prev -= m_prev
     l_prev = jnp.exp(l_prev)
     l_prev += jnp.sum(p, axis=1)
     l_prev = jnp.log(l_prev)
