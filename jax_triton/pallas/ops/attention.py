@@ -70,12 +70,13 @@ def mha_forward_kernel(
       span_k = start_k * block_k + jnp.arange(block_k)
       qk = jnp.where(span_q[:, None] >= span_k[None, :], qk, float('-inf'))
 
-    m_curr = jnp.maximum(jnp.max(qk, axis=1), l_prev)
-    acc *= (m_prev - m_curr)
+    m_curr = jnp.maximum(jnp.max(qk, axis=1), m_prev)
+    acc *= (m_prev - m_curr)[:, None]
 
     p = jnp.exp(qk - m_curr[:, None])
-    l_prev += m_prev - m_curr
-    l_curr = jnp.sum(p, axis=1) + jnp.exp(l_prev)
+    l_curr = l_prev + m_prev - m_curr
+    l_curr = jnp.exp(l_prev)
+    l_curr += jnp.sum(p, axis=1)
     l_curr = jnp.log(l_curr)
 
     # l_rcp = 1. / l_curr
