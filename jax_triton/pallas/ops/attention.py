@@ -331,7 +331,7 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
   batch_size, seq_len, num_heads, head_dim = q.shape
   block_q = min(block_q, seq_len)
   block_k = min(block_k, seq_len)
-  delta = _preprocess_backward(out, do, l, block_q, debug, interpret)
+  delta = _preprocess_backward(out, do, block_q, debug, interpret)
 
   if backward_pass_impl == "xla":
     return jax.vjp(functools.partial(mha_reference, sm_scale=sm_scale,
