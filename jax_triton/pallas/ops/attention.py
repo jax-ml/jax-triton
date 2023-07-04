@@ -331,7 +331,7 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
   batch_size, seq_len, num_heads, head_dim = q.shape
   block_q = min(block_q, seq_len)
   block_k = min(block_k, seq_len)
-  delta = _preprocess_backward(out, do, block_q, debug, interpret)
+  (delta) = _preprocess_backward(out, do, block_q, debug, interpret)
 
   if backward_pass_impl == "xla":
     return jax.vjp(functools.partial(mha_reference, sm_scale=sm_scale,
@@ -363,16 +363,16 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
         grid=grid,
         out_shape=out_shapes,
         in_specs=[
-          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-          bias_block_spec,
-          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-          pl.BlockSpec(lambda j, k: (j, k, 0), (None, None, seq_len)),
-          pl.BlockSpec(lambda j, k: (j, k, 0), (None, None, seq_len)),
-          pl.BlockSpec(lambda j, k: (j, k, 0), (None, None, seq_len)),
-          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
+          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)), # q
+          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)), # k
+          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)), # v
+          bias_block_spec, # bias
+          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)), # out
+          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)), # do
+          pl.BlockSpec(lambda j, k: (j, k, 0), (None, None, seq_len)), # l
+          pl.BlockSpec(lambda j, k: (j, k, 0), (None, None, seq_len)), # m
+          pl.BlockSpec(lambda j, k: (j, k, 0), (None, None, seq_len)), # delta
+          pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)), # dq
         ],
         out_specs=[
           pl.BlockSpec(lambda j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
