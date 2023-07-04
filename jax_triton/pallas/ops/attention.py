@@ -69,18 +69,23 @@ def mha_forward_kernel(
       span_q = start_q * block_q + jnp.arange(block_q)
       span_k = start_k * block_k + jnp.arange(block_k)
       qk = jnp.where(span_q[:, None] >= span_k[None, :], qk, float('-inf'))
-    m_curr = jnp.maximum(jnp.max(qk, axis=1), m_prev)
-    l_prev *= jnp.exp(m_prev - m_curr)
-    p = jnp.exp(qk - m_curr[:, None])
-    l_curr = jnp.sum(p, axis=1) + l_prev
 
-    l_rcp = 1. / l_curr
-    p = p * l_rcp[:, None]
-    acc *= (l_prev * l_rcp)[:, None]
-    p = p.astype(jnp.float16)
+    m_curr = jnp.maximum(jnp.max(qk, axis=1), l_prev)
+    acc *= (m_prev - m_curr)[:, None]
+
+    p = jnp.exp(qk - m_curr[:, None])
+    l_prev += m_prev - m_curr
+    l_curr = jnp.sum(p, axis=1) + jnp.exp(l_prev)
+    l_curr = jnp.log(l_curr)
+
+    # l_rcp = 1. / l_curr
+    # p = p * l_rcp[:, None]
+    # acc *= (l_prev * l_rcp)[:, None]
+    # p = p.astype(jnp.float16)
 
     v = pl.load(v_ref, (pl.dslice(start_k * block_k, block_k), pl.dslice(block_d)))
     acc = acc + pl.dot(p.astype(v.dtype), v)
+
     return acc, m_curr, l_curr
   if causal:
     upper_bound = lax.div(block_q * start_q, block_k) + 1
@@ -93,7 +98,9 @@ def mha_forward_kernel(
     l_ref, m_ref = residual_refs
     pl.store(l_ref, (pl.ds(start_q * block_q, block_q),), l_i)
     pl.store(m_ref, (pl.ds(start_q * block_q, block_q),), m_i)
+
   # Write output to dram.
+  acc *= jnp.exp(-li)
   acc = acc.astype(o_ref.dtype)
   pl.store(o_ref, (pl.dslice(start_q * block_q, block_q), pl.dslice(None)), acc)
 
@@ -208,8 +215,8 @@ def _mha_forward(q, k, v, bias, sm_scale: float, causal: bool, block_q: int,
       name="mha_forward")(q, k, v, bias)
   return out, (q, k, v, out, l, m, bias)
 
-def _preprocess_backward_kernel(out_ref, dout_ref, l_ref,
-                                new_dout_ref, delta_ref, *,
+def _preprocess_backward_kernel(out_ref, dout_ref,
+                                delta_ref, *,
                                 block_q: int):
   pid_m = pl.program_id(0)
 
@@ -217,21 +224,19 @@ def _preprocess_backward_kernel(out_ref, dout_ref, l_ref,
   # load
   o = pl.load(out_ref, (off_m, slice(None))).astype(jnp.float32)
   do = pl.load(dout_ref, (off_m, slice(None))).astype(jnp.float32)
-  denom = pl.load(l_ref, (off_m,)).astype(jnp.float32)
   # compute
-  do = do / denom[:, None]
   delta = jnp.sum(o * do, axis=1)
+
   # write-back
-  pl.store(new_dout_ref, (off_m, slice(None)),
-           do.astype(new_dout_ref.dtype))
   pl.store(delta_ref, (off_m,), delta.astype(delta_ref.dtype))
 
-def _preprocess_backward(out, do, l, block_q: int,
+
+def _preprocess_backward(out, do, block_q: int,
                          debug: bool, interpret: bool):
   batch_size, seq_len, num_heads, head_dim = out.shape
   out_shape = [
-      jax.ShapeDtypeStruct(do.shape, do.dtype),
-      jax.ShapeDtypeStruct(l.shape, l.dtype),
+      jax.ShapeDtypeStruct(shape=(batch_size, num_heads, seq_len), #
+                           dtype=jnp.float32),
   ]
   do_scaled, delta = pl.pallas_call(
       functools.partial(_preprocess_backward_kernel, block_q=block_q),
@@ -239,10 +244,8 @@ def _preprocess_backward(out, do, l, block_q: int,
       in_specs=[
         pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
         pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
-        pl.BlockSpec(lambda _, j, k: (j, k, 0), (None, None, seq_len)),
       ],
       out_specs=[
-        pl.BlockSpec(lambda _, j, k: (j, 0, k, 0), (None, seq_len, None, head_dim)),
         pl.BlockSpec(lambda _, j, k: (j, k, 0), (None, None, seq_len)),
       ],
       num_warps=4,
@@ -250,8 +253,8 @@ def _preprocess_backward(out, do, l, block_q: int,
       out_shape=out_shape,
       debug=debug,
       interpret=interpret,
-      name="mha_preprocess_backward")(out, do, l)
-  return do_scaled, delta
+      name="mha_preprocess_backward")(out, do)
+  return delta
 
 def mha_backward_kernel(
     # Inputs
@@ -288,7 +291,7 @@ def mha_backward_kernel(
         span_q = start_q * block_q + jnp.arange(block_q)
         qk = jnp.where(span_q[:, None] >= span_k[None, :], qk, float('-inf'))
       m = pl.load(m_ref, (pl.ds(start_q * block_q, block_q),))
-      p = jnp.exp(qk - m[:, None])
+      p = jnp.exp(qk - m[:, None] - l[:, None])
       do = pl.load(do_scaled_ref, (pl.ds(start_q * block_q, block_q), slice(None)))
       dv = dv + pl.dot(p.astype(do.dtype).T, do)
       di = pl.load(delta_ref, (pl.ds(start_q * block_q, block_q),))
@@ -326,7 +329,7 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
   batch_size, seq_len, num_heads, head_dim = q.shape
   block_q = min(block_q, seq_len)
   block_k = min(block_k, seq_len)
-  do_scaled, delta = _preprocess_backward(out, do, l, block_q, debug, interpret)
+  delta = _preprocess_backward(out, do, l, block_q, debug, interpret)
 
   if backward_pass_impl == "xla":
     return jax.vjp(functools.partial(mha_reference, sm_scale=sm_scale,
@@ -379,7 +382,7 @@ def _mha_backward(sm_scale: float, causal: bool, block_q: int, block_k: int,
         interpret=interpret,
         num_warps=num_warps,
         num_stages=1,
-        input_output_aliases={input_output_alias: 0})(q, k, v, bias, out, do_scaled, l, m, delta, dq)
+        input_output_aliases={input_output_alias: 0})(q, k, v, bias, out, do, l, m, delta, dq)
   else:
     raise ValueError(f"Invalid backward pass implementation: {backward_pass_impl}")
   return dq.astype(q.dtype), dk, dv, None
