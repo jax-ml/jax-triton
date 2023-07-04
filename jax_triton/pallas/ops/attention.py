@@ -266,7 +266,7 @@ def mha_backward_kernel(
     *, sm_scale: float, causal: bool, has_bias: bool,
     block_q: int, block_d: int, block_k: int
 ):
-  del out_ref, l_ref  # Not needed
+  del out_ref  # Not needed
   seq_len = q_ref.shape[0]
 
   def outer_loop(start_k, _):
