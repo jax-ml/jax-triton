@@ -3,12 +3,30 @@ name = "jax-triton"
 dynamic = ["version"]
 description = "JAX + OpenAI Triton integration"
 readme = "README.md"
-requires-python = ">=3.8,<3.11"
+requires-python = ">=3.9,<3.11"
 dependencies = [
   "absl-py>=1.4.0",
-  "jax @ git+https://github.com/google/jax@d2d30bc4fdd721632af5d0974588cfd71d10b54b",
-  "triton @ git+https://github.com/openai/triton@acf1ede5bfd0729bb99e848fb8edace0a24da8d4#subdirectory=python",
+  "jax @ git+https://github.com/google/jax@f7eef2eda8b2d36b7d6f928de0e8e726098bcf62",
+  "triton-nightly @ https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/07c94329-d4c3-4ad4-9e6b-f904a60032ec/pypi/download/triton-nightly/2.1.dev20230714011643/triton_nightly-2.1.0.dev20230714011643-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
 ]
+
+[project.optional-dependencies]
+cuda12 = [
+  "jaxlib@ https://storage.googleapis.com/jax-releases/nightly/cuda12/jaxlib-0.4.14.dev20230714+cuda12.cudnn89-cp310-cp310-manylinux2014_x86_64.whl"
+]
+cuda12_pip = [
+  "jaxlib[cuda12_pip] @ https://storage.googleapis.com/jax-releases/nightly/cuda12/jaxlib-0.4.14.dev20230714+cuda12.cudnn89-cp310-cp310-manylinux2014_x86_64.whl"
+]
+cuda11 = [
+  "jaxlib @ https://storage.googleapis.com/jax-releases/nightly/cuda118/jaxlib-0.4.14.dev20230714+cuda11.cudnn86-cp310-cp310-manylinux2014_x86_64.whl"
+]
+cuda11 = [
+  "jaxlib[cuda11_pip] @ https://storage.googleapis.com/jax-releases/nightly/cuda118/jaxlib-0.4.14.dev20230714+cuda11.cudnn86-cp310-cp310-manylinux2014_x86_64.whl"
+]
+tests = [
+  "pytest"
+]
+
 
 [build-system]
 requires = ["setuptools", "setuptools-scm", "cmake"]
