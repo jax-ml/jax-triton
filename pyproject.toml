@@ -12,7 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cuda12 = [
-  "jaxlib@ https://storage.googleapis.com/jax-releases/nightly/cuda12/jaxlib-0.4.14.dev20230714+cuda12.cudnn89-cp310-cp310-manylinux2014_x86_64.whl"
+  "jaxlib @ https://storage.googleapis.com/jax-releases/nightly/cuda12/jaxlib-0.4.14.dev20230714+cuda12.cudnn89-cp310-cp310-manylinux2014_x86_64.whl"
 ]
 cuda12_pip = [
   "jaxlib[cuda12_pip] @ https://storage.googleapis.com/jax-releases/nightly/cuda12/jaxlib-0.4.14.dev20230714+cuda12.cudnn89-cp310-cp310-manylinux2014_x86_64.whl"
@@ -20,7 +20,7 @@ cuda12_pip = [
 cuda11 = [
   "jaxlib @ https://storage.googleapis.com/jax-releases/nightly/cuda118/jaxlib-0.4.14.dev20230714+cuda11.cudnn86-cp310-cp310-manylinux2014_x86_64.whl"
 ]
-cuda11 = [
+cuda11_pip = [
   "jaxlib[cuda11_pip] @ https://storage.googleapis.com/jax-releases/nightly/cuda118/jaxlib-0.4.14.dev20230714+cuda11.cudnn86-cp310-cp310-manylinux2014_x86_64.whl"
 ]
 tests = [
