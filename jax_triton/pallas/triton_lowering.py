@@ -606,6 +606,13 @@ def _sqrt_lowering_rule(ctx: TritonLoweringRuleContext, a):
 triton_lowering_rules[lax.sqrt_p] = _sqrt_lowering_rule
 
 
+def _rsqrt_lowering_rule(ctx: TritonLoweringRuleContext, a):
+  return tl.math.rsqrt(a, _builder=ctx.builder)
+
+
+triton_lowering_rules[lax.rsqrt_p] = _rsqrt_lowering_rule
+
+
 def _neg_lowering_rule(ctx: TritonLoweringRuleContext, a):
   return a.__neg__(_builder=ctx.builder)
 
