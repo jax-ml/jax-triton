@@ -173,11 +173,6 @@ def lower_jaxpr_to_triton_module(
   ir_context = tl_ir.context()
   ir_context.load_triton()
   builder = tl_ir.builder(ir_context)
-  # TODO(sharadmv): handle multiple devices, right now we assume device 0
-  # which is fine when we have multiple of the same GPU but this won't work in
-  # general.
-  device = 0
-  builder.arch = triton_kernel_call_lib.get_compute_capability(device)
   module = builder.create_module()
   in_avals = [var.aval for var in jaxpr.invars]
   triton_types = [get_triton_type(x) for x in in_avals]

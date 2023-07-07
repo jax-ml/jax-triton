@@ -211,9 +211,8 @@ def get_or_create_triton_kernel(
     # which is fine when we have multiple of the same GPU but this won't work in
     # general.
     device = 0
-    arch = triton_kernel_call_lib.get_compute_capability(device)
     module = code_gen.ast_to_ttir(
-        fn, signature, specialization, constants, debug=dump, arch=arch
+        fn, signature, specialization, constants, debug=dump
     )
     ttir = str(module)  # `module`` is compiled in-place, so copy TTIR here.
     ptx, kernel_name, shared_mem_bytes, compute_capability = (
