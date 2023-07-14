@@ -414,6 +414,18 @@ class ShapeDtype(Protocol):
     ...
 
 
+def _nones_to_empty(fn):
+  """Change all the args that are None to empty arrays."""
+
+  @functools.wraps(fn)
+  def wrapper(*args, **kwargs):
+    args = [arg if arg is not None else jnp.empty((0,)) for arg in args]
+    return fn(*args, **kwargs)
+
+  return wrapper
+
+
+@_nones_to_empty
 def triton_call(
     *args: Union[jax.Array, bool, int, float],
     kernel: triton.JITFunction,
