@@ -25,7 +25,10 @@ from jax_triton.version import __version_info__
 
 get_compute_capability = gpu_triton.get_compute_capability
 if jaxlib.version.__version_info__ >= (0, 4, 14):
-  get_serialized_metadata = gpu_triton.get_serialized_metadata
+  try:
+    get_serialized_metadata = gpu_triton.get_serialized_metadata
+  except AttributeError:
+    get_serialized_metadata = None
 
 # trailer
 del gpu_triton
