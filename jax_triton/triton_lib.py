@@ -297,10 +297,17 @@ def triton_kernel_call_lowering(
     configs = [triton.Config({}, num_warps=num_warps, num_stages=num_stages)]
 
   if isinstance(fn, autotuner.Heuristics):
+    updated_configs = []
     for config in configs:
+      kwargs = config.kwargs.copy()
       for name, heuristic in fn.values.items():
-        all_args = {**named_args, **metaparams, **config.kwargs}
-        config.kwargs[name] = heuristic(all_args)
+        kwargs[name] = heuristic({**named_args, **metaparams, **kwargs})
+      updated_configs.append(
+          triton.Config(
+              kwargs, num_warps=config.num_warps, num_stages=config.num_stages
+          )
+      )
+    configs = updated_configs
     fn = fn.fn
 
   if not isinstance(fn, triton.JITFunction):

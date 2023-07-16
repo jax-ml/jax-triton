@@ -458,6 +458,29 @@ class TritonKernelCallTest(parameterized.TestCase):
     _ = do_matmul(m=128, n=128, k=160)
     self.assertEqual(heuristic_returned_values, [True, True, True, False])
 
+  def test_heuristics_does_not_modify_autotune_configs(self):
+    def heuristic_fn(args):
+      return args["K"] % args["BLOCK_SIZE_K"] == 0
+
+    heuristics = {"K_EXACTLY_DIVISIBLE_BY_BLOCK": heuristic_fn}
+    autotune_config = triton.Config({"BLOCK_SIZE_K": 32}, num_warps=1)
+    kernel = triton.autotune([autotune_config], key=("M", "N", "K"))(
+        triton.heuristics(heuristics)(matmul_kernel)
+    )
+
+    def do_matmul(m, n, k):
+      x, y = create_random_inputs([m, k], [k, n])
+      return matmul(
+          x,
+          y,
+          kernel=kernel,
+          BLOCK_SIZE_M=32,
+          BLOCK_SIZE_N=32,
+      )
+
+    _ = do_matmul(m=128, n=128, k=128)
+    self.assertEqual(autotune_config.kwargs, {"BLOCK_SIZE_K": 32})
+
   def test_autotune_with_input_output_aliasing(self):
     autotune_configs = [
         triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
