@@ -422,8 +422,8 @@ class PallasCallTest(PallasTest):
           jax.ShapeDtypeStruct((m, n), jnp.float32)
           ), grid=1)
     def load(x_ref, o_ref):
-      x = pl.load(x_ref, (jnp.arange(m)[:, None], jnp.arange(n)[None, :]))
-      pl.store(o_ref, (jnp.arange(m)[:, None], jnp.arange(n)[None, :]), x + 1.)
+      x = pl.load(x_ref, (jnp.arange(m), jnp.arange(n)))
+      pl.store(o_ref, (jnp.arange(m), jnp.arange(n)), x + 1.)
 
     key = random.PRNGKey(0)
     x = random.normal(key, (m, n))
@@ -437,8 +437,7 @@ class PallasCallTest(PallasTest):
           jax.ShapeDtypeStruct((m, n), jnp.float32)
           ), grid=1)
     def dummy(_, o_ref):
-      pl.store(o_ref, (jnp.arange(m)[:, None], jnp.arange(n)[None, :]),
-               jnp.ones_like(o_ref))
+      pl.store(o_ref, (jnp.arange(m), jnp.arange(n)), jnp.ones_like(o_ref))
 
     key = random.PRNGKey(0)
     x = random.normal(key, (m, n))
@@ -470,13 +469,13 @@ class PallasCallTest(PallasTest):
     np.testing.assert_allclose(out, expected)
 
   @parameterized.named_parameters(*[
-      ("add_i32", pl.atomic_add, np.array([1, 2, 3, 4], np.int32), np.sum),
-      ("max_i", pl.atomic_max, np.array([1, 2, 3, 4], np.int32), np.max),
-      ("min_i32", pl.atomic_min, np.array([1, 2, 3, 4], np.int32), np.min),
-      ("add_f16", pl.atomic_add, np.array([1, 2, 3, 4], np.float16), np.sum),
-      ("add_f32", pl.atomic_add, np.array([1, 2, 3, 4], np.float32), np.sum),
-      ("max_f32", pl.atomic_max, np.array([1, 2, 3, 4], np.float32), np.max),
-      ("min_f32", pl.atomic_min, np.array([1, 2, 3, 4], np.float32), np.min),
+    ("add_i32", pl.atomic_add, np.array([1, 2, 3, 4], np.int32), np.sum),
+    ("max_i32", pl.atomic_max, np.array([1, 2, 3, 4], np.int32), np.max),
+    ("min_i32", pl.atomic_min, np.array([1, 2, 3, 4], np.int32), np.min),
+    ("add_f16", pl.atomic_add, np.array([1, 2, 3, 4], np.float16), np.sum),
+    ("add_f32", pl.atomic_add, np.array([1, 2, 3, 4], np.float32), np.sum),
+    ("max_f32", pl.atomic_max, np.array([1, 2, 3, 4], np.float32), np.max),
+    ("min_f32", pl.atomic_min, np.array([1, 2, 3, 4], np.float32), np.min),
   ])
   def test_scalar_atomic(self, op, value, numpy_op):
     if jt.get_compute_capability(0) < 70:
@@ -517,24 +516,16 @@ class PallasCallTest(PallasTest):
           "Atomic ops onl works on GPUs with capability >= sm70")
 
     m, n = 32, 8
-    if axis == 0:
-      grid = m
-    else:
-      grid = n
     out_shape = jax.ShapeDtypeStruct((n if axis == 0 else m,), jnp.float32)
     @functools.partial(
         self.pallas_call,
         out_shape=out_shape,
-        grid=grid,
+        grid=1,
         input_output_aliases={1: 0})
     def reduce(x_ref, _, y_ref):
-      i = pl.program_id(axis=0)
-      if axis == 0:
-        idx = (i, jnp.arange(n))
-      else:
-        idx = (jnp.arange(m), i)
-      x = pl.load(x_ref, idx)
-      pl.atomic_add(y_ref, (jnp.arange(y.shape[0]),), x)
+      x = pl.load(x_ref, (jnp.arange(m), jnp.arange(n)))
+      y = jnp.sum(x, axis=axis)
+      pl.atomic_add(y_ref, (jnp.arange(y.shape[0]),), y)
     x = random.normal(random.PRNGKey(0), (m, n))
     y = jnp.zeros(out_shape.shape, out_shape.dtype)
     y = reduce(x, y)
@@ -564,11 +555,11 @@ class PallasCallTest(PallasTest):
   @parameterized.named_parameters(*[
     (f"{op_name}_{dtype}_{axis}", op, dtype, axis)
     for op_name, op in [
-        ("add", jnp.sum),
-        ("max", jnp.max),
-        ("min", jnp.min),
-        ("argmax", jnp.argmax),
-        ("argmin", jnp.argmin),
+      ("add", jnp.sum),
+      ("max", jnp.max),
+      ("min", jnp.min),
+      ("argmax", jnp.argmax),
+      ("argmin", jnp.argmin),
     ]
     for axis in [0, 1, (1,), (0, 1)]
     for dtype in ["float16", "float32", "int32", "uint32"]
@@ -586,16 +577,12 @@ class PallasCallTest(PallasTest):
         return random.normal(key, (m, n), dtype=dtype)
     out_shape = jax.ShapeDtypeStruct(
         op(make_x(random.PRNGKey(0)), axis=axis).shape, out_dtype)
-    if isinstance(axis, int):
-      grid = tuple(a for i, a in enumerate((m, n)) if i != axis)
-    else:
-      grid = tuple(a for i, a in enumerate((m, n)) if i not in axis)
     @functools.partial(
         self.pallas_call,
         out_shape=out_shape,
-        grid=grid)
+        grid=1, debug=not isinstance(axis, int))
     def reduce(x_ref, y_ref):
-      x = pl.load(x_ref, (jnp.arange(m)[:, None], jnp.arange(n)[None]))
+      x = pl.load(x_ref, (jnp.arange(m), jnp.arange(n)))
       y = op(x, axis=axis)
       pl.store(y_ref, tuple(jnp.arange(d) for d in y.shape), y)
     for i, key in enumerate(random.split(random.PRNGKey(0), 20)):
@@ -1355,7 +1342,7 @@ class PallasPrimitivesTest(parameterized.TestCase):
     (lambda: (pl.dslice(0, 3), slice(None), slice(None)), "<- a[:3,:,:]"),
     (lambda: (pl.dslice(1, 3), slice(None), pl.dslice(0, 4)), "<- a[1:4,:,:4]"),
     (lambda: (jnp.arange(5), slice(None), pl.dslice(0, 4)), "<- a[b,:,:4]"),
-    (lambda: (jnp.arange(5)[:, None], jnp.arange(3)[None], pl.ds(4)), "<- a[f,g,:4]"),
+    (lambda: (jnp.arange(5), jnp.arange(3), jnp.arange(4)), "<- a[e,f,g]"),
   ])
   def test_load_pretty_print(self, expr, expected):
     def body(x_ref):
@@ -1370,7 +1357,7 @@ class PallasPrimitivesTest(parameterized.TestCase):
     (lambda: (pl.dslice(0, 3), slice(None), slice(None)), "a[:3,:,:] <-"),
     (lambda: (pl.dslice(1, 3), slice(None), pl.dslice(0, 4)), "a[1:4,:,:4] <-"),
     (lambda: (jnp.arange(5), slice(None), pl.dslice(0, 4)), "a[b,:,:4] <-"),
-    (lambda: (jnp.arange(5)[:, None], jnp.arange(3)[None], pl.dslice(4)), "a[m,n,:4] <-"),
+    (lambda: (jnp.arange(5), jnp.arange(3), jnp.arange(4)), "a[l,m,n] <-"),
   ])
   def test_store_pretty_print(self, expr, expected):
     def body(x_ref):
@@ -1389,8 +1376,8 @@ class PallasPrimitivesTest(parameterized.TestCase):
      "c:i32[3,3,4], a[1:4,:,:4] <-"),
     (lambda: (jnp.arange(5), slice(None), pl.dslice(0, 4)),
      "e:i32[5,3,4], a[b,:,:4] <-"),
-    (lambda: (jnp.arange(5)[:, None], jnp.arange(3)[None], pl.dslice(4)),
-     "o:i32[5,3,4], a[m,n,:4] <-"),
+    (lambda: (jnp.arange(5), jnp.arange(3), jnp.arange(4)),
+     "o:i32[5,3,4], a[l,m,n] <-"),
   ])
   def test_swap_pretty_print(self, expr, expected):
     def body(x_ref):

@@ -145,12 +145,8 @@ def rms_norm_backward_kernel_dw_db(
     row_idx = i * block_m + jnp.arange(block_m)
     row_mask = row_idx < m
     mask = row_mask[:, None] & col_mask[None, :]
-    a = pl.load(
-        x_ref, (row_idx[:, None], col_idx[None]), mask=mask, other=0.0
-    ).astype(jnp.float32)
-    dout = pl.load(
-        do_ref, (row_idx[:, None], col_idx[None]), mask=mask, other=0.0
-    ).astype(jnp.float32)
+    a = pl.load(x_ref, (row_idx, col_idx), mask=mask, other=0.).astype(jnp.float32)
+    dout = pl.load(do_ref, (row_idx, col_idx), mask=mask, other=0.).astype(jnp.float32)
     rstd = pl.load(rstd_ref, (row_idx,), mask=row_mask, other=0.).astype(jnp.float32)
     a_hat = a * rstd[:, None]
     dw_acc_ref, db_acc_ref = acc_ref

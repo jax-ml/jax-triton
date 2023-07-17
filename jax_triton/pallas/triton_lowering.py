@@ -49,7 +49,6 @@ from jax_triton import utils as triton_utils
 from jax_triton.pallas import core as pallas_core
 from jax_triton.pallas import pallas_call_p
 from jax_triton.pallas import primitives
-from jax_triton.pallas import indexing
 from jax_triton.triton_lib import compile_ttir_to_ptx_inplace
 from jax_triton.triton_lib import get_triton_type
 import numpy as np
@@ -61,7 +60,7 @@ map, unsafe_map = util.safe_map, map
 zip, unsafe_zip = util.safe_zip, zip
 partial = functools.partial
 Grid = Tuple[int, ...]
-NDIndexer = indexing.NDIndexer
+NDIndexer = primitives.NDIndexer
 GridMapping = pallas_core.GridMapping
 BlockMapping = pallas_core.BlockMapping
 
@@ -635,18 +634,6 @@ def _broadcast_in_dim_lowering_rule(
 
 triton_lowering_rules[jax.lax.broadcast_in_dim_p] = (
     _broadcast_in_dim_lowering_rule
-)
-
-
-def _broadcast_to_lowering_rule(
-    ctx: TritonLoweringRuleContext, a, *, shape
-):
-  shape = map(tl.constexpr, shape)
-  return tl.broadcast_to(a, shape, _builder=ctx.builder)
-
-
-triton_lowering_rules[indexing.broadcast_to_p] = (
-    _broadcast_to_lowering_rule
 )
 
 

@@ -14,9 +14,6 @@
 
 """Module for pallas, a jaxpr "dialect" for Triton."""
 from jax_triton.pallas.core import BlockSpec
-from jax_triton.pallas.indexing import ds
-from jax_triton.pallas.indexing  import dslice
-from jax_triton.pallas.indexing  import broadcast_to
 from jax_triton.pallas.pallas_call import pallas_call
 from jax_triton.pallas.pallas_call import pallas_call_p
 from jax_triton.pallas.primitives import atomic_add
@@ -28,6 +25,8 @@ from jax_triton.pallas.primitives import atomic_or
 from jax_triton.pallas.primitives import atomic_xchg
 from jax_triton.pallas.primitives import atomic_xor
 from jax_triton.pallas.primitives import dot
+from jax_triton.pallas.primitives import ds
+from jax_triton.pallas.primitives import dslice
 from jax_triton.pallas.primitives import load
 from jax_triton.pallas.primitives import max_contiguous
 from jax_triton.pallas.primitives import multiple_of
