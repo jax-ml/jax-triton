@@ -16,7 +16,7 @@
 import dataclasses
 import functools
 import operator
-from typing import Any, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 import zlib
 
 import jax
@@ -1636,7 +1636,8 @@ def pallas_call_lowering(
     debug: bool,
     input_output_aliases: Tuple[Tuple[int, int], ...],
     grid_mapping: GridMapping,
-    **compiler_params: Any
+    triton_params: Optional[Dict[str, Any]] = None,
+    **compiler_params: Any,
 ):
   if interpret:
     return mlir.lower_fun(pallas_call_p.impl, multiple_results=True)(
@@ -1702,11 +1703,19 @@ def pallas_call_lowering(
       for shape in out_shapes
   ]
 
+  xc.register_custom_call_target(
+      name, triton_kernel_call_lib.get_custom_call(), platform="CUDA"
+  )
+
+  if triton_params is None:
+    triton_params = {}
+  serialized_metadata = triton_params.get("serialized_metadata", b"")
+
   return jaxlib.hlo_helpers.custom_call(
-      call_target_name="triton_kernel_call",
+      call_target_name=name,
       out_types=out_types,
       operands=in_nodes,
-      backend_config=zlib.compress(kernel_call.to_proto(b"")),
+      backend_config=zlib.compress(kernel_call.to_proto(serialized_metadata)),
       operand_layouts=triton_utils.avals_to_layouts(ctx.avals_in),
       result_layouts=triton_utils.avals_to_layouts(ctx.avals_out),
       operand_output_aliases=dict(input_output_aliases),
@@ -1714,8 +1723,3 @@ def pallas_call_lowering(
 
 
 mlir.register_lowering(pallas_call_p, pallas_call_lowering, platform="cuda")
-xc.register_custom_call_target(
-    "triton_kernel_call",
-    triton_kernel_call_lib.get_custom_call(),
-    platform="CUDA",
-)
