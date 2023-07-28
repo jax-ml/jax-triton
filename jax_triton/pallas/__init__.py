@@ -37,5 +37,12 @@ from jax_triton.pallas.primitives import swap
 from jax_triton.pallas.utils import when
 from jax_triton.utils import cdiv
 
-from jax_triton.pallas import registration
-del registration
+try:
+  from jax_triton.pallas import triton
+except (ImportError, ModuleNotFoundError):
+  pass
+
+try:
+  from jax_triton.pallas import mosaic
+except (ImportError, ModuleNotFoundError):
+  pass
