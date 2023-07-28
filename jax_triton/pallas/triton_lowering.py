@@ -31,6 +31,7 @@ from jax._src import linear_util as lu
 from jax._src import pjit
 from jax._src import state
 from jax._src import util
+from jax._src.lax import lax as lax_internal
 from jax._src.lax.control_flow import for_loop
 from jax._src.lib import gpu_triton as triton_kernel_call_lib
 from jax._src.lib.mlir import ir
@@ -382,6 +383,13 @@ def _exp_lowering_rule(ctx: TritonLoweringRuleContext, a):
 
 
 triton_lowering_rules[lax.exp_p] = _exp_lowering_rule
+
+
+def _exp2_lowering_rule(ctx: TritonLoweringRuleContext, a):
+  return tl.math.exp2(a, _builder=ctx.builder)
+
+
+triton_lowering_rules[lax_internal.exp2_p] = _exp2_lowering_rule
 
 
 def _log_lowering_rule(ctx: TritonLoweringRuleContext, a):
