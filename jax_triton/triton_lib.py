@@ -94,7 +94,9 @@ def get_triton_type(obj: Any) -> str:
     else:
       raise ValueError(f"integer overflow representing {obj}")
   if isinstance(obj, float):
-    return "f"
+    return "fp64"
+  if isinstance(obj, np.float32):
+    return "fp32"
   if isinstance(obj, bool):
     return "B"
   if isinstance(obj, str):
@@ -535,6 +537,8 @@ def triton_call(
   for i, arg in enumerate(flat_args):
     if isinstance(arg, (bool, int, float)):
       scalar_args.append((i, get_triton_type(arg), arg))
+    elif isinstance(arg, np.float32):
+      scalar_args.append((i, get_triton_type(arg), float(arg)))
     else:
       array_args.append(arg)
 

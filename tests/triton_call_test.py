@@ -245,6 +245,24 @@ class TritonKernelCallTest(parameterized.TestCase):
     expected = x + y
     np.testing.assert_allclose(out, expected)
 
+  @parameterized.parameters(42.0, np.float32(42.0))
+  def test_add_float_scalar(self, scalar):
+    @triton.jit
+    def add_scalar_kernel(x_ptr, y, output_ptr):
+      tl.store(output_ptr, tl.load(x_ptr) + y)
+
+    def add_scalar(x, y):
+      return jt.triton_call(
+          x,
+          y,
+          kernel=add_scalar_kernel,
+          out_shape=jax.ShapeDtypeStruct((), x.dtype),
+          grid=1,
+      )
+
+    x = jnp.array([1.0])
+    np.testing.assert_allclose(add_scalar(x, scalar), x + scalar)
+
   def test_input_output_aliasing(self):
     @triton.jit
     def add_inplace_kernel(_, n_elements, output_ptr, BLOCK_SIZE: tl.constexpr):
