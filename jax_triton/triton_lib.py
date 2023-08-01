@@ -32,7 +32,6 @@ from jax.interpreters import mlir
 from jax.interpreters import xla
 from jax.lib import xla_client as xc
 import jax.numpy as jnp
-from jax_triton import utils
 import numpy as np
 
 CAN_USE_TRITON = False
@@ -76,6 +75,23 @@ _JAX_TO_TRITON_TYPE_MAP = {
     jnp.dtype("bool"): "B",
 }
 
+
+Grid = Union[int, Tuple[int], Tuple[int, int], Tuple[int, int, int]]
+GridOrLambda = Union[Grid, Callable[[Dict[str, Any]], Grid]]
+
+
+def normalize_grid(grid: GridOrLambda, metaparams) -> Tuple[int, int, int]:
+  if callable(grid):
+    grid = grid(metaparams)
+  if isinstance(grid, int):
+    grid = (grid,)
+  elif len(grid) > 3:
+    raise ValueError("`grid` should have three or fewer dimensions.")
+  return tuple(grid) + (1,) * (3 - len(grid))
+
+
+def avals_to_layouts(avals):
+  return [list(reversed(range(aval.ndim))) for aval in avals]
 
 def get_triton_type(obj: Any) -> str:
   if isinstance(obj, (jax.core.ShapedArray, state.AbstractRef)):
@@ -321,7 +337,7 @@ def triton_kernel_call_lowering(
   config_params = []
   for config in configs:
     config_metaparams = {**metaparams, **config.kwargs}
-    config_grid = utils.normalize_grid(grid, config_metaparams)
+    config_grid = normalize_grid(grid, config_metaparams)
 
     config_zeroed_outputs = zeroed_outputs
     if callable(zeroed_outputs):
@@ -403,8 +419,8 @@ def triton_kernel_call_lowering(
       out_types=out_types,
       operands=array_args,
       backend_config=zlib.compress(kernel_call.to_proto(serialized_metadata)),
-      operand_layouts=utils.avals_to_layouts(ctx.avals_in),
-      result_layouts=utils.avals_to_layouts(ctx.avals_out),
+      operand_layouts=avals_to_layouts(ctx.avals_in),
+      result_layouts=avals_to_layouts(ctx.avals_out),
       operand_output_aliases=dict(input_output_aliases),
   )
 

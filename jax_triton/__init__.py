@@ -15,11 +15,11 @@
 """Library for JAX-Triton integrations."""
 import jaxlib
 from jax._src.lib import gpu_triton
-from jax_triton import pallas
+from jax_triton import utils
 from jax_triton.triton_lib import triton_call
-from jax_triton.utils import cdiv
-from jax_triton.utils import next_power_of_2
-from jax_triton.utils import strides_from_shape
+from jax.experimental.pallas import cdiv
+from jax.experimental.pallas import next_power_of_2
+from jax.experimental.pallas import strides_from_shape
 from jax_triton.version import __version__
 from jax_triton.version import __version_info__
 

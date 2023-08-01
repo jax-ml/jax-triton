@@ -12,17 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Module for Mosaic lowering of Pallas call."""
-
-from jax_triton.pallas.mosaic import core
-from jax_triton.pallas.mosaic import pallas_call_registration
-from jax_triton.pallas.mosaic.core import PrefetchScalarGridSpec
-from jax_triton.pallas.mosaic.core import TPUMemorySpace
-from jax_triton.pallas.mosaic.primitives import repeat
-from jax_triton.pallas.mosaic.primitives import trace
-
-
-VMEM = TPUMemorySpace.VMEM
-SMEM = TPUMemorySpace.SMEM
-CMEM = TPUMemorySpace.CMEM
-del pallas_call_registration
+from jax.experimental.pallas.tpu import *

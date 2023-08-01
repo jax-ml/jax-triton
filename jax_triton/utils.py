@@ -13,45 +13,6 @@
 # limitations under the License.
 
 """Contains utilities for writing and calling Triton functions."""
-from __future__ import annotations
-import math
-
-from typing import Any, Callable, Dict, Tuple, Union
-
-import numpy as np
-
-Grid = Union[int, Tuple[int], Tuple[int, int], Tuple[int, int, int]]
-GridOrLambda = Union[Grid, Callable[[Dict[str, Any]], Grid]]
-
-
-def normalize_grid(grid: GridOrLambda, metaparams) -> Tuple[int, int, int]:
-  if callable(grid):
-    grid = grid(metaparams)
-  if isinstance(grid, int):
-    grid = (grid,)
-  elif len(grid) > 3:
-    raise ValueError("`grid` should have three or fewer dimensions.")
-  return tuple(grid) + (1,) * (3 - len(grid))
-
-
-def avals_to_layouts(avals):
-  return [list(reversed(range(aval.ndim))) for aval in avals]
-
-
-def cdiv(a: int, b: int) -> int:
-  return (a + b - 1) // b
-
-
-def strides_from_shape(shape: Tuple[int, ...]) -> Tuple[int, ...]:
-  size = np.prod(shape)
-  strides = []
-  for s in shape:
-    size = size // s
-    strides.append(int(size))
-  return tuple(strides)
-
-
-def next_power_of_2(x: int) -> int:
-  if x == 0:
-    return 1
-  return 2 ** math.ceil(math.log2(x))
+from jax.experimental.pallas import cdiv
+from jax.experimental.pallas import strides_from_shape
+from jax.experimental.pallas import next_power_of_2
