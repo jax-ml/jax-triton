@@ -549,6 +549,41 @@ class TritonKernelCallTest(parameterized.TestCase):
     # specialize" leaving `stride_{bn,cn}`.
     self.assertEqual(specialization.equal_to_1, (8, 10))
 
+  def test_debug_callable(self):
+    emitted_irs = dict()
+
+    m, n, k = 128, 128, 128
+    x, y = create_random_inputs([m, k], [k, n])
+
+    def intercept_ir(ir_name, ir_body):
+      ir_body = str(ir_body)
+      self.assertNotIn(
+          ir_name, emitted_irs, f"Attempted to overwrite {ir_name}"
+      )
+      self.assertNotEmpty(ir_body, f"IR '{ir_name}' was empty.")
+      emitted_irs[ir_name] = ir_body
+
+    block_size_m, block_size_n, block_size_k = 128, 128, 32
+    _ = matmul(
+        x,
+        y,
+        debug=intercept_ir,
+        BLOCK_SIZE_M=block_size_m,
+        BLOCK_SIZE_N=block_size_n,
+        BLOCK_SIZE_K=block_size_k,
+        K_EXACTLY_DIVISIBLE_BY_BLOCK=k % block_size_k == 0,
+    )
+
+    for ir_name in ["py", "ttir", "ttgir", "llir", "ptx"]:
+      self.assertIn(ir_name, emitted_irs, f"IR '{ir_name}' was not recorded.")
+      self.assertNotEmpty(emitted_irs[ir_name], f"IR '{ir_name}' was empty.")
+
+    self.assertStartsWith(
+        emitted_irs["py"],
+        "def",
+        "Python code is emitted as the strigification of a different object",
+    )
+
 
 if __name__ == "__main__":
   os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
