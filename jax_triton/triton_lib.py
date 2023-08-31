@@ -443,7 +443,7 @@ class ShapeDtype(Protocol):
 
 
 def triton_call(
-    *args: Union[jax.Array, bool, int, float],
+    *args: Union[jax.Array, bool, int, float, np.float32],
     kernel: triton.JITFunction,
     out_shape: Union[ShapeDtype, Sequence[ShapeDtype]],
     grid: GridOrLambda,
