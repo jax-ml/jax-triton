@@ -419,13 +419,13 @@ def triton_kernel_call_lowering(
     call_proto = kernel_call.to_proto(serialized_metadata)
   return jaxlib.hlo_helpers.custom_call(
       call_target_name="triton_kernel_call",
-      out_types=out_types,
+      result_types=out_types,
       operands=array_args,
       backend_config=zlib.compress(call_proto),
       operand_layouts=avals_to_layouts(ctx.avals_in),
       result_layouts=avals_to_layouts(ctx.avals_out),
       operand_output_aliases=dict(input_output_aliases),
-  )
+  ).results
 
 
 mlir.register_lowering(triton_kernel_call_p, triton_kernel_call_lowering)
