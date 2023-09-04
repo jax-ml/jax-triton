@@ -156,12 +156,23 @@ def compile_ttir_to_ptx_inplace(
   compute_capability = triton_kernel_call_lib.get_compute_capability(device)
   if num_stages is None:
     num_stages = 3 if compute_capability >= 75 else 2
+  # TODO (jon-chuang): handle the Hopper case of num_ctas > 1 
+  # (CTAs are Thread Block Clusters in NVIDIA speak)
+  num_ctas = 1 
+
+  extra = {
+    'cluster_info': _triton.ClusterInfo(), 
+    'enable_warp_specialization': False, 
+    'enable_persistent': False, 
+    'optimize_epilogue': False,
+  }
   if dump:
     print(ttir)
   try:
-    ttir = tc.optimize_ttir(ttir, compute_capability)
-    ttgir = tc.ttir_to_ttgir(ttir, num_warps)
-    ttgir = tc.optimize_ttgir(ttgir, num_stages, compute_capability)
+    ttir = tc.optimize_ttir(ttir, arch=compute_capability)
+    ttgir = tc.ttir_to_ttgir(ttir, num_warps=num_warps, num_ctas=num_ctas, arch=compute_capability,)
+    ttgir = tc.optimize_ttgir(ttgir, 
+      num_stages=num_stages, num_warps=num_warps, num_ctas=num_ctas, arch=compute_capability, **extra)
   except RuntimeError as e:
     ttir.dump()
     raise ValueError("TTIR->TTGIR pass failed!") from e
@@ -169,14 +180,14 @@ def compile_ttir_to_ptx_inplace(
     print(ttgir)
   extern_libs = {}
   try:
-    llir = tc.ttgir_to_llir(ttgir, extern_libs, compute_capability)
+    llir = tc.ttgir_to_llir(ttgir, extern_libs, arch=compute_capability, tma_infos=_triton.TMAInfos())
   except RuntimeError as e:
     ttgir.dump()
     raise ValueError("TTGIR->LLIR pass failed!") from e
   shared_mem_bytes = _triton.get_shared_memory_size(ttgir)
   if dump:
     print(llir)
-  ptx = tc.llir_to_ptx(llir, compute_capability)
+  ptx = tc.llir_to_ptx(llir, arch=compute_capability)
   if dump:
     print(ptx)
   name = ptx_get_kernel_name(ptx)
