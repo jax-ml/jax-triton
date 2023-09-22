@@ -157,7 +157,7 @@ def compile_ttir_to_ptx_inplace(
   if num_stages is None:
     num_stages = 3 if compute_capability >= 75 else 2
   # TODO (jon-chuang): handle the Hopper case of num_ctas > 1 
-  # (CTAs are Thread Block Clusters in NVIDIA speak)
+  # (CTAs > 1 in Triton involve Thread Block Clusters only available on Hopper)
   num_ctas = 1 
 
   extra = {
