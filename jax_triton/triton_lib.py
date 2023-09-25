@@ -163,8 +163,20 @@ def compile_ttir_to_ptx_inplace(
     print(ttir)
   try:
     ttir = tc.optimize_ttir(ttir, compute_capability)
-    ttgir = tc.ttir_to_ttgir(ttir, num_warps)
-    ttgir = tc.optimize_ttgir(ttgir, num_stages, compute_capability)
+    ttgir = tc.ttir_to_ttgir(
+        ttir, num_warps, num_ctas=1, arch=compute_capability
+    )
+    ttgir = tc.optimize_ttgir(
+        ttgir,
+        num_stages,
+        num_warps,
+        num_ctas=1,
+        arch=compute_capability,
+        cluster_info=_triton.ClusterInfo(),
+        enable_warp_specialization=False,
+        enable_persistent=False,
+        optimize_epilogue=False,
+    )
   except RuntimeError as e:
     ttir.dump()
     raise ValueError("TTIR->TTGIR pass failed!") from e
@@ -172,7 +184,9 @@ def compile_ttir_to_ptx_inplace(
     print(ttgir)
   extern_libs = {}
   try:
-    llir = tc.ttgir_to_llir(ttgir, extern_libs, compute_capability)
+    llir = tc.ttgir_to_llir(
+        ttgir, extern_libs, compute_capability, _triton.TMAInfos()
+    )
   except RuntimeError as e:
     ttgir.dump()
     raise ValueError("TTGIR->LLIR pass failed!") from e
