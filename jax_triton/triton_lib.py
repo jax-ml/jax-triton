@@ -13,6 +13,9 @@
 # limitations under the License.
 
 """Module for calling Triton kernels from JAX."""
+# b/301982023
+from __future__ import annotations
+
 import functools
 import os
 import types
