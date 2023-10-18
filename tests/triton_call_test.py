@@ -18,8 +18,8 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
+from jax import config
 from jax import random
-from jax.config import config
 import jax.numpy as jnp
 import jax_triton as jt
 import numpy as np
