@@ -21,7 +21,7 @@ from typing import Any, Tuple
 
 import jax
 from jax import lax
-from jax import linear_util as lu
+from jax.extend import linear_util as lu
 from jax.interpreters import partial_eval as pe
 from jax.interpreters import xla
 from jax._src import core
