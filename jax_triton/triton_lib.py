@@ -16,6 +16,7 @@
 # b/301982023
 from __future__ import annotations
 
+import copy
 import functools
 import os
 import types
@@ -152,32 +153,41 @@ def ptx_get_kernel_name(module) -> str:
 def compile_ttir_to_ptx_inplace(
     ttir,
     device: int = 0,
-    num_warps: int = 4,
+    device_type: str = "cuda",
+    num_warps: Optional[int] = None,
     num_stages: Optional[int] = None,
+    num_ctas: int = 1,
+    enable_fp_fusion: bool = True,
+    enable_warp_specialization: bool = False,
+    enable_persistent: bool = False,
     dump: bool = False,
 ) -> Tuple[str, str, int, int]:
   compute_capability = triton_kernel_call_lib.get_compute_capability(device)
+  if num_warps is None:
+    num_warps = tc.get_arch_default_num_warps(device_type)
   if num_stages is None:
-    num_stages = 3 if compute_capability >= 75 else 2
+    num_stages = tc.get_arch_default_num_stages(
+        device_type, capability=compute_capability
+    )
   if dump:
     print(ttir)
   try:
-    target = tc.CudaTargetDescriptor(capability=compute_capability,
-                                     num_warps=num_warps,
-                                     enable_fp_fusion=True)
-    ttir = tc.optimize_ttir(ttir, target)
-    ttgir = tc.ttir_to_ttgir(
-        ttir, num_warps, num_ctas=1, target=target
+    target = tc.CudaTargetDescriptor(
+        capability=compute_capability,
+        num_warps=num_warps,
+        enable_fp_fusion=enable_fp_fusion,
     )
+    ttir = tc.optimize_ttir(ttir, target)
+    ttgir = tc.ttir_to_ttgir(ttir, num_warps, num_ctas=num_ctas, target=target)
     ttgir = tc.optimize_ttgir(
         ttgir,
         num_stages,
         num_warps,
-        num_ctas=1,
+        num_ctas=num_ctas,
         target=target,
         cluster_info=_triton.ClusterInfo(),
-        enable_warp_specialization=False,
-        enable_persistent=False,
+        enable_warp_specialization=enable_warp_specialization,
+        enable_persistent=enable_persistent,
         optimize_epilogue=False,
     )
   except RuntimeError as e:
@@ -187,9 +197,7 @@ def compile_ttir_to_ptx_inplace(
     print(ttgir)
   extern_libs = {}
   try:
-    llir = tc.ttgir_to_llir(
-        ttgir, extern_libs, target, _triton.TMAInfos()
-    )
+    llir = tc.ttgir_to_llir(ttgir, extern_libs, target, _triton.TMAInfos())
   except RuntimeError as e:
     ttgir.dump()
     raise ValueError("TTGIR->LLIR pass failed!") from e
@@ -213,9 +221,17 @@ def get_or_create_triton_kernel(
     *,
     num_warps,
     num_stages,
+    num_ctas,
+    enable_fp_fusion,
+    enable_warp_specialization,
+    enable_persistent,
     metaparams,
     dump: bool,
 ) -> Tuple[triton_kernel_call_lib.TritonKernel, Any]:
+  device_type = "cuda"
+  if num_warps is None:
+    num_warps = tc.get_arch_default_num_warps(device_type)
+
   signature = dict(enumerate(arg_dtypes))
   # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
   # We assume that all arrays are aligned to 16 bytes, and Triton may use this
@@ -240,6 +256,10 @@ def get_or_create_triton_kernel(
       tuple(constants.items()),
       num_warps,
       num_stages,
+      num_ctas,
+      enable_fp_fusion,
+      enable_warp_specialization,
+      enable_persistent,
   )
   kernel = _COMPILED_KERNEL_CACHE.get(cache_key)
 
@@ -257,8 +277,13 @@ def get_or_create_triton_kernel(
         compile_ttir_to_ptx_inplace(
             module,
             device=device,
+            device_type=device_type,
             num_warps=num_warps,
             num_stages=num_stages,
+            num_ctas=num_ctas,
+            enable_fp_fusion=enable_fp_fusion,
+            enable_warp_specialization=enable_warp_specialization,
+            enable_persistent=enable_persistent,
             dump=dump,
         )
     )
@@ -282,6 +307,10 @@ def triton_kernel_call_lowering(
     grid,
     num_warps,
     num_stages,
+    num_ctas,
+    enable_fp_fusion,
+    enable_warp_specialization,
+    enable_persistent,
     input_output_aliases,
     zeroed_outputs,
     debug,
@@ -332,7 +361,15 @@ def triton_kernel_call_lowering(
     configs = fn.prune_configs(metaparams)
     fn = fn.fn
   else:
-    configs = [triton.Config({}, num_warps=num_warps, num_stages=num_stages)]
+    config = triton.Config(
+        {},
+        num_warps=num_warps,
+        num_stages=num_stages,
+        num_ctas=num_ctas,
+        enable_warp_specialization=enable_warp_specialization,
+    )
+    config.enable_persistent = enable_persistent
+    configs = [config]
 
   if isinstance(fn, autotuner.Heuristics):
     updated_configs = []
@@ -340,11 +377,9 @@ def triton_kernel_call_lowering(
       kwargs = config.kwargs.copy()
       for name, heuristic in fn.values.items():
         kwargs[name] = heuristic({**named_args, **metaparams, **kwargs})
-      updated_configs.append(
-          triton.Config(
-              kwargs, num_warps=config.num_warps, num_stages=config.num_stages
-          )
-      )
+      updated_config = copy.copy(config)
+      updated_config.kwargs = kwargs
+      updated_configs.append(updated_config)
     configs = updated_configs
     fn = fn.fn
 
@@ -373,6 +408,9 @@ def triton_kernel_call_lowering(
             metaparams=tuple(sorted(config_metaparams.items())),
             num_warps=config.num_warps,
             num_stages=config.num_stages,
+            num_ctas=config.num_ctas,
+            enable_warp_specialization=config.enable_warp_specialization,
+            enable_persistent=config.enable_persistent,
             grid=config_grid,
             zeroed_params_with_sizes=tuple(zeroed_params_with_sizes.items()),
         )
@@ -386,6 +424,10 @@ def triton_kernel_call_lowering(
         scalar_args,
         num_warps=params["num_warps"],
         num_stages=params["num_stages"],
+        num_ctas=params["num_ctas"],
+        enable_fp_fusion=enable_fp_fusion,
+        enable_warp_specialization=params["enable_warp_specialization"],
+        enable_persistent=params["enable_persistent"],
         metaparams=dict(params["metaparams"]),
         dump=debug,
     )
@@ -404,6 +446,10 @@ def triton_kernel_call_lowering(
         kernel_params.append(
             triton_kernel_call_lib.create_scalar_parameter(arg, dtype)
         )
+
+    # TODO(cjfj): Add support for `num_ctas` in kernel launch code.
+    if num_ctas != 1:
+      raise ValueError("`num_ctas != 1` is not yet supported.")
 
     kernel_calls.append(
         triton_kernel_call_lib.TritonKernelCall(
@@ -468,8 +514,12 @@ def triton_call(
     out_shape: Union[ShapeDtype, Sequence[ShapeDtype]],
     grid: GridOrLambda,
     name: str = "",
-    num_warps: int = 4,
-    num_stages: int = 2,
+    num_warps: Optional[int] = None,
+    num_stages: Optional[int] = None,
+    num_ctas: int = 1,
+    enable_fp_fusion: bool = True,
+    enable_warp_specialization: bool = False,
+    enable_persistent: bool = False,
     input_output_aliases: Optional[Dict[int, int]] = None,
     zeroed_outputs: Union[
         Sequence[int], Callable[[Dict[str, Any]], Sequence[int]]
@@ -590,6 +640,10 @@ def triton_call(
       grid=grid,
       num_warps=num_warps,
       num_stages=num_stages,
+      num_ctas=num_ctas,
+      enable_fp_fusion=enable_fp_fusion,
+      enable_warp_specialization=enable_warp_specialization,
+      enable_persistent=enable_persistent,
       input_output_aliases=tuple(input_output_aliases.items()),
       zeroed_outputs=zeroed_outputs,
       debug=debug,
