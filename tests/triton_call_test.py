@@ -539,15 +539,15 @@ class TritonKernelCallTest(parameterized.TestCase):
         pass  # Error thrown as the mocked method's return value is invalid.
 
     mock_compile.assert_called_once()
-    specialization = mock_compile.call_args.args[2]
+    specialization = mock_compile.call_args[1]['specialization']
 
     # Pointers are assumed to divide by 16, as do `M`, `N`, `stride_{bk,cm}`.
     # However, we've marked `a_ptr`, `M`, `stride_bk`, and `c_ptr` as "do not
     # specialize", leaving `b_ptr`, `N`, and `stride_cm`.
-    self.assertEqual(specialization.divisible_by_16, (1, 3, 9))
+    self.assertEqual(specialization.attrs.divisible_by_16, (1, 3, 9))
     # `stride_{ak,bn,cn}` equal 1, but we've marked `stride_ak` as "do not
     # specialize" leaving `stride_{bn,cn}`.
-    self.assertEqual(specialization.equal_to_1, (8, 10))
+    self.assertEqual(specialization.attrs.equal_to_1, (8, 10))
 
 
 if __name__ == "__main__":
