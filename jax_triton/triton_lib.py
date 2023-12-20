@@ -45,7 +45,7 @@ try:
   from triton.compiler import compiler as tc
   import triton.language as tl
   from triton.runtime import autotuner
-  import triton._C.libtriton.triton as _triton
+  import triton._C.libtriton as _triton
   from triton.common.backend import get_backend
   import triton.compiler.backends.cuda as cb
 
@@ -156,7 +156,13 @@ def aval_size_bytes(aval):
 
 
 def ptx_get_kernel_name(module) -> str:
-  return cb.get_kernel_name(module, pattern="// .globl")
+  # return cb.get_kernel_name(module, pattern="// .globl")
+  pattern = "// .globl"
+  assert module
+  for line in module.split("\n"):
+    line = line.strip()
+    if line.startswith(pattern):
+      return line.split()[-1]
 
 
 def get_arch_default_num_warps(device_type):
@@ -216,7 +222,7 @@ def compile_ttir_to_ptx_inplace(
   except RuntimeError as e:
     ttgir.dump()
     raise ValueError("TTGIR->LLIR pass failed!") from e
-  shared_mem_bytes = _triton.get_shared_memory_size(ttgir)
+  shared_mem_bytes = _triton.translation.get_shared_memory_size(ttgir)
   if cuda_options.debug:
     print(llir)
   ptx = cuda_backend.make_ptx(
