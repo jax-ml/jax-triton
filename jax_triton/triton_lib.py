@@ -20,6 +20,7 @@ from __future__ import annotations
 import copy
 import functools
 import os
+import tempfile
 import types
 from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple, Union
 import zlib
@@ -46,6 +47,7 @@ try:
   import triton.language as tl
   from triton.runtime import autotuner
   import triton._C.libtriton as _triton
+  from triton._C.libtriton import ir as tl_ir
   from triton.common.backend import get_backend
   import triton.compiler.backends.cuda as cb
 
@@ -192,6 +194,17 @@ def compile_ttir_to_ptx_inplace(
   compute_capability = triton_kernel_call_lib.get_compute_capability(device)
   if cuda_options.debug:
     print(ttir)
+  if isinstance(ttir, ir.Module):
+    # Triton compilation APIs only accept Triton-specific MLIR wrappers.
+    # So, here we serialize an ir.Module to a file and then deserialize
+    # it as a tl_ir.module.
+    tl_context = tl_ir.context()
+    tl_context.load_triton()
+    with tempfile.NamedTemporaryFile(mode="wb") as f:
+      ttir.operation.write_bytecode(f)
+      f.flush()
+      ttir = tl_ir.parse_mlir_module(f.name, tl_context)
+    ttir.context = tl_context
   try:
     metadata = dict()
     opt_ttir = cuda_backend.make_ttir(ttir, metadata, cuda_options)
