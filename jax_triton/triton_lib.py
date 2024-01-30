@@ -1,4 +1,4 @@
-# Copyright 2023 The jax_triton Authors.
+# Copyright 2024 The jax_triton Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -48,8 +48,7 @@ try:
   from triton.runtime import autotuner
   import triton._C.libtriton as _triton
   from triton._C.libtriton import ir as tl_ir
-  from triton.common.backend import get_backend
-  import triton.compiler.backends.cuda as cb
+  import triton.backends.nvidia.compiler as cb
 
   CAN_USE_TRITON = True
 except ModuleNotFoundError:
@@ -154,33 +153,6 @@ def aval_size_bytes(aval):
   return np.dtype(aval.dtype).itemsize * aval.size
 
 
-def ptx_get_kernel_name(module) -> str:
-  return cb.get_kernel_name(module, pattern="// .globl")
-
-
-def get_arch_default_num_warps(device_type):
-  if device_type in ["cuda", "hip"]:
-    num_warps = 4
-  else:
-    device_backend = get_backend(device_type)
-    assert device_backend
-    arch = device_backend.get_architecture_descriptor()
-    num_warps = arch["num_warps"]
-  return num_warps
-
-
-def get_arch_default_num_stages(device_type, capability):
-  if device_type == "cuda":
-    num_stages = 3 if capability >= 75 else 2
-  else:
-    device_backend = get_backend(device_type)
-    assert device_backend
-    arch = device_backend.get_architecture_descriptor()
-    num_stages = arch["num_stages"]
-
-  return num_stages
-
-
 def compile_ttir_to_ptx_inplace(
     ttir,
     tl_context: tl_ir.Context,
@@ -236,7 +208,7 @@ def compile_ttir_to_ptx_inplace(
   )
   if cuda_options.debug:
     print(ptx)
-  name = ptx_get_kernel_name(ptx)
+  name = metadata["name"]
   cluster_dims = metadata["cluster_dims"]
   return ptx, name, shared_mem_bytes, compute_capability, cluster_dims
 
@@ -260,14 +232,14 @@ def get_or_create_triton_kernel(
 ) -> Tuple[triton_kernel_call_lib.TritonKernel, Any]:
   device_type = "cuda"
   if num_warps is None:
-    num_warps = get_arch_default_num_warps(device_type)
+    num_warps = 4
   # TODO(sharadmv): handle multiple devices, right now we assume device 0
   # which is fine when we have multiple of the same GPU but this won't work in
   # general.
   device = 0
   arch = triton_kernel_call_lib.get_compute_capability(device)
   if num_stages is None:
-    num_stages = get_arch_default_num_stages(device_type, arch)
+    num_stages = 3
 
   signature = dict(enumerate(arg_dtypes))
   # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
