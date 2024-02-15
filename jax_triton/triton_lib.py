@@ -153,13 +153,6 @@ def aval_size_bytes(aval):
   return np.dtype(aval.dtype).itemsize * aval.size
 
 
-# Triton unconditionally enables debug mode in all of its stages. Ideally,
-# this should be controlled by cb.CUDAOptions.debug, but for simplicity we
-# disable debug mode entirely until https://github.com/openai/triton/pull/3127
-# is merged.
-tl_ir.pass_manager.enable_debug = lambda self: None
-
-
 def compile_ttir_to_ptx_inplace(
     ttir,
     cuda_backend: cb.CUDABackend,
