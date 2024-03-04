@@ -239,6 +239,8 @@ def get_or_create_triton_kernel(
   # general.
   device = 0
   arch = triton_kernel_call_lib.get_compute_capability(device)
+  if num_ctas > 1 and arch < 90:
+    raise ValueError("num_ctas > 1 unsupported before Hopper.")
   if num_stages is None:
     num_stages = 3
 
@@ -472,10 +474,6 @@ def triton_kernel_call_lowering(
         kernel_params.append(
             triton_kernel_call_lib.create_scalar_parameter(arg, dtype)
         )
-
-    # TODO(cjfj): Add support for `num_ctas` in kernel launch code.
-    if num_ctas != 1:
-      raise ValueError("`num_ctas != 1` is not yet supported.")
 
     kernel_calls.append(
         triton_kernel_call_lib.TritonKernelCall(
