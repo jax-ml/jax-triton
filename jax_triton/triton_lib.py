@@ -477,15 +477,16 @@ def triton_kernel_call_lowering(
     if num_ctas != 1:
       raise ValueError("`num_ctas != 1` is not yet supported.")
 
-    kernel_calls.append(
-        triton_kernel_call_lib.TritonKernelCall(
-            kernel,
-            params["grid"][0],
-            params["grid"][1],
-            params["grid"][2],
-            kernel_params,
-        )
-    )
+    if kernel.can_launch():
+      kernel_calls.append(
+          triton_kernel_call_lib.TritonKernelCall(
+              kernel,
+              params["grid"][0],
+              params["grid"][1],
+              params["grid"][2],
+              kernel_params,
+          )
+      )
 
   if len(kernel_calls) > 1:
     named_scalar_args = {fn.arg_names[i]: v for i, _, v in scalar_args}
