@@ -20,6 +20,7 @@ import jax_triton as jt
 import numpy as np
 import triton
 import triton.language as tl
+from triton.language.extra.cuda import libdevice
 
 
 @triton.jit
@@ -71,7 +72,7 @@ def tanh_kernel(
   # Load x and y from DRAM, masking out any extra elements in case the input is not a
   # multiple of the block size
   x = tl.load(x_ptr + offsets, mask=mask)
-  output = tl.math.tanh(x)
+  output = libdevice.tanh(x)
   # Write x + y back to DRAM
   tl.store(output_ptr + offsets, output, mask=mask)
 
