@@ -14,7 +14,6 @@
 
 """Library for JAX-Triton integrations."""
 import jaxlib
-from jax._src.lib import gpu_triton
 from jax_triton import utils
 from jax_triton.triton_lib import triton_call
 from jax.experimental.pallas import cdiv
@@ -23,8 +22,13 @@ from jax.experimental.pallas import strides_from_shape
 from jax_triton.version import __version__
 from jax_triton.version import __version_info__
 
-get_compute_capability = gpu_triton.get_compute_capability
+if jaxlib.version.__version_info__ >= (0, 4, 25):
+  from jax._src.pallas import triton
+  get_compute_capability = triton.get_compute_capability
+
 if jaxlib.version.__version_info__ >= (0, 4, 14):
+  from jax._src.lib import gpu_triton
+  get_compute_capability = gpu_triton.get_compute_capability
   try:
     get_serialized_metadata = gpu_triton.get_serialized_metadata
   except AttributeError:

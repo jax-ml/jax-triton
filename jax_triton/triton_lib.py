@@ -47,7 +47,6 @@ try:
   import triton.language as tl
   from triton.runtime import autotuner
   import triton._C.libtriton as _triton
-  from triton._C.libtriton import ir as tl_ir
   import triton.backends.nvidia.compiler as cb
 
   CAN_USE_TRITON = True
@@ -172,7 +171,7 @@ def compile_ttir_to_ptx_inplace(
     with tempfile.NamedTemporaryFile(mode="wb") as f:
       ttir.operation.write_bytecode(f)
       f.flush()
-      ttir = tl_ir.parse_mlir_module(f.name, context)
+      ttir = _triton.ir.parse_mlir_module(f.name, context)
     ttir.context = context
   try:
     metadata = dict()
