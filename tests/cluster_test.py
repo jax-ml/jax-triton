@@ -51,7 +51,7 @@ class ClusterTest(parameterized.TestCase):
     def my_compile_ttir_to_ptx(*args, **kwargs):
       nonlocal cluster_dims, original_compile_ttir_to_ptx_fn
       ret_args = original_compile_ttir_to_ptx_fn(*args, **kwargs)
-      cluster_dims = ret_args[-1]
+      cluster_dims = ret_args.cluster_dims
       return ret_args
 
     my_triton_call = functools.partial(jt.triton_call, num_ctas=num_ctas)
