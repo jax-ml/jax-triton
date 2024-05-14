@@ -296,7 +296,7 @@ def get_or_create_triton_kernel(
   kernel = _COMPILED_KERNEL_CACHE.get(cache_key)
 
   if kernel is None:
-    target = ("cuda", compute_capability)
+    target = cb.GPUTarget('cuda', compute_capability, 32)
     cuda_backend = cb.CUDABackend(target)
     cuda_options = cuda_backend.parse_options(
         dict(
