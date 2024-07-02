@@ -35,10 +35,10 @@ def matmul(x, y, *, block_shape):
                         out_shape=jax.ShapeDtypeStruct((x.shape[0], y.shape[1]),
                                                        x.dtype),
                         in_specs=[
-                          pl.BlockSpec(lambda i, j: (i, 0), (l, x.shape[1])),
-                          pl.BlockSpec(lambda i, j: (0, j), (y.shape[0], r))
+                          pl.BlockSpec((l, x.shape[1]), lambda i, j: (i, 0)),
+                          pl.BlockSpec((y.shape[0], r), lambda i, j: (0, j))
                         ],
-                        out_specs=pl.BlockSpec(lambda i, j: (i, j), (l, r)),
+                        out_specs=pl.BlockSpec((l, r), lambda i, j: (i, j)),
                         grid=(x.shape[0] // l, y.shape[1] // r),
                         debug=True)(x, y)
 
