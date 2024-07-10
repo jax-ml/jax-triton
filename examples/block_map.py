@@ -147,13 +147,13 @@ def mha(q, k, v, *,
   out, _ = pl.pallas_call(
       kernel, out_shape,
       in_specs=[
-        pl.BlockSpec(q_index_map, (1, block_q, 1, head_dim)),
-        pl.BlockSpec(k_index_map, (1, seq_len, 1, head_dim)),
-        pl.BlockSpec(v_index_map, (1, seq_len, 1, head_dim)),
+          pl.BlockSpec((1, block_q, 1, head_dim), q_index_map),
+          pl.BlockSpec((1, seq_len, 1, head_dim), k_index_map),
+          pl.BlockSpec((1, seq_len, 1, head_dim), v_index_map),
       ],
       out_specs=[
-        pl.BlockSpec(o_index_map, (1, block_q, 1, head_dim)),
-        pl.BlockSpec(tmp_index_map, (1, 1, block_q)),
+          pl.BlockSpec((1, block_q, 1, head_dim), o_index_map),
+          pl.BlockSpec((1, 1, block_q), tmp_index_map),
       ],
       num_warps=num_warps, num_stages=num_stages,
       grid=grid, debug=True)(q, k, v)
