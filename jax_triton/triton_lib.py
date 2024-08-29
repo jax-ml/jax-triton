@@ -32,6 +32,7 @@ from absl import logging
 import jax
 import jaxlib
 from jax import tree_util
+from jax import extend
 from jax._src import core
 from jax._src import state
 from jax._src import util
@@ -92,11 +93,11 @@ _JAX_TO_TRITON_TYPE_MAP = {
 
 
 def is_device_rocm():
-  return "rocm" in jax.lib.xla_bridge.get_backend().platform_version
+  return "rocm" in extend.backend.get_backend().platform_version
 
 
 def is_device_cuda():
-  return "cuda" in jax.lib.xla_bridge.get_backend().platform_version
+  return "cuda" in extend.backend.get_backend().platform_version
 
 
 Grid = Union[int, Tuple[int], Tuple[int, int], Tuple[int, int, int]]
