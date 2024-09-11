@@ -379,11 +379,11 @@ def get_or_create_triton_kernel(
     num_warps = 4
   if num_stages is None:
     num_stages = 3
+  # TODO(sharadmv): handle multiple devices, right now we assume device 0
+  # which is fine when we have multiple of the same GPU but this won't work in
+  # general.
+  device = 0
   if compute_capability is None:
-    # TODO(sharadmv): handle multiple devices, right now we assume device 0
-    # which is fine when we have multiple of the same GPU but this won't work in
-    # general.
-    device = 0
     compute_capability = triton_kernel_call_lib.get_compute_capability(device)
   if num_ctas > 1 and compute_capability < 90:
     raise ValueError("num_ctas > 1 unsupported before Hopper.")
