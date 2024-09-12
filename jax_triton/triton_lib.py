@@ -86,7 +86,10 @@ _JAX_TO_TRITON_TYPE_MAP = {
     jnp.dtype("float64"): "fp64",
     jnp.dtype("float32"): "fp32",
     jnp.dtype("float16"): "fp16",
-    # Triton has 'fp8' as well which Jax doesn't support yet.
+    jnp.dtype("float8_e4m3fn"): "fp8e4nv",
+    jnp.dtype("float8_e5m2"): "fp8e5",
+    jnp.dtype("float8_e4m3fnuz"): "fp8e4b8",
+    jnp.dtype("float8_e5m2fnuz"): "fp8e5b16",
     jnp.dtype("int64"): "i64",
     jnp.dtype("int32"): "i32",
     jnp.dtype("int16"): "i16",
