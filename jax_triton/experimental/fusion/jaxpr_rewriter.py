@@ -19,7 +19,8 @@ import abc
 import dataclasses
 import itertools as it
 
-from typing import Any, Callable, List, Tuple, Union
+from typing import Any
+from collections.abc import Callable
 
 from jax._src import core as jax_core
 import jax.numpy as jnp
@@ -35,7 +36,7 @@ Success = matcher.Success
 class Node(matcher.Pattern, metaclass=abc.ABCMeta):
 
   @abc.abstractproperty
-  def parents(self) -> List[Node]:
+  def parents(self) -> list[Node]:
     ...
 
 
@@ -51,9 +52,9 @@ class Node(matcher.Pattern, metaclass=abc.ABCMeta):
 class Eqn(Node):
   primitive: jax_core.Primitive
   params: jr.Params
-  invars: List[Node]
-  shape: Union[Tuple[int, ...], List[Tuple[int, ...]]]
-  dtype: Union[jnp.dtype, List[jnp.dtype]]
+  invars: list[Node]
+  shape: tuple[int, ...] | list[tuple[int, ...]]
+  dtype: jnp.dtype | list[jnp.dtype]
 
   @property
   def parents(self):
@@ -77,7 +78,7 @@ class Eqn(Node):
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class JaxprVar(Node):
-  shape: Tuple[int, ...]
+  shape: tuple[int, ...]
   dtype: jnp.dtype
 
   def match(self, expr, bindings, succeed):
@@ -131,7 +132,7 @@ class Literal(Node):
 @dataclasses.dataclass(eq=False)
 class Part(Node):
   index: int
-  shape: Tuple[int, ...]
+  shape: tuple[int, ...]
   dtype: jnp.dtype
   parent: Node
 
@@ -153,9 +154,9 @@ class Part(Node):
 
 @dataclasses.dataclass(eq=True)
 class JaxprGraph(matcher.Pattern):
-  constvars: List[Node]
-  invars: List[Node]
-  outvars: List[Node]
+  constvars: list[Node]
+  invars: list[Node]
+  outvars: list[Node]
 
   def get_nodes(self):
     nodes = set(self.outvars)
@@ -167,7 +168,7 @@ class JaxprGraph(matcher.Pattern):
         queue.append(p)
     return nodes
 
-  def get_children(self, node) -> List[Node]:
+  def get_children(self, node) -> list[Node]:
     nodes = self.get_nodes()
     return [n for n in nodes if node in n.parents]
 
@@ -274,7 +275,7 @@ class JaxprGraph(matcher.Pattern):
     outvars = [env[n] for n in self.outvars]
     return jax_core.Jaxpr(constvars, invars, outvars, eqns, jax_core.no_effects)
 
-  def toposort(self) -> List[Node]:
+  def toposort(self) -> list[Node]:
     node_stack = list(self.outvars)
     child_counts = {}
     while node_stack:

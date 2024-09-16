@@ -15,7 +15,7 @@
 """Contains lowering passes for jaxprs to pallas."""
 import functools
 
-from typing import Any, Dict
+from typing import Any
 
 import jax
 from jax import api_util
@@ -317,7 +317,7 @@ def _eval_jaxpr_inline_calls(jaxpr: core.Jaxpr, consts, *args):
   def write(v: Var, val: Any) -> None:
     env[v] = val
 
-  env: Dict[Var, Any] = {}
+  env: dict[Var, Any] = {}
   map(write, jaxpr.constvars, consts)
   map(write, jaxpr.invars, args)
   for eqn in jaxpr.eqns:

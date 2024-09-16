@@ -17,7 +17,7 @@ import dataclasses
 import functools
 import os
 
-from typing import Any, Tuple
+from typing import Any
 
 import jax
 from jax import lax
@@ -204,7 +204,7 @@ def make_elementwise(shape, dtype, *args):
 class MatmulElementwise(jax_rewrite.JaxExpression):
   x: jax_rewrite.JaxExpression
   y: jax_rewrite.JaxExpression
-  elem_ops: Tuple[core.Primitive]
+  elem_ops: tuple[core.Primitive]
 
   def match(self, expr, bindings, succeed):
     if not isinstance(expr, MatmulElementwise):
