@@ -17,14 +17,11 @@ import argparse
 import functools
 import timeit
 
-from typing import Optional, Tuple
 
 import jax.numpy as jnp
 from jax import random
 import jax
-from jax import lax
 from jax._src.lax.control_flow import for_loop
-import jax.numpy as jnp
 import numpy as np
 
 import jax_triton as jt
@@ -188,13 +185,15 @@ def main(unused_argv):
   x = random.normal(x_key, (batch_size, feature_size), dtype)
   h = random.normal(h_key, (batch_size, hidden_size), dtype)
   c = random.normal(c_key, (batch_size, hidden_size), dtype)
-  lstm_cell = jax.jit(functools.partial(lstm_cell,
-                                        block_batch=block_batch,
-                                        block_hidden=block_hidden,
-                                        block_features=block_features,
-                                        num_warps=num_warps,
-                                        num_stages=num_stages))
-  y, c_next = jax.block_until_ready(lstm_cell(weights, x, h, c))
+  lstm_cell_fn = jax.jit(functools.partial(
+      lstm_cell,
+      block_batch=block_batch,
+      block_hidden=block_hidden,
+      block_features=block_features,
+      num_warps=num_warps,
+      num_stages=num_stages,
+  ))
+  y, c_next = jax.block_until_ready(lstm_cell_fn(weights, x, h, c))
   y_ref, c_next_ref = lstm_cell_reference(weights, x, h, c)
   np.testing.assert_allclose(y, y_ref, atol=0.05, rtol=0.05)
   np.testing.assert_allclose(c_next, c_next_ref, atol=0.05, rtol=0.05)

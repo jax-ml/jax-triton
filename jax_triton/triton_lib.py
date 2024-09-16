@@ -336,8 +336,6 @@ def compile_ttir_to_hsaco_inplace(
   amdgcn = hip_backend.make_amdgcn(llir, metadata, hip_options)
   hsaco = hip_backend.make_hsaco(amdgcn, metadata, hip_options)
 
-  if hip_options.debug:
-    print(x)
   name = metadata["name"]
   ttgir = str(ttgir) if _JAX_TRITON_DUMP_DIR else None
   llir = str(llir) if _JAX_TRITON_DUMP_DIR else None

@@ -21,7 +21,6 @@ import jax.numpy as jnp
 from jax import random
 import jax
 from jax import lax
-import jax.numpy as jnp
 import numpy as np
 
 import jax_triton as jt
@@ -87,7 +86,7 @@ class BlockELL:
     return BlockELL(blocks, blocks_per_row, indices, shape=shape)
 
   def _validate(self):
-    nblocks, n, m = self.blocks.shape
+    _nblocks, n, m = self.blocks.shape
     nrows = self.blocks_per_row.shape[0]
     assert self.indices.shape[0] == nrows
     assert len(self.shape) == 2
@@ -168,7 +167,7 @@ def sdd_matmul(x_ell, y, num_warps: int = 8, num_stages: int = 3, bn: int = 64,
   grid = (jt.cdiv(m, bm), jt.cdiv(n, bn))
 
   kernel = functools.partial(sdd_kernel, bm=bm, bn=bn)
-  out_shape = jax.ShapeDtypeStruct(shape=(m, n), dtype=x.dtype)
+  out_shape = jax.ShapeDtypeStruct(shape=(m, n), dtype=x_ell.dtype)
   return pl.pallas_call(kernel, num_warps=num_warps, num_stages=num_stages,
                         grid=grid, out_shape=out_shape,
                         debug=debug)(x_ell.blocks, x_ell.indices,

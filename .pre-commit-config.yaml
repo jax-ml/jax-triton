@@ -1,0 +1,31 @@
+# Install the pre-commit hooks below with
+# 'pre-commit install'
+
+# Auto-update the version of the hooks with
+# 'pre-commit autoupdate'
+
+# Run the hooks on all files with
+# 'pre-commit run --all'
+
+repos:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: 2c9f875913ee60ca25ce70243dc24d5b6415598c  # frozen: v4.6.0
+  hooks:
+  - id: check-ast
+  - id: check-merge-conflict
+  - id: check-toml
+  - id: check-yaml
+  - id: end-of-file-fixer
+    # only include python files
+    files: \.py$
+  - id: debug-statements
+    # only include python files
+    files: \.py$
+  - id: trailing-whitespace
+    # only include python files
+    files: \.py$
+
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: 8b5112a3b2ad121439a2092f8ff548c0d80f2514  # frozen: v0.6.1
+  hooks:
+  - id: ruff

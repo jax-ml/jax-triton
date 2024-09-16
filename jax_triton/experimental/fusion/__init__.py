@@ -19,4 +19,4 @@ import oryx
 jax.nn.sigmoid = sigmoid
 del sigmoid, oryx, jax
 
-from jax_triton.experimental.fusion.lowering import jit
+from jax_triton.experimental.fusion.lowering import jit as jit
