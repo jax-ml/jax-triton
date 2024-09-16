@@ -26,3 +26,25 @@ packages = ["jax_triton"]
 
 [tool.setuptools.dynamic]
 version = {attr = "jax_triton.version.__version__"}
+
+[tool.ruff]
+preview = true
+exclude = [
+    ".git",
+    "build",
+    "__pycache__",
+    "*.ipynb",
+]
+line-length = 88
+indent-width = 2
+target-version = "py310"
+
+[tool.ruff.lint]
+ignore = [
+    # Do not assign a `lambda` expression, use a `def`
+    "E731",
+    # Module level import not at top of file
+    "E402",
+    # Ambiguous variable name
+    "E741",
+]

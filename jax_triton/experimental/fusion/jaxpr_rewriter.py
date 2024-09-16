@@ -19,7 +19,7 @@ import abc
 import dataclasses
 import itertools as it
 
-from typing import Any, Callable, Dict, List, Set, Tuple, Union
+from typing import Any, Callable, List, Tuple, Union
 
 from jax._src import core as jax_core
 import jax.numpy as jnp

@@ -18,7 +18,6 @@ from typing import Optional
 
 import jax
 import jax.numpy as jnp
-from jax import lax
 from jax import random
 import jax_triton as jt
 from jax_triton import pallas as pl
@@ -178,8 +177,8 @@ def main(unused_argv):
   k = random.normal(k_key, shape, dtype=dtype)
   v = random.normal(v_key, shape, dtype=dtype)
 
-  o = mha(q, k, v).block_until_ready()
-  o_ref = mha_reference(q, k, v).block_until_ready()
+  mha(q, k, v).block_until_ready()
+  mha_reference(q, k, v).block_until_ready()
 
 if __name__ == "__main__":
   from absl import app
