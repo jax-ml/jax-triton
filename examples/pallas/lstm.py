@@ -67,7 +67,7 @@ def lstm_kernel(
   accs = for_loop.for_loop(num_k_blocks, body, [acc_i, acc_f, acc_o, acc_g])
   bs = [pl.load(b_ref, (idx_n,))
         for b_ref in [b_hi_ref, b_hf_ref, b_hg_ref, b_ho_ref]]
-  acc_i, acc_f, acc_g, acc_o = [acc + b for acc, b in zip(accs, bs)]
+  acc_i, acc_f, acc_g, acc_o = (acc + b for acc, b in zip(accs, bs))
   i_gate, f_gate, o_gate = (
       jax.nn.sigmoid(acc_i), jax.nn.sigmoid(acc_f), jax.nn.sigmoid(acc_o))
   cell = jnp.tanh(acc_g)
@@ -124,7 +124,7 @@ def lstm_cell_reference(weights, x, h, c):
   xs = [jnp.dot(x, w) for w in ws]
   hs = [jnp.dot(h, u) for u in us]
   accs = [x + h for x, h in zip(xs, hs)]
-  acc_i, acc_f, acc_g, acc_o = [acc + b[None] for acc, b in zip(accs, bs)]
+  acc_i, acc_f, acc_g, acc_o = (acc + b[None] for acc, b in zip(accs, bs))
   i_gate, f_gate, o_gate = (
       jax.nn.sigmoid(acc_i), jax.nn.sigmoid(acc_f), jax.nn.sigmoid(acc_o))
   cell = jnp.tanh(acc_g)

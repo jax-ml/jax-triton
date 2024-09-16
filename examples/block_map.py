@@ -14,7 +14,6 @@
 
 import functools
 
-from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -113,7 +112,7 @@ def mha(q, k, v, *,
     sm_scale: float = 1.0,
     block_q: int = 128,
     block_k: int = 128,
-    num_warps: Optional[int] = None,
+    num_warps: int | None = None,
     num_stages: int = 1,
     grid=None,
     ):

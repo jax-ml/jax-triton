@@ -15,7 +15,6 @@
 import functools
 import timeit
 
-from typing import Tuple
 
 import jax.numpy as jnp
 from jax import random
@@ -63,7 +62,7 @@ class BlockELL:
   blocks: jnp.ndarray  # float32[n_rows, n_blocks, *block_size]
   blocks_per_row: jnp.ndarray  # int32[n_rows, n_blocks]
   indices: jnp.ndarray  # int32[n_rows, max_num_blocks_per_row, 2]
-  shape: Tuple[int, int] # (n_rows * block_size[0], n_cols * block_size[1])
+  shape: tuple[int, int] # (n_rows * block_size[0], n_cols * block_size[1])
 
   ndim: int = property(lambda self: len(self.shape))
   num_blocks = property(lambda self: self.blocks.shape[0])

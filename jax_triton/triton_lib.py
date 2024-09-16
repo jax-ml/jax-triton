@@ -25,7 +25,8 @@ import os
 import pprint
 import tempfile
 import types
-from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple, Union
+from typing import Any, Protocol, Union
+from collections.abc import Callable, Sequence
 import zlib
 from functools import partial
 
@@ -102,11 +103,11 @@ _JAX_TO_TRITON_TYPE_MAP = {
     jnp.dtype("bool"): "B",
 }
 
-Grid = Union[int, Tuple[int], Tuple[int, int], Tuple[int, int, int]]
-GridOrLambda = Union[Grid, Callable[[Dict[str, Any]], Grid]]
+Grid = Union[int, tuple[int], tuple[int, int], tuple[int, int, int]]
+GridOrLambda = Union[Grid, Callable[[dict[str, Any]], Grid]]
 
 
-def normalize_grid(grid: GridOrLambda, metaparams) -> Tuple[int, int, int]:
+def normalize_grid(grid: GridOrLambda, metaparams) -> tuple[int, int, int]:
   if callable(grid):
     grid = grid(metaparams)
   if isinstance(grid, int):
@@ -186,8 +187,8 @@ class CompilationResult:
   name: str
   shared_mem_bytes: int
   cluster_dims: tuple
-  ttgir: Optional[str]
-  llir: Optional[str]
+  ttgir: str | None
+  llir: str | None
 
 def compile_ttir_inplace(
     ttir,
@@ -375,7 +376,7 @@ def get_or_create_triton_kernel(
     enable_fp_fusion,
     metaparams,
     dump: bool,
-) -> Tuple[triton_kernel_call_lib.TritonKernel, Any]:
+) -> tuple[triton_kernel_call_lib.TritonKernel, Any]:
   if num_warps is None:
     num_warps = 4
   if num_stages is None:
@@ -730,7 +731,7 @@ mlir.register_lowering(triton_kernel_call_p,
 class ShapeDtype(Protocol):
 
   @property
-  def shape(self) -> Tuple[int, ...]:
+  def shape(self) -> tuple[int, ...]:
     ...
 
   @property
@@ -739,21 +740,21 @@ class ShapeDtype(Protocol):
 
 
 def triton_call(
-    *args: Union[jax.Array, bool, int, float, np.float32],
+    *args: jax.Array | bool | int | float | np.float32,
     kernel: triton.JITFunction,
-    out_shape: Union[ShapeDtype, Sequence[ShapeDtype]],
+    out_shape: ShapeDtype | Sequence[ShapeDtype],
     grid: GridOrLambda,
     name: str = "",
     custom_call_target_name: str = "triton_kernel_call",
-    num_warps: Optional[int] = None,
-    num_stages: Optional[int] = None,
+    num_warps: int | None = None,
+    num_stages: int | None = None,
     num_ctas: int = 1,  # TODO(giorgioa): Add support for dimensions tuple.
-    compute_capability: Optional[int] = None,
+    compute_capability: int | None = None,
     enable_fp_fusion: bool = True,
-    input_output_aliases: Optional[Dict[int, int]] = None,
-    zeroed_outputs: Union[
-        Sequence[int], Callable[[Dict[str, Any]], Sequence[int]]
-    ] = (),
+    input_output_aliases: dict[int, int] | None = None,
+    zeroed_outputs: (
+        Sequence[int] | Callable[[dict[str, Any]], Sequence[int]]
+    ) = (),
     debug: bool = False,
     serialized_metadata: bytes = b"",
     **metaparams: Any,

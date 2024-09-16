@@ -8,7 +8,6 @@ dependencies = [
   "absl-py>=1.4.0",
   "jax>=0.4.31",
   "triton>=3.0",
-  "setuptools",  # triton seems to need this when installing itself.
 ]
 
 [project.optional-dependencies]
