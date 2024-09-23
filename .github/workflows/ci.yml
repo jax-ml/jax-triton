@@ -27,6 +27,7 @@ jobs:
       # TODO: change image based on what is needed for these tests
       image: index.docker.io/tensorflow/build@sha256:7fb38f0319bda36393cad7f40670aa22352b44421bb906f5cf34d543acd8e1d2 # ratchet:tensorflow/build:latest-python3.11
     steps:
+    - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # ratchet:actions/checkout@v4
     -   name: Setup Released JAX
         run: |
           pip install "jax[cuda12]"
