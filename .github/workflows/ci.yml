@@ -30,7 +30,7 @@ jobs:
     - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # ratchet:actions/checkout@v4
     -   name: Setup Released JAX
         run: |
-          pip install "jax[cuda12]"
+          pip install -U "jax[cuda12]"
           pip install pytest
     -   name: Test JAX Triton
         run: |
