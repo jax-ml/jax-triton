@@ -35,5 +35,5 @@ jobs:
         run: |
           echo "Running JAX Triton GPU Tests"
           nvidia-smi
-          pytest tests/
+          pytest -v --tb=short ./tests/
 
