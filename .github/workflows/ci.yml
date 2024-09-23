@@ -31,11 +31,13 @@ jobs:
     -   name: Setup Released JAX
         run: |
           pip install "jax[cuda12]"
+          # Need newer ml-dtypes because we install newer numpy
+          pip install --upgrade ml-dtypes
           pip install pytest
     -   name: Test JAX Triton
         run: |
           echo "Running JAX Triton GPU Tests"
           nvidia-smi
-          pip install .
+          pip install . 
           pytest -v --tb=short tests/
 
