@@ -27,9 +27,10 @@ jobs:
       # TODO: change image based on what is needed for these tests
       image: index.docker.io/tensorflow/build@sha256:7fb38f0319bda36393cad7f40670aa22352b44421bb906f5cf34d543acd8e1d2 # ratchet:tensorflow/build:latest-python3.11
     steps:
-    -   name: Install Released JAX
+    -   name: Setup Released JAX
         run: |
           pip install "jax[cuda12]"
+          pip install pytest
     -   name: Test JAX Triton
         run: |
           echo "Running JAX Triton GPU Tests"
