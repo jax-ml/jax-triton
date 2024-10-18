@@ -371,10 +371,11 @@ def get_or_create_triton_kernel(
   # `JITFunction._get_config` to get the specialization_attr.
   mock_torch_tensor = types.SimpleNamespace(data_ptr=lambda: 16)
   args_for_specialization_attr = [mock_torch_tensor] * len(arg_dtypes)
+  backend = backend_init_func(device, compute_capability)
   for i, _, v in scalar_args:
     args_for_specialization_attr[i] = v
-  specialization_attr = fn._get_config(*args_for_specialization_attr)  # pylint: disable=protected-access
 
+  specialization_attr = backend.get_attrs_descriptor(fn.params[:len(args_for_specialization_attr)], args_for_specialization_attr)  # pylint: disable=protected-access
   constants = {k: v for k, v in metaparams.items()}
   constants.update({k: None for _, k, v in scalar_args if v is None})
   constants.update({fn.arg_names[i]: 1 for i in specialization_attr.equal_to_1})
@@ -383,7 +384,7 @@ def get_or_create_triton_kernel(
   cache_key = (
       fn,
       tuple(signature.items()),
-      tuple(vars(specialization_attr).values()),
+      tuple(specialization_attr.arg_properties),
       tuple(constants.items()),
       num_warps,
       num_stages,
@@ -403,7 +404,6 @@ def get_or_create_triton_kernel(
         "enable_fp_fusion": enable_fp_fusion,
     }
 
-    backend = backend_init_func(device, compute_capability)
     options = backend.parse_options(opts)
 
     kernel_hash = abs(hash(cache_key))
@@ -643,7 +643,7 @@ def triton_kernel_call_lowering(
         kernel_params.append(
             triton_kernel_call_lib.create_array_parameter(
                 zeroed_params_with_sizes.get(i, 0),
-                16 if (i in specialization_attr.divisible_by_16) else 0,
+                16 if (i in specialization_attr.divisibility_16) else 0,
             )
         )
       elif i not in specialization_attr.equal_to_1:
