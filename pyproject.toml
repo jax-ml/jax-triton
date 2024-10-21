@@ -40,10 +40,34 @@ target-version = "py310"
 
 [tool.ruff.lint]
 ignore = [
-    # Do not assign a `lambda` expression, use a `def`
-    "E731",
-    # Module level import not at top of file
-    "E402",
-    # Ambiguous variable name
-    "E741",
+    # Unnecessary collection call
+    "C408",
+    # Unnecessary map usage
+    "C417",
+    # Unnecessary dict comprehension for iterable
+    "C420",
+    # Object names too complex
+    "C901",
+    # Local variable is assigned to but never used
+    "F841",
+    # Raise with from clause inside except block
+    "B904",
+    # Zip without explicit strict parameter
+    "B905",
+]
+select = [
+    "B9",
+    "C",
+    "F",
+    "W",
+    "YTT",
+    "ASYNC",
+    "E101",
+    "E112",
+    "E113",
+    "E115",
+    "E117",
+    "E225",
+    "E227",
+    "E228",
 ]

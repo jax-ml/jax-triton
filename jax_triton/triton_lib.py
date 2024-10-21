@@ -51,7 +51,6 @@ try:
   import triton.language as tl
   from triton.runtime import autotuner
   import triton._C.libtriton as _triton
-  from triton._C.libtriton import ir as tl_ir
   import triton.backends.nvidia.compiler as cb
 
   CAN_USE_TRITON = True
@@ -375,7 +374,7 @@ def get_or_create_triton_kernel(
     args_for_specialization_attr[i] = v
   specialization_attr = fn._get_config(*args_for_specialization_attr)  # pylint: disable=protected-access
 
-  constants = {k: v for k, v in metaparams.items()}
+  constants = dict(metaparams)
   constants.update({k: None for _, k, v in scalar_args if v is None})
   constants.update({fn.arg_names[i]: 1 for i in specialization_attr.equal_to_1})
 

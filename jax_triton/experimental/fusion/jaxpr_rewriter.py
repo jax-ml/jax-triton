@@ -120,7 +120,7 @@ class Literal(Node):
 
   def match(self, expr, bindings, succeed):
     if not isinstance(expr, Literal):
-      return []
+      return []  # noqa: B901
     yield from matcher.matcher((self.value, self.dtype))((expr.value,
       expr.dtype), bindings, succeed)
 
@@ -138,7 +138,7 @@ class Part(Node):
 
   def match(self, expr, bindings, succeed):
     if not isinstance(expr, Part):
-      return []
+      return []  # noqa: B901
     yield from matcher.matcher((self.index, self.shape, self.dtype, self.parent))((
       expr.index, expr.shape, expr.dtype, expr.parent), bindings, succeed)
 
