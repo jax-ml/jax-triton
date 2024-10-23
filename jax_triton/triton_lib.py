@@ -537,7 +537,10 @@ def triton_kernel_call_lowering(
   named_args = dict(unsafe_zip(fn.arg_names, args))
 
   if isinstance(fn, autotuner.Autotuner):
-    key_idxs = [fn.arg_names.index(k) for k in fn.keys]
+    if hasattr(fn, "key_idx"):
+      key_idxs = fn.key_idx  # Triton <=3.2
+    else:
+      key_idxs = [fn.arg_names.index(k) for k in fn.keys]
     if any(idx not in key_idxs for idx, _, _ in scalar_args):
       logging.warning(
           "Auto-tuning key does not include all scalar arguments. "
