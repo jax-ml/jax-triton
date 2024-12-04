@@ -2,7 +2,7 @@
 
 ![PyPI version](https://img.shields.io/pypi/v/jax-triton)
 
-The `jax-triton` repository contains integrations between [JAX](https://github.com/google/jax) and [Triton](https://github.com/openai/triton).
+The `jax-triton` repository contains integrations between [JAX](https://github.com/jax-ml/jax) and [Triton](https://github.com/openai/triton).
 
 Documentation can be found [here](https://jax-ml.github.io/jax-triton).
 
