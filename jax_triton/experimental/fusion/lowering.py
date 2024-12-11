@@ -369,7 +369,7 @@ def jit(f, *, fuse: bool = True, debug: bool = False):
   def wrapped(*args, **kwargs):
     flat_args, in_tree = tree_util.tree_flatten((args, kwargs))
     flat_fun, out_tree_thunk = api_util.flatten_fun(lu.wrap_init(f), in_tree)
-    in_avals = [core.raise_to_shaped(core.get_aval(a)) for a in flat_args]
+    in_avals = [core.get_aval(a) for a in flat_args]
     jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(flat_fun, in_avals)
     jaxpr, consts = lower_jaxpr(jaxpr, consts, fuse=fuse, debug=debug)
     out_vals = core.eval_jaxpr(jaxpr, consts, *flat_args)
