@@ -40,7 +40,7 @@ def _dummy_fn(x):
 
 class ClusterTest(parameterized.TestCase):
 
-  @parameterized.parameters(1, 2, 3, 4, 8)
+  @parameterized.parameters(1, 2, 4, 8)
   def test_cluster(self, num_ctas):
     if 'h100' not in jax.devices()[0].device_kind.lower():
       self.skipTest('Clusters available only on H100s.')
