@@ -368,7 +368,9 @@ def get_or_create_triton_kernel(
   specialization_attr = backend.get_attrs_descriptor(fn.params[:len(args_for_specialization_attr)], args_for_specialization_attr)  # pylint: disable=protected-access
   constants = dict(metaparams)
   constants.update({k: None for _, k, v in scalar_args if v is None})
-  constants.update({fn.arg_names[i]: 1 for i in specialization_attr.equal_to_1})
+  constants.update({fn.arg_names[i]: 1 for (i,) in specialization_attr.equal_to_1})
+  for constant in constants:
+    signature[constant] = "constexpr"
 
   # Cache key should contain any parameter that can affect the compiler output.
   cache_key = (
@@ -413,7 +415,7 @@ def get_or_create_triton_kernel(
             fn,
             specialization=tc.ASTSource(
               fn,
-               constants=constants,
+               constexprs=constants,
                signature=signature,
                attrs=specialization_attr,
              ),
@@ -429,7 +431,7 @@ def get_or_create_triton_kernel(
             fn,
             specialization=tc.ASTSource(
               fn,
-               constants=constants,
+               constexprs=constants,
                signature=signature,
                attrs=specialization_attr,
              ),
@@ -634,7 +636,7 @@ def triton_kernel_call_lowering(
                 16 if (i in specialization_attr.divisibility_16) else 0,
             )
         )
-      elif i not in specialization_attr.equal_to_1:
+      elif (i,) not in specialization_attr.equal_to_1:
         kernel_params.append(
             triton_kernel_call_lib.create_scalar_parameter(arg, dtype)
         )
