@@ -22,6 +22,7 @@ import itertools as it
 from typing import Any
 from collections.abc import Callable
 
+import jax.extend as jex
 from jax._src import core as jax_core
 import jax.numpy as jnp
 
@@ -50,7 +51,7 @@ class Node(matcher.Pattern, metaclass=abc.ABCMeta):
 
 @dataclasses.dataclass(eq=False)
 class Eqn(Node):
-  primitive: jax_core.Primitive
+  primitive: jex.core.Primitive
   params: jr.Params
   invars: list[Node]
   shape: tuple[int, ...] | list[tuple[int, ...]]
@@ -96,7 +97,7 @@ class JaxprVar(Node):
     return self
 
   @classmethod
-  def from_var(cls, var: jax_core.Var) -> JaxprVar:
+  def from_var(cls, var: jex.core.Var) -> JaxprVar:
     return JaxprVar(var.aval.shape, var.aval.dtype)
 
 @dataclasses.dataclass(eq=False, frozen=True)
@@ -125,7 +126,7 @@ class Literal(Node):
       expr.dtype), bindings, succeed)
 
   @classmethod
-  def from_literal(cls, var: jax_core.Literal) -> Literal:
+  def from_literal(cls, var: jex.core.Literal) -> Literal:
     return Literal(var.val, var.aval.dtype)
 
 
@@ -199,7 +200,7 @@ class JaxprGraph(matcher.Pattern):
     return False
 
   @classmethod
-  def from_jaxpr(cls, jaxpr: jax_core.Jaxpr) -> JaxprGraph:
+  def from_jaxpr(cls, jaxpr: jex.core.Jaxpr) -> JaxprGraph:
     var_mapping = {}
     for var in it.chain(jaxpr.constvars, jaxpr.invars):
       node = JaxprVar.from_var(var)
@@ -207,7 +208,7 @@ class JaxprGraph(matcher.Pattern):
     for eqn in jaxpr.eqns:
       invars = []
       for invar in eqn.invars:
-        if isinstance(invar, jax_core.Literal):
+        if isinstance(invar, jex.core.Literal):
           node = Literal.from_literal(invar)
         else:
           node = var_mapping[invar]
@@ -228,7 +229,7 @@ class JaxprGraph(matcher.Pattern):
     outvars = [var_mapping[outvar] for outvar in jaxpr.outvars]
     return JaxprGraph(constvars, invars, outvars)
 
-  def to_jaxpr(self) -> jax_core.Jaxpr:
+  def to_jaxpr(self) -> jex.core.Jaxpr:
     gen = jax_core.gensym()
     eqns = []
     sorted_nodes = self.toposort()
@@ -246,11 +247,11 @@ class JaxprGraph(matcher.Pattern):
         invars = []
         for n in node.invars:
           if isinstance(n, Literal):
-            invars.append(jax_core.Literal(n.value, jax_core.ShapedArray((),
+            invars.append(jex.core.Literal(n.value, jax_core.ShapedArray((),
               n.dtype)))
           else:
             invars.append(env[n])
-        jaxpr_eqn = jax_core.JaxprEqn(invars, [], node.primitive,
+        jaxpr_eqn = jex.core.JaxprEqn(invars, [], node.primitive,
             dict(node.params), jax_core.no_effects, None)
         if node.primitive.multiple_results:
           incomplete_eqns[node] = jaxpr_eqn
@@ -273,7 +274,7 @@ class JaxprGraph(matcher.Pattern):
     constvars = [env[n] for n in self.constvars]
     invars = [env[n] for n in self.invars]
     outvars = [env[n] for n in self.outvars]
-    return jax_core.Jaxpr(constvars, invars, outvars, eqns, jax_core.no_effects)
+    return jex.core.Jaxpr(constvars, invars, outvars, eqns, jax_core.no_effects)
 
   def toposort(self) -> list[Node]:
     node_stack = list(self.outvars)

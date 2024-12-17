@@ -30,6 +30,7 @@ import zlib
 
 from absl import logging
 import jax
+import jax.extend as jex
 import jaxlib
 from jax import tree_util
 from jax._src import core
@@ -148,7 +149,7 @@ def get_triton_type(obj: Any) -> str:
   )
 
 
-triton_kernel_call_p = jax.core.Primitive("triton_kernel_call")
+triton_kernel_call_p = jex.core.Primitive("triton_kernel_call")
 triton_kernel_call_p.multiple_results = True
 triton_kernel_call_p.def_impl(
     functools.partial(xla.apply_primitive, triton_kernel_call_p)
