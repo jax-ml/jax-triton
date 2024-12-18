@@ -30,14 +30,14 @@ import zlib
 
 from absl import logging
 import jax
-import jax.extend as jex
-import jaxlib
 from jax import tree_util
 from jax._src import core
 from jax._src import state
 from jax._src import util
+from jax._src.lib import gpu_triton as triton_kernel_call_lib
 from jax._src.lib.mlir import ir
 import jax.dlpack
+import jax.extend as jex
 from jax.interpreters import mlir
 from jax.interpreters import xla
 import jax.numpy as jnp
@@ -64,16 +64,6 @@ except ImportError:
   hb = None
   pass
 
-
-try:
-  from jax._src.lib import gpu_triton as triton_kernel_call_lib
-except ImportError:
-  raise ValueError(
-      "Cannot import jaxlib triton library. You may need a newer"
-      " version of jaxlib. Try installing a nightly wheel from:"
-      " https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda_releases.html"
-      " or https://storage.googleapis.com/jax-releases/jaxlib_nightly_cuda12_releases.html"
-  )
 
 os.environ["TRITON_CACHE_DIR"] = ""
 _JAX_TRITON_DUMP_DIR = os.environ.get("JAX_TRITON_DUMP_DIR")
@@ -522,11 +512,6 @@ def triton_kernel_call_lowering(
     serialized_metadata,
     **metaparams,
 ):
-  if jaxlib.version.__version_info__ < (0, 3, 22) and input_output_aliases:
-    raise NotImplementedError(
-        "`input_output_aliases` only supported on `jaxlib>=0.3.22"
-    )
-
   kernel_call_name = name
   args = list(ctx.avals_in)
   arg_dtypes = list(map(get_triton_type, ctx.avals_in))
@@ -682,11 +667,8 @@ def triton_kernel_call_lowering(
       ir.RankedTensorType.get(shape.shape, mlir.dtype_to_ir_type(shape.dtype))
       for shape in out_shapes
   ]
-  if jaxlib.version.__version_info__ >= (0, 4, 15):
-    call_proto = kernel_call.to_proto(kernel_call_name, serialized_metadata)
-  else:
-    call_proto = kernel_call.to_proto(serialized_metadata)
-  return jaxlib.hlo_helpers.custom_call(
+  call_proto = kernel_call.to_proto(kernel_call_name, serialized_metadata)
+  return mlir.custom_call(
       call_target_name=custom_call_target_name,
       result_types=out_types,
       operands=array_args,
