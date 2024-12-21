@@ -553,7 +553,7 @@ class TritonKernelCallTest(parameterized.TestCase):
             BLOCK_SIZE_M=32,
             BLOCK_SIZE_N=32,
             BLOCK_SIZE_K=32,
-            # K_EXACTLY_DIVISIBLE_BY_BLOCK=False,
+            K_EXACTLY_DIVISIBLE_BY_BLOCK=False,
         )
       except TypeError:
         pass  # Error thrown as the mocked method's return value is invalid.
