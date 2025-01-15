@@ -24,6 +24,7 @@ import inspect
 import os
 import pprint
 import tempfile
+import types
 from typing import Any, Protocol, Union
 import zlib
 
@@ -338,7 +339,7 @@ def get_or_create_triton_kernel(
     enable_fp_fusion,
     metaparams,
     dump: bool,
-) -> triton_kernel_call_lib.TritonKernel:
+) -> tuple[triton_kernel_call_lib.TritonKernel, Any]:
   if num_warps is None:
     num_warps = 4
   if num_stages is None:
@@ -353,9 +354,21 @@ def get_or_create_triton_kernel(
     raise ValueError("num_ctas > 1 unsupported before Hopper.")
 
   signature = {fn.arg_names[i]: v for i, v in enumerate(arg_dtypes)}
+  # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
+  # We assume that all arrays are aligned to 16 bytes, and Triton may use this
+  # assumption, unless array args are include in the `do_not_specialize` list.
+  # We replace array arguments with mock Torch tensors, to allow us to use
+  # `JITFunction._get_config` to get the specialization_attr.
+  mock_torch_tensor = types.SimpleNamespace(data_ptr=lambda: 16)
+  args_for_specialization_attr = [mock_torch_tensor] * len(arg_dtypes)
+  backend = backend_init_func(device, compute_capability)
+  for i, _, v in scalar_args:
+    args_for_specialization_attr[i] = v
 
+  specialization_attr = backend.get_attrs_descriptor(fn.params[:len(args_for_specialization_attr)], args_for_specialization_attr)  # pylint: disable=protected-access
   constants = dict(metaparams)
   constants.update({k: None for _, k, v in scalar_args if v is None})
+  constants.update({fn.arg_names[i]: 1 for (i,) in specialization_attr.equal_to_1})
   for constant in constants:
     signature[constant] = "constexpr"
 
@@ -363,6 +376,7 @@ def get_or_create_triton_kernel(
   cache_key = (
       fn,
       tuple(signature.items()),
+      tuple(specialization_attr.get_fn_attrs()),
       tuple(constants.items()),
       num_warps,
       num_stages,
@@ -382,7 +396,6 @@ def get_or_create_triton_kernel(
         "enable_fp_fusion": enable_fp_fusion,
     }
 
-    backend = backend_init_func(device, compute_capability)
     options = backend.parse_options(opts)
 
     kernel_hash = abs(hash(cache_key))
@@ -397,18 +410,44 @@ def get_or_create_triton_kernel(
     backend.load_dialects(context)
     codegen_fns = backend.get_codegen_implementation()
 
-    module = code_gen.ast_to_ttir(
-        fn,
-        tc.ASTSource(fn, constexprs=constants, signature=signature),
-        options=options,
-        codegen_fns=codegen_fns,
-        context=context,
-        module_map=backend.get_module_map(),
+    module = (
+        code_gen.ast_to_ttir(
+            fn,
+            specialization=tc.ASTSource(
+              fn,
+               constexprs=constants,
+               signature=signature,
+               attrs=specialization_attr,
+             ),
+            options=options,
+            codegen_fns=codegen_fns,
+            context=context,
+            module_map=backend.get_module_map(),
+        )
+        if "module_map" in inspect.getfullargspec(code_gen.ast_to_ttir).args
+        # Triton changes ASTSource.ast_to_ttir to include module_map. Handle
+        # backward compatibility here.
+        else code_gen.ast_to_ttir(
+            fn,
+            specialization=tc.ASTSource(
+              fn,
+               constexprs=constants,
+               signature=signature,
+               attrs=specialization_attr,
+             ),
+            options=options,
+            codegen_fns=codegen_fns,
+            context=context,
+        )
     )
     ttir = str(module)
 
     compilation_result = compile_ttir_inplace(
-        module, backend, options, compute_capability, platform
+      module,
+      backend,
+      options,
+      compute_capability,
+      platform
     )
 
     kernel_name = compilation_result.name
@@ -451,7 +490,7 @@ def get_or_create_triton_kernel(
 
     _COMPILED_KERNEL_CACHE[cache_key] = kernel
 
-  return kernel
+  return kernel, specialization_attr
 
 
 def triton_kernel_call_lowering(
@@ -572,7 +611,7 @@ def triton_kernel_call_lowering(
 
   kernel_calls = []
   for params in config_params:
-    kernel = get_or_create_triton_kernel(
+    kernel, specialization_attr = get_or_create_triton_kernel(
         backend_init_func,
         ctx.module_context.platforms[0],
         fn,
@@ -594,10 +633,10 @@ def triton_kernel_call_lowering(
         kernel_params.append(
             triton_kernel_call_lib.create_array_parameter(
                 zeroed_params_with_sizes.get(i, 0),
-                0,
+                16 if (i in specialization_attr.divisibility_16) else 0,
             )
         )
-      else:
+      elif (i,) not in specialization_attr.equal_to_1:
         kernel_params.append(
             triton_kernel_call_lib.create_scalar_parameter(arg, dtype)
         )

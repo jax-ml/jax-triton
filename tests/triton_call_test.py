@@ -531,6 +531,44 @@ class TritonKernelCallTest(parameterized.TestCase):
     out = add(x, y, kernel=kernel, input_output_aliases={0: 0})
     np.testing.assert_allclose(out, expected)
 
+  def test_specialization(self):
+    do_not_specialize = (
+        0,  # a_ptr
+        2,  # M
+        6,  # stride_ak
+        7,  # stride_bk
+        11,  # c_ptr
+    )
+    kernel = triton.jit(do_not_specialize=do_not_specialize)(matmul_kernel.fn)
+
+    m, n, k = 128, 128, 99
+    x, y = create_random_inputs([m, k], [k, n])
+
+    with mock.patch.object(code_gen, "ast_to_ttir") as mock_compile:
+      try:
+        _ = matmul(
+            x,
+            y,
+            kernel=kernel,
+            BLOCK_SIZE_M=32,
+            BLOCK_SIZE_N=32,
+            BLOCK_SIZE_K=32,
+            # K_EXACTLY_DIVISIBLE_BY_BLOCK=False,
+        )
+      except TypeError:
+        pass  # Error thrown as the mocked method's return value is invalid.
+
+    mock_compile.assert_called_once()
+    specialization = mock_compile.call_args[1]['specialization']
+
+    # Pointers are assumed to divide by 16, as do `M`, `N`, `stride_{bk,cm}`.
+    # However, we've marked `a_ptr`, `M`, `stride_bk`, and `c_ptr` as "do not
+    # specialize", leaving `b_ptr`, `N`, and `stride_cm`.
+    self.assertEqual(specialization.attrs.divisibility_16, [(1,), (3,), (9,)])
+    # `stride_{ak,bn,cn}` equal 1, but we've marked `stride_ak` as "do not
+    # specialize" leaving `stride_{bn,cn}`.
+    self.assertEqual(specialization.attrs.equal_to_1, [(8,), (10,)])
+
 
 if __name__ == "__main__":
   os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
