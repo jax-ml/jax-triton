@@ -29,6 +29,12 @@ import triton.language as tl
 
 config.parse_flags_with_absl()
 
+try:
+  jt.get_compute_capability(0)
+except AttributeError:
+  # TODO(stephen-huan): add in jaxlib
+  jt.get_compute_capability = lambda _: np.inf
+
 
 def setUpModule():
   config.update("jax_enable_x64", True)
@@ -553,7 +559,7 @@ class TritonKernelCallTest(parameterized.TestCase):
             BLOCK_SIZE_M=32,
             BLOCK_SIZE_N=32,
             BLOCK_SIZE_K=32,
-            # K_EXACTLY_DIVISIBLE_BY_BLOCK=False,
+            K_EXACTLY_DIVISIBLE_BY_BLOCK=False,
         )
       except TypeError:
         pass  # Error thrown as the mocked method's return value is invalid.
