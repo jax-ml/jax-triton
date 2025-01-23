@@ -360,17 +360,20 @@ def get_or_create_triton_kernel(
   # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
   # We assume that all arrays are aligned to 16 bytes, and Triton may use this
   # assumption, unless array args are include in the `do_not_specialize` list.
+  alignments = [16] * len(arg_dtypes)
+  for i, _, value in scalar_args:
+    alignments[i] = value
   specialization = [
       triton.runtime.jit.specialize_impl(
           types.SimpleNamespace(
-              data_ptr=lambda: 16, dtype=arg_dtype.removeprefix("*")
+              data_ptr=lambda: alignment, dtype=arg_dtype.removeprefix("*")
           ),
           backend.get_arg_specialization,
       )
-      for arg_dtype in arg_dtypes
+      for arg_dtype, alignment in zip(arg_dtypes, alignments)
   ]
   attrs = {
-      fn.arg_names[i]: backend.parse_attr(attr)
+      (i,): backend.parse_attr(attr)
       for i, (_, attr) in enumerate(specialization)
   }
   constants = dict(metaparams)
@@ -614,7 +617,7 @@ def triton_kernel_call_lowering(
     equal_to_1 = {i for i, _, v in scalar_args if v == 1}
     for i, (arg, dtype) in enumerate(zip(args, arg_dtypes)):
       if isinstance(arg, core.ShapedArray):
-        arg_attrs = specialization_attr[fn.arg_names[i]]
+        arg_attrs = specialization_attr[(i,)]
         kernel_params.append(
             triton_kernel_call_lib.create_array_parameter(
                 zeroed_params_with_sizes.get(i, 0),
