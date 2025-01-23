@@ -531,6 +531,24 @@ class TritonKernelCallTest(parameterized.TestCase):
     out = add(x, y, kernel=kernel, input_output_aliases={0: 0})
     np.testing.assert_allclose(out, expected)
 
+  def test_autodiff_exception(self):
+    x, y = create_random_inputs([10, 100], dtype="float32")
+    with self.assertRaisesRegex(
+        NotImplementedError,
+        r"jax_triton.triton_call does not support automatic differentiation.*"
+        r"jax\.custom_jvp or jax\.custom_vjp.*",
+    ):
+      jax.grad(lambda x, y: jnp.sum(add(x, y, BLOCK_SIZE=32)))(x, y)
+
+  def test_batching_exception(self):
+    x, y = create_random_inputs([10, 100], dtype="float32")
+    with self.assertRaisesRegex(
+        NotImplementedError,
+        r"jax_triton.triton_call does not support batching.*"
+        r"jax\.custom_batching\.custom_vmap.*",
+    ):
+      jax.vmap(lambda x, y: add(x, y, BLOCK_SIZE=32))(x, y)
+
 
 if __name__ == "__main__":
   os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"

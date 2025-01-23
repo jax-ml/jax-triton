@@ -38,6 +38,8 @@ from jax._src.lib import gpu_triton as triton_kernel_call_lib
 from jax._src.lib.mlir import ir
 import jax.dlpack
 import jax.extend as jex
+from jax.interpreters import ad
+from jax.interpreters import batching
 from jax.interpreters import mlir
 from jax.interpreters import xla
 import jax.numpy as jnp
@@ -674,6 +676,31 @@ mlir.register_lowering(
     functools.partial(triton_kernel_call_lowering, get_hip_backend),
     platform="rocm",
 )
+
+
+def triton_kernel_call_raise_on_jvp(*args, **kwargs):
+  del args, kwargs  # unused
+  raise NotImplementedError(
+      "jax_triton.triton_call does not support automatic differentiation. Use "
+      "jax.custom_jvp or jax.custom_vjp to implement a custom automatic "
+      "differentiation rule for your kernel."
+  )
+
+ad.primitive_jvps[triton_kernel_call_p] = triton_kernel_call_raise_on_jvp
+
+
+def triton_kernel_call_raise_on_vmap(*args, **kwargs):
+  del args, kwargs  # unused
+  raise NotImplementedError(
+      "jax_triton.triton_call does not support batching with jax.vmap. Use "
+      "jax.custom_batching.custom_vmap to implement a custom batching rule for "
+      "your kernel."
+  )
+
+batching.primitive_batchers[triton_kernel_call_p] = (
+    triton_kernel_call_raise_on_vmap
+)
+
 
 class ShapeDtype(Protocol):
 
