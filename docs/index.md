@@ -1,6 +1,6 @@
 # JAX-Triton documentation
 
-JAX-Triton is a repository containing containing integrations between [JAX](https://github.com/google/jax)
+JAX-Triton is a repository containing containing integrations between [JAX](https://github.com/jax-ml/jax)
 and [Triton](https://github.com/openai/triton).
 
 JAX is a Python library for accelerated numerical computing and Triton is a Python library and compiler for writing custom GPU kernels.
@@ -20,7 +20,7 @@ For example you could run:
 ```bash
 $ pip install "jax[cuda11_cudnn82]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 ```
-Check out the [JAX installation guide](https://github.com/google/jax#pip-installation-gpu-cuda) for details.
+Check out the [JAX installation guide](https://github.com/jax-ml/jax#pip-installation-gpu-cuda) for details.
 
 ### Installation at HEAD
 
