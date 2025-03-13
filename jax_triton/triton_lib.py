@@ -365,7 +365,7 @@ def get_or_create_triton_kernel(
   for i, _, value in scalar_args:
     alignments[i] = value
   specialization = [
-      triton.runtime.jit.specialize_impl(
+      triton.runtime.jit.create_specialize_impl(lambda *_, **__: None)(
           types.SimpleNamespace(
               data_ptr=lambda: alignment, dtype=arg_dtype.removeprefix("*")
           ),
