@@ -20,6 +20,7 @@ from collections.abc import Callable, Sequence
 import copy
 import dataclasses
 import functools
+import inspect
 import os
 import pprint
 import tempfile
@@ -34,7 +35,6 @@ from jax._src import core
 from jax._src import state
 from jax._src import util
 from jax._src.lib import gpu_triton as triton_kernel_call_lib
-from jax._src.lib import version as jaxlib_version
 from jax._src.lib.mlir import ir
 import jax.dlpack
 import jax.extend as jex
@@ -176,7 +176,6 @@ class CompilationResult:
   binary: str
   name: str
   shared_mem_bytes: int
-  global_scratch_bytes: int
   cluster_dims: tuple
   ttgir: str | None
   llir: str | None
@@ -252,14 +251,15 @@ def compile_ttir_to_ptx_inplace(
   )
   if cuda_options.debug:
     print(ptx)
+  name = metadata["name"]
+  cluster_dims = metadata["cluster_dims"]
   ttgir = str(ttgir) if _JAX_TRITON_DUMP_DIR else None
   llir = str(llir) if _JAX_TRITON_DUMP_DIR else None
   return CompilationResult(
       binary=ptx,
-      name=metadata["name"],
+      name=name,
       shared_mem_bytes=shared_mem_bytes,
-      global_scratch_bytes=metadata["global_scratch_size"],
-      cluster_dims=metadata["cluster_dims"],
+      cluster_dims=cluster_dims,
       ttgir=ttgir,
       llir=llir,
   )
@@ -318,7 +318,6 @@ def compile_ttir_to_hsaco_inplace(
       binary=hsaco_path,
       name=name,
       shared_mem_bytes=shared_mem_bytes,
-      global_scratch_bytes=0,
       cluster_dims=cluster_dims,
       ttgir=ttgir,
       llir=llir,
@@ -341,7 +340,7 @@ def get_or_create_triton_kernel(
     enable_fp_fusion,
     metaparams,
     dump: bool,
-) -> tuple[triton_kernel_call_lib.TritonKernel, Any, int]:
+) -> tuple[triton_kernel_call_lib.TritonKernel, Any]:
   if num_warps is None:
     num_warps = 4
   if num_stages is None:
@@ -395,7 +394,7 @@ def get_or_create_triton_kernel(
       compute_capability,
       enable_fp_fusion,
   )
-  kernel, scratch_bytes = _COMPILED_KERNEL_CACHE.get(cache_key, (None, 0))
+  kernel = _COMPILED_KERNEL_CACHE.get(cache_key)
 
   if kernel is None:
     opts = {
@@ -474,10 +473,10 @@ def get_or_create_triton_kernel(
         compute_capability,
         *compilation_result.cluster_dims,
     )
-    scratch_bytes = compilation_result.global_scratch_bytes
-    _COMPILED_KERNEL_CACHE[cache_key] = (kernel, scratch_bytes)
 
-  return kernel, attrs, scratch_bytes
+    _COMPILED_KERNEL_CACHE[cache_key] = kernel
+
+  return kernel, attrs
 
 
 def triton_kernel_call_lowering(
@@ -597,10 +596,8 @@ def triton_kernel_call_lowering(
     )
 
   kernel_calls = []
-  max_scratch_bytes = 0
   for params in config_params:
-    grid_x, grid_y, grid_z = params["grid"]
-    kernel, specialization_attr, scratch_bytes = get_or_create_triton_kernel(
+    kernel, specialization_attr = get_or_create_triton_kernel(
         backend_init_func,
         ctx.module_context.platforms[0],
         fn,
@@ -614,8 +611,6 @@ def triton_kernel_call_lowering(
         metaparams=dict(params["metaparams"]),
         dump=debug,
     )
-    scratch_bytes *= grid_x * grid_y * grid_z
-    max_scratch_bytes = max(max_scratch_bytes, scratch_bytes)
 
     kernel_params = []
     zeroed_params_with_sizes = dict(params["zeroed_params_with_sizes"])
@@ -636,13 +631,12 @@ def triton_kernel_call_lowering(
 
     kernel_calls.append(
         triton_kernel_call_lib.TritonKernelCall(
-            kernel, grid_x, grid_y, grid_z, kernel_params
+            kernel,
+            params["grid"][0],
+            params["grid"][1],
+            params["grid"][2],
+            kernel_params,
         )
-    )
-
-  if max_scratch_bytes > 0 and jaxlib_version < (0, 5, 3):
-    raise NotImplementedError(
-        "Triton kernels with scratch buffers are not supported in JAX < 0.5.3."
     )
 
   if len(kernel_calls) > 1:
@@ -663,21 +657,16 @@ def triton_kernel_call_lowering(
       ir.RankedTensorType.get(shape.shape, mlir.dtype_to_ir_type(shape.dtype))
       for shape in out_shapes
   ]
-
-  u8 = mlir.dtype_to_ir_type(jnp.dtype(jnp.uint8))
-  scratch_type = ir.RankedTensorType.get([max_scratch_bytes], u8)
-  scratch_layout = [0]
   call_proto = kernel_call.to_proto(kernel_call_name, serialized_metadata)
-  results = mlir.custom_call(
+  return mlir.custom_call(
       call_target_name=custom_call_target_name,
-      result_types=out_types + [scratch_type],
+      result_types=out_types,
       operands=array_args,
       backend_config=zlib.compress(call_proto),
       operand_layouts=avals_to_layouts(ctx.avals_in),
-      result_layouts=avals_to_layouts(ctx.avals_out) + [scratch_layout],
+      result_layouts=avals_to_layouts(ctx.avals_out),
       operand_output_aliases=dict(input_output_aliases),
   ).results
-  return results[:-1]  # Remove scratch buffer.
 
 mlir.register_lowering(
     triton_kernel_call_p,
