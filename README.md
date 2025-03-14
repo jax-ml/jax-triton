@@ -76,12 +76,13 @@ ipynb](https://github.com/jax-ml/jax-triton/blob/main/examples/JAX_%2B_Triton_Fl
 $ pip install jax-triton
 ```
 
-You can either use a stable release of `triton` or a nightly release.
-
 Make sure you have a CUDA-compatible `jax` installed. For example you could run:
 ```bash
 $ pip install "jax[cuda12]"
 ```
+
+`jax-triton` currently requires building the latest version of `triton`
+[from source](https://triton-lang.org/main/getting-started/installation.html#from-source).
 
 ## Development
 

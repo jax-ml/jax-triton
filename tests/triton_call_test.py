@@ -24,7 +24,6 @@ import jax.numpy as jnp
 import jax_triton as jt
 import numpy as np
 import triton
-from triton.compiler import code_generator as code_gen
 import triton.language as tl
 
 config.parse_flags_with_absl()

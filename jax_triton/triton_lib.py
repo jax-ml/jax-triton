@@ -20,7 +20,6 @@ from collections.abc import Callable, Sequence
 import copy
 import dataclasses
 import functools
-import inspect
 import os
 import pprint
 import tempfile
@@ -363,12 +362,19 @@ def get_or_create_triton_kernel(
   alignments = [16] * len(arg_dtypes)
   for i, _, value in scalar_args:
     alignments[i] = value
+  specialize_extra = backend.get_arg_specialization
+  if specialize_impl := getattr(triton.runtime.jit, "specialize_impl", None):
+    # TODO(slebedev): Remove this branch once Triton 3.3 is released.
+    specialize_impl = functools.partial(
+        specialize_impl, specialize_extra=specialize_extra
+    )
+  else:
+    specialize_impl = triton.runtime.jit.create_specialize_impl(specialize_extra)
   specialization = [
-      triton.runtime.jit.specialize_impl(
+      specialize_impl(
           types.SimpleNamespace(
               data_ptr=lambda: alignment, dtype=arg_dtype.removeprefix("*")
           ),
-          backend.get_arg_specialization,
       )
       for arg_dtype, alignment in zip(arg_dtypes, alignments)
   ]
