@@ -91,9 +91,9 @@ def matmul_kernel(
     b_ptrs += block_size_k * stride_bk
   # you can fuse arbitrary activation functions here
   # while the accumulator is still in FP32!
-  if activation:
+  if activation is not None:
     accumulator = activation(accumulator)
-  c = accumulator.to(tl.float16)
+  c = accumulator
 
   # -----------------------------------------------------------
   # Write back the block of the output matrix C
@@ -116,7 +116,7 @@ def matmul(a, b, activation=None):
   block_size_k = 32
   group_size_m = 8
   m, k = a.shape
-  n, _ = b.shape
+  _, n = b.shape
   out_shape = jax.ShapeDtypeStruct(shape=(m, n), dtype=a.dtype)
   grid = (m //  block_size_m * n // block_size_n,)
   return jt.triton_call(
