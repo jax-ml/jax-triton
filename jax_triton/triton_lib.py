@@ -34,7 +34,6 @@ from jax._src import core
 from jax._src import state
 from jax._src import util
 from jax._src.lib import gpu_triton as triton_kernel_call_lib
-from jax._src.lib.mlir import ir
 import jax.dlpack
 import jax.extend as jex
 from jax.interpreters import ad
@@ -659,20 +658,14 @@ def triton_kernel_call_lowering(
   else:
     kernel_call = kernel_calls[0]
 
-  out_types = [
-      ir.RankedTensorType.get(shape.shape, mlir.dtype_to_ir_type(shape.dtype))
-      for shape in out_shapes
-  ]
   call_proto = kernel_call.to_proto(kernel_call_name, serialized_metadata)
-  return mlir.custom_call(
-      call_target_name=custom_call_target_name,
-      result_types=out_types,
-      operands=array_args,
+  rule = jax.ffi.ffi_lowering(
+      custom_call_target_name,
+      api_version=2,
       backend_config=zlib.compress(call_proto),
-      operand_layouts=avals_to_layouts(ctx.avals_in),
-      result_layouts=avals_to_layouts(ctx.avals_out),
-      operand_output_aliases=dict(input_output_aliases),
-  ).results
+      operand_output_aliases=dict(input_output_aliases)
+  )
+  return rule(ctx, *array_args)
 
 mlir.register_lowering(
     triton_kernel_call_p,
