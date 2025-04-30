@@ -20,6 +20,7 @@ from collections.abc import Callable, Sequence
 import copy
 import dataclasses
 import functools
+import inspect
 import os
 import pprint
 import tempfile
@@ -368,7 +369,16 @@ def get_or_create_triton_kernel(
         specialize_impl, specialize_extra=specialize_extra
     )
   else:
-    specialize_impl = triton.runtime.jit.create_specialize_impl(specialize_extra)
+    # TODO(rdyro): Remove unnecessary checks with 3.3.0 > release
+    create_specialize_impl = triton.runtime.jit.create_specialize_impl
+    if len(inspect.signature(create_specialize_impl).parameters) == 0:
+      # handle Triton 3.3.0 release
+      specialize_impl = functools.partial(
+          create_specialize_impl(), specialize_extra=specialize_extra
+      )
+    else:
+      # latest Triton head
+      specialize_impl = create_specialize_impl(specialize_extra)
   specialization = [
       specialize_impl(
           types.SimpleNamespace(

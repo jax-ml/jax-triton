@@ -33,6 +33,8 @@ jobs:
           python-version: '3.10'
     -   name: Setup Released JAX and Torch
         run: |
+          # triton needs a compiler
+          apt-get update && apt-get install -y build-essential
           pip install torch
           pip install -U "jax[cuda12]"
           pip install pytest
