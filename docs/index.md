@@ -18,7 +18,7 @@ $ pip install jax-triton
 JAX-Triton only works with JAX on GPU, so you'll need to make sure you have a CUDA-compatible `jaxlib` installed.
 For example you could run:
 ```bash
-$ pip install "jax[cuda11_cudnn82]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+$ pip install "jax[cuda]"
 ```
 Check out the [JAX installation guide](https://github.com/jax-ml/jax#pip-installation-gpu-cuda) for details.
 
@@ -37,10 +37,10 @@ JAX-Triton requires jaxlib with GPU support. You could install the latest stable
 release via
 
 ```bash
-$ pip install jaxlib[cuda12]
+$ pip install "jaxlib[cuda]"
 ```
 
-In rare cases JAX-Triton might need a nighly version of jaxlib. You can install
+In rare cases JAX-Triton might need a nightly version of jaxlib. You can install
 it following the instructions
 [here](https://jax.readthedocs.io/en/latest/installation.html#jax-nightly-installation).
 
