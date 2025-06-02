@@ -1,4 +1,4 @@
-# Copyright 2024 The jax_triton Authors.
+# Copyright 2025 The jax_triton Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -217,7 +217,9 @@ def compile_ttir_to_ptx_inplace(
     print(ttir)
   try:
     metadata = {}
-    opt_ttir = cuda_backend.make_ttir(ttir, metadata, cuda_options)
+    opt_ttir = cuda_backend.make_ttir(
+        ttir, metadata, cuda_options, compute_capability
+    )
     ttgir = cuda_backend.make_ttgir(
         opt_ttir,
         metadata,
