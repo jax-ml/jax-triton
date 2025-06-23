@@ -729,7 +729,7 @@ class ShapeDtype(Protocol):
 
 def triton_call(
     *args: jax.Array | bool | int | float | np.float32,
-    kernel: triton.JITFunction,
+    kernel: triton.JITFunction | triton.runtime.Heuristics | triton.runtime.Autotuner,
     out_shape: ShapeDtype | Sequence[ShapeDtype],
     grid: GridOrLambda,
     name: str = "",
