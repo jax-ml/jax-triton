@@ -28,6 +28,12 @@ import triton.language as tl
 
 config.parse_flags_with_absl()
 
+try:
+  jt.get_compute_capability(0)
+except AttributeError:
+  # TODO(stephen-huan): add in jaxlib
+  jt.get_compute_capability = lambda _: np.inf
+
 
 def setUpModule():
   config.update("jax_enable_x64", True)
