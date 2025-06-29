@@ -36,7 +36,8 @@ Success = matcher.Success
 
 class Node(matcher.Pattern, metaclass=abc.ABCMeta):
 
-  @abc.abstractproperty
+  @property
+  @abc.abstractmethod
   def parents(self) -> list[Node]:
     ...
 
