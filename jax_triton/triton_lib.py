@@ -35,6 +35,7 @@ from jax._src import core
 from jax._src import state
 from jax._src import util
 from jax._src.lib import gpu_triton as triton_kernel_call_lib
+from jax._src.lib import jaxlib_extension_version
 import jax.dlpack
 import jax.extend as jex
 from jax.interpreters import ad
@@ -671,13 +672,22 @@ def triton_kernel_call_lowering(
     kernel_call = kernel_calls[0]
 
   call_proto = kernel_call.to_proto(kernel_call_name, serialized_metadata)
-  rule = jax.ffi.ffi_lowering(
-      custom_call_target_name,
-      api_version=2,
-      backend_config=zlib.compress(call_proto),
-      operand_output_aliases=dict(input_output_aliases)
-  )
-  return rule(ctx, *array_args)
+  opaque = zlib.compress(call_proto)
+  if jaxlib_extension_version < 347:
+    rule = jax.ffi.ffi_lowering(
+        "triton_kernel_call",
+        api_version=2,
+        backend_config=opaque,
+        operand_output_aliases=dict(input_output_aliases)
+    )
+    attrs = {}
+  else:
+    rule = jax.ffi.ffi_lowering(
+        "triton_kernel_call",
+        operand_output_aliases=dict(input_output_aliases)
+    )
+    attrs = dict(opaque=opaque)
+  return rule(ctx, *array_args, **attrs)
 
 mlir.register_lowering(
     triton_kernel_call_p,
