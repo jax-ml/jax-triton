@@ -15,6 +15,9 @@ tests = [
   "pytest"
 ]
 
+experimental = [
+  "oryx"
+]
 
 [build-system]
 requires = ["setuptools", "setuptools-scm"]
