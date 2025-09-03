@@ -45,5 +45,3 @@ except AttributeError:
   )
 else:
   del gpu_triton  # Not part of the API.
-
-# trailer
