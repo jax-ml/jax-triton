@@ -71,6 +71,10 @@ _JAX_TRITON_DUMP_DIR = os.environ.get("JAX_TRITON_DUMP_DIR")
 map, unsafe_map = util.safe_map, map
 zip, unsafe_zip = util.safe_zip, zip
 
+# b/447434580: Exceeding this limit will cause Triton to emit a single trap
+# instruction, which will cause the GPU to hang indefinitely. See
+# triton/third_party/nvidia/lib/NVGPUToLLVM/NVGPUToLLVMPass.cpp;l=718
+_TMEM_MAX_SIZE = 512
 
 _JAX_TO_TRITON_TYPE_MAP = {
     jnp.dtype("bfloat16"): "bf16",
@@ -241,6 +245,10 @@ def compile_ttir_to_ptx_inplace(
   except RuntimeError as e:
     ttgir.dump()
     raise ValueError("TTGIR->LLIR pass failed!") from e
+  if metadata["tmem_size"] > _TMEM_MAX_SIZE:
+    raise ValueError(
+        f"TMEM size {metadata['tmem_size']} exceeds limit {_TMEM_MAX_SIZE}."
+    )
   shared_mem_bytes = metadata["shared"]
   if cuda_options.debug:
     print(llir)
