@@ -473,15 +473,22 @@ def get_or_create_triton_kernel(
             f" {compilation_result.cluster_dims}\n"
         )
 
-    kernel = triton_kernel_call_lib.TritonKernel(
-        kernel_name,
-        num_warps,
-        compilation_result.shared_mem_bytes,
-        compilation_result.binary,
-        ttir,
-        compute_capability,
-        *compilation_result.cluster_dims,
-    )
+    try:
+      kernel = triton_kernel_call_lib.TritonKernel(
+          kernel_name,
+          num_warps,
+          compilation_result.shared_mem_bytes,
+          compilation_result.binary,
+          ttir,
+          compute_capability,
+          *compilation_result.cluster_dims,
+      )
+
+    finally:
+      if platform == 'rocm':
+        # the hsaco path is a temporary file that should be removed.
+        # it's created in `compile_ttir_to_hsaco_inplace`.
+        os.remove(compilation_result.binary)
 
     _COMPILED_KERNEL_CACHE[cache_key] = kernel
 
