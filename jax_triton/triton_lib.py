@@ -180,7 +180,6 @@ class CompilationResult:
   binary: str
   name: str
   shared_mem_bytes: int
-  cluster_dims: tuple
   ttgir: str | None
   llir: str | None
 
@@ -261,14 +260,12 @@ def compile_ttir_to_ptx_inplace(
   if cuda_options.debug:
     print(ptx)
   name = metadata["name"]
-  cluster_dims = metadata["cluster_dims"]
   ttgir = str(ttgir) if _JAX_TRITON_DUMP_DIR else None
   llir = str(llir) if _JAX_TRITON_DUMP_DIR else None
   return CompilationResult(
       binary=ptx,
       name=name,
       shared_mem_bytes=shared_mem_bytes,
-      cluster_dims=cluster_dims,
       ttgir=ttgir,
       llir=llir,
   )
@@ -306,9 +303,6 @@ def compile_ttir_to_hsaco_inplace(
   name = metadata["name"]
   ttgir = str(ttgir) if _JAX_TRITON_DUMP_DIR else None
   llir = str(llir) if _JAX_TRITON_DUMP_DIR else None
-  # cluster dims are NOT useful on hip backend.
-  # We just fill up with some value for API compatibility
-  cluster_dims = (0, 0, 0)
   # Instead of passing hsaco which are "bytes", we first write
   # to a file and then pass the "string" path. This is needed because
   # nanobind doesn't automatically convert between bytes and string.
@@ -320,7 +314,6 @@ def compile_ttir_to_hsaco_inplace(
       binary=hsaco_path,
       name=name,
       shared_mem_bytes=shared_mem_bytes,
-      cluster_dims=cluster_dims,
       ttgir=ttgir,
       llir=llir,
   )
@@ -469,18 +462,17 @@ def get_or_create_triton_kernel(
       ) as f:
         f.write(
             f"{kernel_name}: shared_mem_bytes:"
-            f" {compilation_result.shared_mem_bytes}, cluster_dims:"
-            f" {compilation_result.cluster_dims}\n"
+            f" {compilation_result.shared_mem_bytes}\n"
         )
 
     kernel = triton_kernel_call_lib.TritonKernel(
         kernel_name,
         num_warps,
+        num_ctas,
         compilation_result.shared_mem_bytes,
         compilation_result.binary,
         ttir,
         compute_capability,
-        *compilation_result.cluster_dims,
     )
 
     _COMPILED_KERNEL_CACHE[cache_key] = kernel

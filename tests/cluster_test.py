@@ -40,29 +40,6 @@ def _dummy_fn(x):
 
 class ClusterTest(parameterized.TestCase):
 
-  @parameterized.parameters(1, 2, 4, 8)
-  def test_cluster(self, num_ctas):
-    if 'h100' not in jax.devices()[0].device_kind.lower():
-      self.skipTest('Clusters available only on H100s.')
-
-    cluster_dims = []
-    original_compile_ttir_to_ptx_fn = jt.triton_lib.compile_ttir_to_ptx_inplace
-
-    def my_compile_ttir_to_ptx(*args, **kwargs):
-      nonlocal cluster_dims, original_compile_ttir_to_ptx_fn
-      ret_args = original_compile_ttir_to_ptx_fn(*args, **kwargs)
-      cluster_dims = ret_args.cluster_dims
-      return ret_args
-
-    my_triton_call = functools.partial(jt.triton_call, num_ctas=num_ctas)
-
-    with mock.patch.object(jt, 'triton_call', my_triton_call):
-      with mock.patch.object(
-          jt.triton_lib, 'compile_ttir_to_ptx_inplace', my_compile_ttir_to_ptx
-      ):
-        _dummy_fn(jnp.empty((16,)))
-        self.assertEqual(math.prod(cluster_dims), num_ctas)
-
   def test_invalid_cluster_size(self):
     if 'h100' not in jax.devices()[0].device_kind.lower():
       self.skipTest('Clusters available on H100s.')
