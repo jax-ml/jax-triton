@@ -65,7 +65,8 @@ except ImportError:
   pass
 
 
-os.environ["TRITON_CACHE_DIR"] = ""
+if "TRITON_CACHE_DIR" in os.environ:
+  del os.environ["TRITON_CACHE_DIR"]
 _JAX_TRITON_DUMP_DIR = os.environ.get("JAX_TRITON_DUMP_DIR")
 map, unsafe_map = util.safe_map, map
 zip, unsafe_zip = util.safe_zip, zip
