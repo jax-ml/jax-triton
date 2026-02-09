@@ -20,7 +20,7 @@ import jax_triton as jt
 import numpy as np
 import triton
 import triton.language as tl
-from triton.language.extra.cuda import libdevice
+from triton.language.extra import libdevice
 
 
 @triton.jit
