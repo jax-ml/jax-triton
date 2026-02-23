@@ -15,7 +15,6 @@
 """H100 clustering tests."""
 
 import functools
-import math
 from unittest import mock
 
 from absl.testing import absltest

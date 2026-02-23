@@ -34,7 +34,6 @@ from jax._src import core
 from jax._src import state
 from jax._src import util
 from jax._src.lib import gpu_triton as triton_kernel_call_lib
-import jax.dlpack
 import jax.extend as jex
 from jax.interpreters import ad
 from jax.interpreters import batching
