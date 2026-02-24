@@ -3,11 +3,11 @@ name = "jax-triton"
 dynamic = ["version"]
 description = "JAX + OpenAI Triton integration"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "absl-py>=1.4.0",
   "jax>=0.6.0",
-  "triton>=3.3",
+  "triton>=3.6",
 ]
 
 [project.optional-dependencies]
@@ -36,7 +36,7 @@ exclude = [
 ]
 line-length = 88
 indent-width = 2
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 ignore = [
