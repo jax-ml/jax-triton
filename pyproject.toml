@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "absl-py>=1.4.0",
-  "jax>=0.6.0",
+  "jax>=0.8.2",
   "triton>=3.6",
 ]
 
@@ -17,10 +17,10 @@ tests = [
 
 
 [build-system]
-requires = ["setuptools", "setuptools-scm"]
+requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
-[tools.setuptools]
+[tool.setuptools]
 packages = ["jax_triton"]
 
 [tool.setuptools.dynamic]

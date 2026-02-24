@@ -118,6 +118,8 @@ def get_triton_type(obj: Any) -> str:
     return f"*{_JAX_TO_TRITON_TYPE_MAP[obj.dtype]}"
   if isinstance(obj, tl.constexpr):
     obj = obj.value
+  if isinstance(obj, bool):  # True == isinstance(True, int) !!!
+    return "B"
   if isinstance(obj, int):
     if -(2**31) <= obj < 2**31:
       return "i32"
@@ -133,8 +135,6 @@ def get_triton_type(obj: Any) -> str:
     return "fp64"
   if isinstance(obj, np.float32):
     return "fp32"
-  if isinstance(obj, bool):
-    return "B"
   if isinstance(obj, str):
     return "str"
   raise NotImplementedError(
@@ -167,7 +167,43 @@ def get_cuda_backend(device, compute_capability):
   return backend
 
 
+_IS_HIPBackend_PATCHED = False
+def _patch_hip_backend():
+  """
+  This defuses a bomb planted into Triton's AMD-specific compilation path by
+  https://github.com/triton-lang/triton/commit/37ff43c5efd6e1b84c00a599ba070a501181e832#diff-33c9a103282c05c9d9d213b94450ae7481b6db8c3c6d810f54f175b4735a3c72
+  In short: there's an unconditional and totally unnecessary "import torch" directive crashing
+  the code when torch isn't installed.
+
+  Remove the patch once triton wheel package version is pinned to >= triton version with the fix.
+  """
+  global _IS_HIPBackend_PATCHED
+  if _IS_HIPBackend_PATCHED:
+    return
+  _IS_HIPBackend_PATCHED = True
+
+  if not hasattr(hb.HIPBackend, "is_within_2gb"):
+    return
+  try:
+    hb.HIPBackend.is_within_2gb(1)
+    # if we're here, either the torch is installed, or the code was fixed
+  except ImportError:
+    # redefining poisoned implementation. At this point, it's super unlikely a user
+    # would update python package discovery paths before the real call to is_within_2gb() to make
+    # `import torch` succeed, so we could assume there's just no torch in the redefinition.
+    def fixed_is_within_2gb(arg):
+      MAX_INT_32 = 2**31 - 1
+      if hasattr(arg, "ptr_range"):
+        return arg.ptr_range() <= MAX_INT_32
+      return False
+
+    hb.HIPBackend.is_within_2gb = fixed_is_within_2gb
+
+
 def get_hip_backend(device, compute_capability):
+  # TODO(Arech): remove _patch_hip_backend() once Triton releases a fix
+  _patch_hip_backend()
+
   arch = triton_kernel_call_lib.get_arch_details(device)
   arch = arch.split(":")[0]
   target = hb.GPUTarget("hip", arch, 64)
@@ -626,6 +662,14 @@ def triton_kernel_call_lowering(
             )
         )
       elif i not in equal_to_1:
+        # Convert TypedInt/TypedFloat subclasses to plain Python types,
+        # as nanobind's strict-mode integer caster rejects subclasses.
+        if isinstance(arg, bool):
+          arg = bool(arg)
+        elif isinstance(arg, int):
+          arg = int(arg)
+        elif isinstance(arg, float):
+          arg = float(arg)
         kernel_params.append(
             triton_kernel_call_lib.create_scalar_parameter(arg, dtype)
         )
