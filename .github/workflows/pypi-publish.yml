@@ -1,4 +1,4 @@
-name: pypi
+name: pypi-publish
 
 on:
   release:  # trigger on release creation
@@ -11,9 +11,9 @@ jobs:
     permissions:
       id-token: write
     steps:
-    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6
     - name: Set up Python
-      uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6
+      uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548  # v6
       with:
         python-version: '3.x'
     - name: Install dependencies
@@ -34,5 +34,5 @@ jobs:
       run: |
         python -m build
     - name: Publish package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e# release/v1.13
+      uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e  # release/v1.13
 
