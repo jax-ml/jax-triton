@@ -1,0 +1,38 @@
+name: pypi
+
+on:
+  release:  # trigger on release creation
+    types: [created]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+    - name: Set up Python
+      uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6
+      with:
+        python-version: '3.x'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install setuptools wheel twine build
+    - name: Check consistency between the package version and release tag
+      if: github.event_name == 'release'
+      run: |
+        cd jax_triton
+        PACKAGE_VER="v`python -c 'import version; print(version.__version__)'`"
+        cd ..
+        RELEASE_VER=${GITHUB_REF#refs/*/}
+        if [[ $RELEASE_VER != $PACKAGE_VER ]]; then
+          echo "package ver. ($PACKAGE_VER) != release ver. ($RELEASE_VER)"; exit 1
+        fi
+    - name: Build
+      run: |
+        python -m build
+    - name: Publish package distributions to PyPI
+      uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e# release/v1.13
+
