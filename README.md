@@ -2,7 +2,8 @@
 
 ![PyPI version](https://img.shields.io/pypi/v/jax-triton)
 
-The `jax-triton` repository contains integrations between [JAX](https://github.com/jax-ml/jax) and [Triton](https://github.com/openai/triton).
+The `jax-triton` repository contains integrations between [JAX](https://github.com/jax-ml/jax)
+and [Triton](https://github.com/openai/triton), including support for Gluon dialect.
 
 Documentation can be found [here](https://jax-ml.github.io/jax-triton).
 
@@ -26,7 +27,7 @@ def add_kernel(
     y_ptr,        # are input
     length,       # arguments.
     output_ptr,   # Implicit output argument goes after inputs.
-    block_size: tl.constexpr, # Constexpr params goes the last.
+    block_size: tl.constexpr, # Constexpr params go last.
 ):
   """Adds two vectors output = x + y."""
   pid = tl.program_id(axis=0)
