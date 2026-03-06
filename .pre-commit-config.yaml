@@ -22,8 +22,8 @@ repos:
     # only include python files
     files: \.py$
   - id: trailing-whitespace
-    # only include python files
-    files: \.py$
+    # only include python and markdown files
+    files: \.(py|md)$
 
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: 8b5112a3b2ad121439a2092f8ff548c0d80f2514  # frozen: v0.6.1
