@@ -34,7 +34,6 @@ from jax._src import core
 from jax._src import state
 from jax._src import util
 from jax._src.lib import gpu_triton as triton_kernel_call_lib
-import jax.dlpack
 import jax.extend as jex
 from jax.interpreters import ad
 from jax.interpreters import batching
@@ -435,6 +434,19 @@ def get_or_create_triton_kernel(
   kernel = _COMPILED_KERNEL_CACHE.get(cache_key)
 
   if kernel is None:
+    # First, check that the kernel signature and the reconstructed signature have the
+    # same number of parameters. A mismatch can occur due to differences in
+    # `triton_call(input_output_aliases=)` handling between jax-triton versions.
+    if len(fn.signature.parameters) != len(signature):
+      raise TypeError(
+        f"Number of parameters in the kernel '{fn}' signature "
+        f"({len(fn.signature.parameters)}: {fn.signature}) "
+        f"does not match reconstructed signature ({len(signature)}: {signature}). "
+        "If the kernel was working on an older version of jax-triton and its "
+        "triton_call() launcher uses `input_output_aliases` argument, note that "
+        "implicit output arguments are no longer required for aliased args."
+      )
+
     opts = {
         "num_warps": num_warps,
         "num_stages": num_stages,
@@ -543,8 +555,17 @@ def triton_kernel_call_lowering(
   for idx, dtype, v in scalar_args:
     args.insert(idx, v)
     arg_dtypes.insert(idx, dtype)
-  args.extend(ctx.avals_out)
-  arg_dtypes.extend(map(get_triton_type, ctx.avals_out))
+  # Extract only the output avals not referenced in the input_output_aliases mapping.
+  assert isinstance(input_output_aliases, tuple)
+  input_output_aliases = dict(input_output_aliases)
+  strictly_out_avals = [
+    aval
+    for i, aval in enumerate(ctx.avals_out)
+    if i not in input_output_aliases.values()
+  ]
+  args.extend(strictly_out_avals)
+  arg_dtypes.extend(map(get_triton_type, strictly_out_avals))
+
   named_args = dict(unsafe_zip(fn.arg_names, args))
 
   if isinstance(fn, autotuner.Autotuner):
@@ -606,6 +627,10 @@ def triton_kernel_call_lowering(
         "`kernel` must be a Triton `JITFunction`, `Heuristics` or `Autotuner`."
     )
 
+  output2input = {v: k for k, v in input_output_aliases.items()}
+  if len(output2input) != len(input_output_aliases):
+    raise ValueError("input_output_aliases must be a bijection")
+
   outputs_offset = len(ctx.avals_in) + len(scalar_args)
   config_params = []
   for config in configs:
@@ -616,9 +641,13 @@ def triton_kernel_call_lowering(
     if callable(zeroed_outputs):
       config_zeroed_outputs = config_zeroed_outputs(config_metaparams)
 
+    # zeroed_params_with_sizes is a dict output_arg_idx -> aval_size_bytes
+    # config_zeroed_outputs is output ordinal numbers
     zeroed_params_with_sizes = {
-        i + outputs_offset: aval_size_bytes(ctx.avals_out[i])
-        for i in sorted(config_zeroed_outputs)
+      output2input[i] if i in output2input else i + outputs_offset: aval_size_bytes(
+        ctx.avals_out[i]
+      )
+      for i in sorted(config_zeroed_outputs)
     }
 
     config_params.append(
@@ -688,7 +717,7 @@ def triton_kernel_call_lowering(
     named_scalar_args = {fn.arg_names[i]: v for i, _, v in scalar_args}
     input_output_aliases_with_sizes = tuple(
         (input_idx, output_idx, aval_size_bytes(ctx.avals_in[input_idx]))
-        for input_idx, output_idx in input_output_aliases
+        for input_idx, output_idx in input_output_aliases.items()
     )
     kernel_call = triton_kernel_call_lib.TritonAutotunedKernelCall(
         f"{kernel_call_name} ({fn.fn.__name__}) {named_scalar_args}",
@@ -703,7 +732,7 @@ def triton_kernel_call_lowering(
       custom_call_target_name,
       api_version=2,
       backend_config=zlib.compress(call_proto),
-      operand_output_aliases=dict(input_output_aliases),
+      operand_output_aliases=input_output_aliases,
   )
   return rule(ctx, *array_args)
 
