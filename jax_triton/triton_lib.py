@@ -732,13 +732,25 @@ def triton_kernel_call_lowering(
     kernel_call = kernel_calls[0]
 
   call_proto = kernel_call.to_proto(kernel_call_name, serialized_metadata)
-  rule = jax.ffi.ffi_lowering(
-      custom_call_target_name,
-      api_version=2,
-      backend_config=zlib.compress(call_proto),
-      operand_output_aliases=input_output_aliases,
-  )
-  return rule(ctx, *array_args)
+
+  # TODO(phawkins): remove forward_compat after 2026-04-29
+  if jax.__version_info__ < (0, 10) or ctx.is_forward_compat():
+    api_version = 2
+    rule = jax.ffi.ffi_lowering(
+        "triton_kernel_call",
+        api_version=api_version,
+        backend_config=zlib.compress(call_proto),
+        operand_output_aliases=input_output_aliases,
+    )
+    return rule(ctx, *array_args)
+  else:
+    api_version = 4
+    rule = jax.ffi.ffi_lowering(
+        "triton_kernel_call_ffi",
+        api_version=api_version,
+        operand_output_aliases=input_output_aliases,
+    )
+    return rule(ctx, *array_args, opaque=zlib.compress(call_proto))
 
 
 mlir.register_lowering(
