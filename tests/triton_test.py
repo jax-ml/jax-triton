@@ -13,14 +13,27 @@
 # limitations under the License.
 
 from absl.testing import absltest
+from absl.testing import parameterized
 
 import jax
+from jax import config, random
 import jax.numpy as jnp
 import jax_triton as jt
 import numpy as np
+import scipy
 import triton
 import triton.language as tl
 from triton.language.extra import libdevice
+
+config.parse_flags_with_absl()
+
+
+def setUpModule():
+  config.update("jax_enable_x64", True)
+
+
+def tearDownModule():
+  config.update("jax_enable_x64", False)
 
 
 @triton.jit
@@ -77,7 +90,7 @@ def tanh_kernel(
   tl.store(output_ptr + offsets, output, mask=mask)
 
 
-class TritonTest(absltest.TestCase):
+class TritonTest(parameterized.TestCase):
 
   def test_add_kernel(self):
 
@@ -115,6 +128,44 @@ class TritonTest(absltest.TestCase):
     x = jnp.arange(8, dtype=jnp.float32)
     np.testing.assert_allclose(tanh(x), np.tanh(x))
 
+  @parameterized.product(
+    dtype_str=["float32", "float64"],
+    funcs=[
+      # ("j0", lambda x: jax.scipy.special.bessel_jn(x, v=0)[0]),
+      # much surprisingly, the above produces nans and according to Opus this might
+      # be due to an inherent instability of the implemented Miller backward recurrence
+      # algorithm. Don't know the truth, but for tests scipy use is acceptable.
+      ("j0", lambda x: jnp.array(scipy.special.j0(np.asarray(x)))),
+      ("j1", lambda x: jnp.array(scipy.special.j1(np.asarray(x)))),
+      ("y0", lambda x: jnp.array(scipy.special.y0(np.asarray(x)))),
+      ("y1", lambda x: jnp.array(scipy.special.y1(np.asarray(x)))),
+      ("cyl_bessel_i0", lambda x: jnp.array(scipy.special.i0(np.asarray(x)))),
+      ("cyl_bessel_i1", lambda x: jnp.array(scipy.special.i1(np.asarray(x)))),
+    ],
+  )
+  def test_bessel(self, dtype_str, funcs):
+    # inspired by the original Triton test
+    libdevice_fn, jax_special_fn = funcs
+    SIZE = 128
+    dtype = getattr(jnp, dtype_str)
 
-if __name__ == '__main__':
+    x = random.normal(random.key(42), (SIZE,), dtype=dtype)
+    y_ref = jax_special_fn(x)
+
+    @jt.kernel
+    @triton.jit
+    def kernel(in_p, out_p, fn: tl.constexpr, SIZE: tl.constexpr):
+      off = tl.arange(0, SIZE)
+      x = tl.load(in_p + off)
+      res = getattr(libdevice, fn)(x)
+      tl.store(out_p + off, res)
+
+    y_exp = kernel[(1,)](
+      x, fn=libdevice_fn, SIZE=SIZE, num_warps=4, num_ctas=1, out_shape=x
+    )
+
+    np.testing.assert_allclose(y_exp, y_ref, equal_nan=True, rtol=1e-6)
+
+
+if __name__ == "__main__":
   absltest.main()
