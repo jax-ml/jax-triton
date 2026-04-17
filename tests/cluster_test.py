@@ -50,8 +50,8 @@ class ClusterTest(parameterized.TestCase):
         _dummy_fn(jnp.empty((16,)))
 
   def test_cluster_not_available(self):
-    if 'h100' in jax.devices()[0].device_kind.lower():
-      self.skipTest('Clusters available only on H100s.')
+    if "h100" in jax.devices()[0].device_kind.lower():
+      self.skipTest("This test expects clusters being not available, but it's an H100.")
 
     my_triton_call = functools.partial(jt.triton_call, num_ctas=2)
 

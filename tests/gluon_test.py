@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Gluon specific tests.
+"""
+
 from absl.testing import absltest
 from absl.testing import parameterized
 
@@ -23,10 +27,8 @@ import jax_triton as jt
 import numpy as np
 import triton
 
-# import triton.language as tl
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-# from triton.language.extra import libdevice
 
 
 config.parse_flags_with_absl()
