@@ -534,7 +534,6 @@ def triton_kernel_call_lowering(
     fn,
     scalar_args,
     name,
-    custom_call_target_name,
     out_shapes,
     grid,
     num_warps,
@@ -732,13 +731,23 @@ def triton_kernel_call_lowering(
     kernel_call = kernel_calls[0]
 
   call_proto = kernel_call.to_proto(kernel_call_name, serialized_metadata)
-  rule = jax.ffi.ffi_lowering(
-      custom_call_target_name,
-      api_version=2,
-      backend_config=zlib.compress(call_proto),
-      operand_output_aliases=input_output_aliases,
-  )
-  return rule(ctx, *array_args)
+
+  # TODO(phawkins): remove forward_compat after 2026-05-04
+  if jax.__version_info__ < (0, 10, 1) or ctx.is_forward_compat():
+    rule = jax.ffi.ffi_lowering(
+        "triton_kernel_call",
+        api_version=2,
+        backend_config=zlib.compress(call_proto),
+        operand_output_aliases=input_output_aliases,
+    )
+    return rule(ctx, *array_args)
+  else:
+    rule = jax.ffi.ffi_lowering(
+        "triton_kernel_call_ffi",
+        api_version=4,
+        operand_output_aliases=input_output_aliases,
+    )
+    return rule(ctx, *array_args, opaque=zlib.compress(call_proto))
 
 
 mlir.register_lowering(
@@ -802,7 +811,6 @@ def triton_call(
     out_shape: ShapeDtype | Sequence[ShapeDtype],
     grid: GridOrLambda,
     name: str = "",
-    custom_call_target_name: str = "triton_kernel_call",
     num_warps: int | None = None,
     num_stages: int | None = None,
     num_ctas: int = 1,  # TODO(giorgioa): Add support for dimensions tuple.
@@ -931,7 +939,6 @@ def triton_call(
       fn=kernel,
       scalar_args=tuple(scalar_args),
       name=name,
-      custom_call_target_name=custom_call_target_name,
       out_shapes=tuple(flat_out_shapes),
       grid=grid,
       num_warps=num_warps,
