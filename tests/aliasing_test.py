@@ -175,6 +175,7 @@ class TritonCallAliasingTest(parameterized.TestCase):
     """Tuple coordinate drilling into a specific element of a compound param.
     Tests both ("name", idx) and (int, idx) forms."""
 
+    @jt.kernel
     @triton.jit
     def _k(Ptrs, val_ptr, BLOCK: tl.constexpr):
       offs = tl.arange(0, BLOCK)
@@ -185,15 +186,14 @@ class TritonCallAliasingTest(parameterized.TestCase):
     a = jnp.array([10.0], dtype=jnp.float32)
     b = jnp.array([20.0], dtype=jnp.float32)
     val = jnp.array([5.0], dtype=jnp.float32)
-    out = jt.triton_call(
-      (a, b), val, 1, input_output_aliases=[alias_spec], kernel=_k, grid=(1,)
-    )
+    out = _k[(1,)]((a, b), val, 1, input_output_aliases=[alias_spec])
     np.testing.assert_array_equal(out, jnp.array([25.0]))
 
   def test_nested_list_structured_output(self):
     """input_output_aliases=[0, [1, 2]] returns (flat, (nested, nested)) and
     related tests"""
 
+    @jt.kernel
     @triton.jit
     def _k(ptr0, ptr1, ptr2, BLOCK: tl.constexpr):
       offs = tl.arange(0, BLOCK)
@@ -205,9 +205,7 @@ class TritonCallAliasingTest(parameterized.TestCase):
     b = jnp.array([20.0], dtype=jnp.float32)
     c = jnp.array([30.0], dtype=jnp.float32)
 
-    result = jt.triton_call(
-      a, b, c, BLOCK=1, input_output_aliases=[0, [1, 2]], kernel=_k, grid=1
-    )
+    result = _k[1](a, b, c, BLOCK=1, input_output_aliases=[0, [1, 2]])
     self.assertIsInstance(result, tuple)
     self.assertEqual(len(result), 2)
     np.testing.assert_array_equal(result[0], jnp.array([11.0]))
@@ -216,9 +214,7 @@ class TritonCallAliasingTest(parameterized.TestCase):
     np.testing.assert_array_equal(result[1][0], jnp.array([22.0]))
     np.testing.assert_array_equal(result[1][1], jnp.array([33.0]))
 
-    result = jt.triton_call(
-      a, b, c, BLOCK=1, input_output_aliases=[2, [0, 1]], kernel=_k, grid=1
-    )
+    result = _k[1](a, b, c, BLOCK=1, input_output_aliases=[2, [0, 1]])
     self.assertIsInstance(result, tuple)
     self.assertEqual(len(result), 2)
     np.testing.assert_array_equal(result[0], jnp.array([33.0]))
@@ -228,9 +224,7 @@ class TritonCallAliasingTest(parameterized.TestCase):
     np.testing.assert_array_equal(result[1][1], jnp.array([22.0]))
     assert jttl.JTJITFunction(_k).compiled_kernels_cache_size == 1
 
-    result = jt.triton_call(
-      a, b, c, BLOCK=1, input_output_aliases=[[1, 0], 2], kernel=_k, grid=1
-    )
+    result = _k[1](a, b, c, BLOCK=1, input_output_aliases=[[1, 0], 2])
     self.assertIsInstance(result, tuple)
     self.assertEqual(len(result), 2)
     np.testing.assert_array_equal(result[1], jnp.array([33.0]))
@@ -256,6 +250,7 @@ class TritonCallAliasingTest(parameterized.TestCase):
     """Pure output + aliased output in a single call.
     Exercises the return assembly: tuple(pure_outs.values()) + aliased_outs."""
 
+    @jt.kernel(out_names="out_ptr")
     @triton.jit
     def _k(in_ptr, inout_ptr, out_ptr, BLOCK: tl.constexpr):
       offs = tl.arange(0, BLOCK)
@@ -266,14 +261,8 @@ class TritonCallAliasingTest(parameterized.TestCase):
 
     x = jnp.array([5.0], dtype=jnp.float32)
     y = jnp.array([10.0], dtype=jnp.float32)
-    pure_out, aliased_out = jt.triton_call(
-      x,
-      y,
-      BLOCK=1,
-      out_shape=x,
-      input_output_aliases=input_output_aliases,
-      kernel=_k,
-      grid=(1,),
+    pure_out, aliased_out = _k[(1,)](
+      x, y, BLOCK=1, out_shape=x, input_output_aliases=input_output_aliases
     )
     np.testing.assert_array_equal(pure_out, x * 2)
     np.testing.assert_array_equal(aliased_out, y + x)
@@ -293,6 +282,7 @@ class TritonCallAliasingTest(parameterized.TestCase):
   def test_mixed_multiple_pure_and_aliased_outputs(self, input_output_aliases):
     """2 pure outputs + 1 aliased output, verifying ordering."""
 
+    @jt.kernel(out_names=("out1_ptr", "out2_ptr"))
     @triton.jit
     def _k(in_ptr, inout_ptr, out1_ptr, out2_ptr, BLOCK: tl.constexpr):
       offs = tl.arange(0, BLOCK)
@@ -304,14 +294,8 @@ class TritonCallAliasingTest(parameterized.TestCase):
 
     x = jnp.array([5.0], dtype=jnp.float32)
     y = jnp.array([10.0], dtype=jnp.float32)
-    out1, out2, aliased_out = jt.triton_call(
-      x,
-      y,
-      BLOCK=1,
-      out_shape=(x, x),
-      input_output_aliases=input_output_aliases,
-      kernel=_k,
-      grid=(1,),
+    out1, out2, aliased_out = _k[(1,)](
+      x, y, BLOCK=1, out_shape=(x, x), input_output_aliases=input_output_aliases
     )
     np.testing.assert_array_equal(out1, x * 2)
     np.testing.assert_array_equal(out2, x * 3)
@@ -336,6 +320,7 @@ class TritonCallAliasingTest(parameterized.TestCase):
     """Dict out_shape combined with sequence-form input_output_aliases.
     The dict provides pure output shapes; aliased shapes are inferred from inputs."""
 
+    @jt.kernel
     @triton.jit
     def _k(in_ptr, inout_ptr, out_ptr, BLOCK: tl.constexpr):
       offs = tl.arange(0, BLOCK)
@@ -346,14 +331,12 @@ class TritonCallAliasingTest(parameterized.TestCase):
 
     x = jnp.array([5.0], dtype=jnp.float32)
     y = jnp.array([10.0], dtype=jnp.float32)
-    pure_out, aliased_out = jt.triton_call(
+    pure_out, aliased_out = _k[(1,)](
       x,
       y,
       BLOCK=1,
       out_shape={out_shape_key: x},
       input_output_aliases=input_output_aliases,
-      kernel=_k,
-      grid=(1,),
     )
     np.testing.assert_array_equal(pure_out, x * 2)
     np.testing.assert_array_equal(aliased_out, y + x)
@@ -370,6 +353,7 @@ class TritonCallAliasingTest(parameterized.TestCase):
     """Deprecated dict-form aliases where out_shape carries both pure and
     aliased shapes, split by out_names count."""
 
+    @jt.kernel(out_names="out_ptr")
     @triton.jit
     def _k(in_ptr, inout_ptr, out_ptr, BLOCK: tl.constexpr):
       offs = tl.arange(0, BLOCK)
@@ -380,14 +364,12 @@ class TritonCallAliasingTest(parameterized.TestCase):
 
     x = jnp.array([5.0], dtype=jnp.float32)
     y = jnp.array([10.0], dtype=jnp.float32)
-    pure_out, aliased_out = jt.triton_call(
+    pure_out, aliased_out = _k[1](
       x,
       y,
       out_shape=(x, y),  # the first is pure output, the second is aliased
       BLOCK=1,
       input_output_aliases={aliasing_key: 1},
-      kernel=_k,
-      grid=1,
     )
     np.testing.assert_array_equal(pure_out, x * 2)
     np.testing.assert_array_equal(aliased_out, y + x)
@@ -396,6 +378,7 @@ class TritonCallAliasingTest(parameterized.TestCase):
     """String aliasing a compound param whose arrays have different dtypes.
     Verifies functools.reduce(_unpack_arg, ...) creates correct per-dtype shapes."""
 
+    @jt.kernel
     @triton.jit
     def _k(Ptrs, BLOCK: tl.constexpr):
       offs = tl.arange(0, BLOCK)
@@ -406,7 +389,7 @@ class TritonCallAliasingTest(parameterized.TestCase):
 
     f = jnp.array([5.0], dtype=jnp.float32)
     i = jnp.array([100], dtype=jnp.int32)
-    out = jt.triton_call((f, i), 1, input_output_aliases="Ptrs", kernel=_k, grid=(1,))
+    out = _k[(1,)]((f, i), 1, input_output_aliases="Ptrs")
     self.assertIsInstance(out, tuple)
     self.assertEqual(len(out), 2)
     np.testing.assert_array_equal(out[0], jnp.array([6.0], dtype=jnp.float32))

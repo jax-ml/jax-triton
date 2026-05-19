@@ -56,6 +56,7 @@ class TupleTest(parameterized.TestCase):
       for i in tl.static_range(len(values)):
         tl.store(Ptrs[i], values[i])
 
+    @jt.kernel(out_names="Ptrs")
     @triton.jit
     def _tuple_index(_0, _1: tl.constexpr, values, _2, _3: tl.constexpr, _4, Ptrs):
       values = _tuple_increment(values)
@@ -63,12 +64,11 @@ class TupleTest(parameterized.TestCase):
 
     vals = tuple(i + 1 for i in range(size))
     rets = tuple(jnp.zeros((1,), dtype=jnp.float32) for _ in vals)
-    rets = jt.triton_call(
-      0, 0, vals, 0, 0, 0, out_shape=[rets], kernel=_tuple_index, grid=(1,)
-    )
+    rets = _tuple_index[(1,)](0, 0, vals, 0, 0, 0, out_shape=[rets])
     assert vals == tuple(x - 1 for x in rets)
 
   def test_assign(self):
+    @jt.kernel
     @triton.jit
     def _tuple_assign(XPtrs, YPtrs, values):
       # assign from tuple
@@ -87,14 +87,7 @@ class TupleTest(parameterized.TestCase):
     vals = (2.0, 3.0, None)
     x = tuple(jnp.zeros((1,), dtype=jnp.float32) for _ in range(2))
     y = tuple(jnp.zeros((1,), dtype=jnp.float32) for _ in range(3))
-    x, y = jt.triton_call(
-      x,
-      y,
-      vals,
-      input_output_aliases=["XPtrs", "YPtrs"],
-      kernel=_tuple_assign,
-      grid=(1,),
-    )
+    x, y = _tuple_assign[(1,)](x, y, vals, input_output_aliases=["XPtrs", "YPtrs"])
     assert x[0] == vals[0]
     assert x[1] == vals[1]
     assert y[0] == vals[0]
@@ -106,6 +99,7 @@ class TupleTest(parameterized.TestCase):
     def _tuple_ret(a, b):
       return a + b, a - b, a * b
 
+    @jt.kernel
     @triton.jit
     def with_fn(X, Y, A, B, C):
       x = tl.load(X)
@@ -115,6 +109,7 @@ class TupleTest(parameterized.TestCase):
       tl.store(B, b)
       tl.store(C, c)
 
+    @jt.kernel
     @triton.jit
     def without_fn(X, Y, A, B, C):
       x = tl.load(X)
@@ -127,9 +122,7 @@ class TupleTest(parameterized.TestCase):
     x = jnp.array([1.3], dtype=jnp.float32)
     y = jnp.array([1.9], dtype=jnp.float32)
     for kernel in [with_fn, without_fn]:
-      a_tri, b_tri, c_tri = jt.triton_call(
-        x, y, num_warps=1, out_shape=(x, x, x), kernel=kernel, grid=(1,)
-      )
+      a_tri, b_tri, c_tri = kernel[(1,)](x, y, num_warps=1, out_shape=(x, x, x))
       a_ref, b_ref, c_ref = x + y, x - y, x * y
       assert a_tri == a_ref
       assert b_tri == b_ref
@@ -145,6 +138,7 @@ class TupleTest(parameterized.TestCase):
       tl.store(Ptr + 8, tuple1[2][1][0])
       tl.store(Ptr + 9, tl.load(tuple1[2][1][2]))
 
+    @jt.kernel(out_names="Ptr")
     @triton.jit
     def _tuple_serialize(N1, tuple1, cst1: tl.constexpr, val1, tuple2, Ptr):
       tl.static_assert(N1 is None)
@@ -161,15 +155,13 @@ class TupleTest(parameterized.TestCase):
     x1 = jnp.array([12], dtype=jnp.int32)
     y0 = jnp.array([10], dtype=jnp.int32)
 
-    z = jt.triton_call(
+    z = _tuple_serialize[(1,)](
       None,
       (x0, (1, None, x1, tl.constexpr(4))),
       20,
       1,
       (y0,),
       out_shape=jnp.empty((10,), dtype=jnp.int32),
-      kernel=_tuple_serialize,
-      grid=(1,),
     )
     ref = jnp.array([8, 1, 12, 21, 10, 15, -1, 8, 1, 12], dtype=jnp.int32)
     np.testing.assert_array_equal(z, ref)
@@ -200,6 +192,7 @@ class TupleTest(parameterized.TestCase):
       mask = (offs_m[:, None] < Tensor.shape[0]) & (offs_n[None, :] < Tensor.shape[1])
       return mask
 
+    @jt.kernel
     @triton.jit
     def _namedtuple_kernel(
       closure, _X, Y, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr
@@ -225,19 +218,11 @@ class TupleTest(parameterized.TestCase):
     function = Function(mul, (a,))
     tx = Tensor(x, x.shape, jax_strides(x))
     ty = Tensor(y, y.shape, jax_strides(y))
-    y = jt.triton_call(
-      function,
-      tx,
-      ty,
-      64,
-      64,
-      input_output_aliases="Y",
-      kernel=_namedtuple_kernel,
-      grid=(1,),
-    )
+    y = _namedtuple_kernel[(1,)](function, tx, ty, 64, 64, input_output_aliases="Y")
     np.testing.assert_allclose(y, x[:16, :16] * a)
 
   def test_passing_nested_tuple_with_constexpr(self):
+    @jt.kernel
     @triton.jit
     def _nested_tuple_kernel(x, out_ptr):
       # This creates a new scope, which will force a copy of liveins. It's
@@ -247,14 +232,12 @@ class TupleTest(parameterized.TestCase):
         tl.static_assert(x[1][0] == 2)
         tl.static_assert(len(x[2]) == 0)  # to tests JT specific empty tuple passing
 
-    jt.triton_call(  # out_shape is needed to prevent DCE
-      ((1,), (tl.constexpr(2),), tuple()),
-      out_shape=jnp.zeros(1),
-      kernel=_nested_tuple_kernel,
-      grid=(1,),
+    _nested_tuple_kernel[(1,)](  # out_shape is needed to prevent DCE
+      ((1,), (tl.constexpr(2),), tuple()), out_shape=jnp.zeros(1)
     )
 
   def test_passing_tuple_to_make_tensor_descriptor(self):
+    @jt.kernel
     @triton.jit
     def m_to_the_n(X_base, shape, strides, m_n, BLOCK_DIM: tl.constexpr):
       tl.static_assert(isinstance(strides[1].type, tl.constexpr_type))
@@ -275,15 +258,8 @@ class TupleTest(parameterized.TestCase):
 
     x = jnp.arange(0, 16).reshape(4, 4)
     expected_x = 8 * x.copy()
-    x = jt.triton_call(
-      x,
-      x.shape,
-      jax_strides(x),
-      (2, 3),
-      x.shape[0],
-      input_output_aliases="X_base",
-      kernel=m_to_the_n,
-      grid=(1,),
+    x = m_to_the_n[(1,)](
+      x, x.shape, jax_strides(x), (2, 3), x.shape[0], input_output_aliases="X_base"
     )
     np.testing.assert_array_equal(x, expected_x)
 

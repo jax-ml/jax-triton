@@ -35,6 +35,7 @@ class TritonCallOutShapeTest(parameterized.TestCase):
   def test_single_output(self):
     """All forms of out_shape for a single output parameter."""
 
+    @jt.kernel
     @triton.jit
     def copy_k(in_ptr, n_elements, out_ptr, BLOCK_SIZE: tl.constexpr):
       pid = tl.program_id(axis=0)
@@ -59,20 +60,15 @@ class TritonCallOutShapeTest(parameterized.TestCase):
           )
         ):
           out_names = None
-        out = jt.triton_call(
-          x,
-          x.size,
-          BLOCK_SIZE=8,
-          out_shape=out_shape,
-          out_names=out_names,
-          kernel=copy_k,
-          grid=(2,),
+        out = copy_k[(2,)](
+          x, x.size, BLOCK_SIZE=8, out_shape=out_shape, out_names=out_names
         )
         assert_expected(out)
 
   def test_multiple_outputs(self):
     """All forms of out_shape for multiple output parameters."""
 
+    @jt.kernel
     @triton.jit
     def twin_k(in_ptr, n, out1_ptr, out2_ptr, BLOCK_SIZE: tl.constexpr):
       pid = tl.program_id(axis=0)
@@ -123,20 +119,15 @@ class TritonCallOutShapeTest(parameterized.TestCase):
           )
         ):
           out_names = None
-        o1, o2 = jt.triton_call(
-          x,
-          x.size,
-          BLOCK_SIZE=8,
-          out_shape=out_shape,
-          out_names=out_names,
-          kernel=twin_k,
-          grid=(1,),
+        o1, o2 = twin_k[(1,)](
+          x, x.size, BLOCK_SIZE=8, out_shape=out_shape, out_names=out_names
         )
         assert_expected(o1, o2)
 
   def test_different_shapes(self):
     """Multiple outputs with different shapes via sequence form."""
 
+    @jt.kernel
     @triton.jit
     def split_k(in_ptr, out1_ptr, out2_ptr, BLOCK_SIZE: tl.constexpr):
       pid = tl.program_id(axis=0)
@@ -147,15 +138,14 @@ class TritonCallOutShapeTest(parameterized.TestCase):
       tl.store(out2_ptr + offs, tl.load(in_ptr + 8 + offs, mask=mask7), mask=mask7)
 
     x = jnp.arange(15, dtype=jnp.float32)
-    o1, o2 = jt.triton_call(
-      x, BLOCK_SIZE=8, out_shape=[x[:8], x[8:]], kernel=split_k, grid=(1,)
-    )
+    o1, o2 = split_k[(1,)](x, BLOCK_SIZE=8, out_shape=[x[:8], x[8:]])
     np.testing.assert_array_equal(o1, x[:8])
     np.testing.assert_array_equal(o2, x[8:])
 
   def test_different_dtypes(self):
     """Multiple outputs with different dtypes."""
 
+    @jt.kernel
     @triton.jit
     def cast_k(in_ptr, out_f32_ptr, out_i32_ptr):
       x = tl.load(in_ptr)
@@ -163,9 +153,7 @@ class TritonCallOutShapeTest(parameterized.TestCase):
       tl.store(out_i32_ptr, x.to(tl.int32))
 
     x = jnp.array([42.25], dtype=jnp.float32)
-    o_f, o_i = jt.triton_call(
-      x, out_shape=[x, x.astype(jnp.int32)], kernel=cast_k, grid=(1,)
-    )
+    o_f, o_i = cast_k[(1,)](x, out_shape=[x, x.astype(jnp.int32)])
     np.testing.assert_array_equal(o_f, x)
     self.assertEqual(o_f.dtype, jnp.float32)
     np.testing.assert_array_equal(o_i, jnp.array([42], dtype=jnp.int32))
@@ -175,6 +163,7 @@ class TritonCallOutShapeTest(parameterized.TestCase):
     """Dict out_shape + explicit out_names: ordering doesn't matter and is always
     governed by the kernel signature."""
 
+    @jt.kernel
     @triton.jit
     def twin_k(in_ptr, out_a_ptr, out_b_ptr):
       x = tl.load(in_ptr)
@@ -199,14 +188,13 @@ class TritonCallOutShapeTest(parameterized.TestCase):
         ("out_a_ptr", "out_b_ptr"),
         None,
       ]:
-        o1, o2 = jt.triton_call(
-          x, out_shape=out_shape, out_names=out_names, kernel=twin_k, grid=(1,)
-        )
+        o1, o2 = twin_k[(1,)](x, out_shape=out_shape, out_names=out_names)
         assert_expected(o1, o2)
 
   def test_compound_first(self):
     """out_shape=((a,(b,c)),d) — first output param is a compound tuple of arrays."""
 
+    @jt.kernel
     @triton.jit
     def compound_k(in_ptr, Ptrs, single_out):
       x = tl.load(in_ptr)
@@ -220,11 +208,8 @@ class TritonCallOutShapeTest(parameterized.TestCase):
     x = jnp.array([5.25])
     z = jnp.zeros((1,), dtype=jnp.float32)
 
-    compound_out, scalar_out = jt.triton_call(
-      x,
-      out_shape=((z, (z.astype(jnp.int32), z.astype(jnp.int16))), z),
-      kernel=compound_k,
-      grid=(1,),
+    compound_out, scalar_out = compound_k[(1,)](
+      x, out_shape=((z, (z.astype(jnp.int32), z.astype(jnp.int16))), z)
     )
     self.assertIsInstance(compound_out, tuple)
     self.assertEqual(len(compound_out), 2)
@@ -244,6 +229,7 @@ class TritonCallOutShapeTest(parameterized.TestCase):
   def test_compound_second(self):
     """out_shape=(a, (b,(c,d),e)) — second output param is a compound tuple of arrays."""
 
+    @jt.kernel
     @triton.jit
     def compound_k(in_ptr, single_out, Ptrs):
       x = tl.load(in_ptr)
@@ -257,14 +243,12 @@ class TritonCallOutShapeTest(parameterized.TestCase):
 
     x = jnp.array([5.25])
     z = jnp.zeros((1,), dtype=jnp.float32)
-    scalar_out, compound_out = jt.triton_call(
+    scalar_out, compound_out = compound_k[(1,)](
       x,
       out_shape=(
         z,
         (z, (z.astype(jnp.int32), z.astype(jnp.int16)), z.astype(jnp.int8)),
       ),
-      kernel=compound_k,
-      grid=(1,),
     )
     np.testing.assert_array_equal(scalar_out, x * 2)
     self.assertEqual(scalar_out.dtype, jnp.float32)
@@ -288,6 +272,7 @@ class TritonCallOutShapeTest(parameterized.TestCase):
   def test_dict_compound(self):
     """Dict form: out_shape={"Ptrs": ((a,b),c), "single_out": d} — compound dict value."""
 
+    @jt.kernel
     @triton.jit
     def compound_k(in_ptr, Ptrs, single_out):
       x = tl.load(in_ptr)
@@ -320,32 +305,29 @@ class TritonCallOutShapeTest(parameterized.TestCase):
 
       assert jttl.JTJITFunction(compound_k).compiled_kernels_cache_size == 1
 
-    compound_out, scalar_out = jt.triton_call(
+    compound_out, scalar_out = compound_k[(1,)](
       x,
       out_shape={
         "Ptrs": ((z, z.astype(jnp.int32)), z.astype(jnp.int16)),
         "single_out": z,
       },
-      kernel=compound_k,
-      grid=(1,),
     )
     assert_expected(compound_out, scalar_out)
 
     # Reversed dict key ordering — result must be identical (kernel signature order wins)
-    compound_out2, scalar_out2 = jt.triton_call(
+    compound_out2, scalar_out2 = compound_k[(1,)](
       x,
       out_shape={
         "single_out": z,
         "Ptrs": ((z, z.astype(jnp.int32)), z.astype(jnp.int16)),
       },
-      kernel=compound_k,
-      grid=(1,),
     )
     assert_expected(compound_out2, scalar_out2)
 
   def test_integer_interleaved(self):
     """Integer out_names for output params interleaved with a kwarg-only scalar input."""
 
+    @jt.kernel
     @triton.jit
     def interleaved_k(in_ptr, out1_ptr, scale, out2_ptr):
       x = tl.load(in_ptr)
@@ -355,9 +337,7 @@ class TritonCallOutShapeTest(parameterized.TestCase):
     x = jnp.array([5.25])
     z = jnp.zeros((1,), dtype=jnp.float32)
 
-    o1, o2 = jt.triton_call(
-      x, out_shape=[z, z], out_names=(1, 3), scale=3.0, kernel=interleaved_k, grid=(1,)
-    )
+    o1, o2 = interleaved_k[(1,)](x, out_shape=[z, z], out_names=(1, 3), scale=3.0)
     np.testing.assert_array_equal(o1, x)
     np.testing.assert_array_equal(o2, x * 3)
 

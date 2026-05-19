@@ -15,18 +15,19 @@
 """Library for JAX-Triton integrations."""
 
 __all__ = [
-    "utils",
-    "triton_call",
-    "cdiv",
-    "next_power_of_2",
-    "strides_from_shape",
-    "__version__",
-    "__version_info__",
+  "utils",
+  "triton_call",
+  "kernel",
+  "cdiv",
+  "next_power_of_2",
+  "strides_from_shape",
+  "__version__",
+  "__version_info__",
 ]
 
 from jax._src.lib import gpu_triton
 from jax_triton import utils
-from jax_triton.triton_lib import triton_call
+from jax_triton.triton_lib import triton_call, kernel
 from jax.experimental.pallas import cdiv
 from jax.experimental.pallas import next_power_of_2
 from jax.experimental.pallas import strides_from_shape

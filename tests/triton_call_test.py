@@ -384,15 +384,13 @@ class TritonKernelCallTest(parameterized.TestCase):
 
   @parameterized.parameters(42.0, np.float32(42.0))
   def test_add_float_scalar(self, scalar):
+    @jt.kernel
     @triton.jit
     def add_scalar_kernel(x_ptr, y, output_ptr):
       tl.store(output_ptr, tl.load(x_ptr) + y)
 
     x = jnp.array([1.0])
-    np.testing.assert_allclose(
-      jt.triton_call(x, scalar, out_shape=x, kernel=add_scalar_kernel, grid=1),
-      x + scalar,
-    )
+    np.testing.assert_allclose(add_scalar_kernel[1](x, scalar, out_shape=x), x + scalar)
 
   @parameterized.product(
     mul=[None, 1, 1.0, 3.14],
@@ -493,25 +491,41 @@ class TritonKernelCallTest(parameterized.TestCase):
     self.assertEqual(jttl.JTJITFunction(kernel2).compiled_kernels_cache_size, 4)
     np.testing.assert_array_equal(rets, [1, 2, 3, 7, 1])
 
+  def test_jit_function_arg(self):
+    @triton.jit
+    def mul_jit_function(x, y):
+      return x * y
+
+    @triton.jit
+    def apply_binary_op(x, combine_op):
+      return combine_op(x, x)
+
+    @jt.kernel
+    @triton.jit
+    def square_kernel_jit_function(in_ptr, out_ptr, BLOCK_SIZE: tl.constexpr):
+      offsets = tl.arange(0, BLOCK_SIZE)
+      in_data = tl.load(in_ptr + offsets)
+      # pass a JITFunction into another JITFunction
+      out_data = apply_binary_op(in_data, mul_jit_function)
+      tl.store(out_ptr + offsets, out_data)
+
+    BLOCK_SIZE = 16
+    x = jnp.full((BLOCK_SIZE,), 3.0)
+    expect = jnp.full((BLOCK_SIZE,), 9.0, dtype=x.dtype)
+
+    out = square_kernel_jit_function[(1,)](x, BLOCK_SIZE=BLOCK_SIZE, out_shape=x)
+    np.testing.assert_allclose(out, expect)
+
   def test_explicit_compute_capability(self):
     scalar = np.float32(8)
 
+    @jt.kernel(compute_capability=jt.get_compute_capability(0))
     @triton.jit
     def add_scalar_kernel(x_ptr, y, output_ptr):
       tl.store(output_ptr, tl.load(x_ptr) + y)
 
     x = jnp.array([1.0])
-    np.testing.assert_allclose(
-      jt.triton_call(
-        x,
-        scalar,
-        kernel=add_scalar_kernel,
-        out_shape=x,
-        grid=1,
-        compute_capability=jt.get_compute_capability(0),
-      ),
-      x + scalar,
-    )
+    np.testing.assert_allclose(add_scalar_kernel[1](x, scalar, out_shape=x), x + scalar)
 
   def test_single_namespace_for_constexprs_and_backend_options(self):
     """Checks that metaparams of triton_call() are passed to the kernel and to backend
@@ -600,6 +614,7 @@ class TritonKernelCallTest(parameterized.TestCase):
       self.assertEqual(jt_cache_size(), 2)
 
   def test_kernel_cache_same_kernel_different_params(self):
+    @jt.kernel(out_names="output_ptr")
     @triton.jit
     def silly_add_kernel(x_ptr, y_ptr, output_ptr):
       pid = tl.program_id(axis=0)
@@ -607,11 +622,7 @@ class TritonKernelCallTest(parameterized.TestCase):
 
     def silly_add(n, dtype="float32"):
       x, y = create_random_inputs([n], dtype=dtype)
-      return (
-        jt.triton_call(x, y, out_shape=x, kernel=silly_add_kernel, grid=x.size),
-        x,
-        y,
-      )
+      return silly_add_kernel[x.size](x, y, out_shape=x), x, y
 
     jt_kernel = jttl.JTJITFunction(silly_add_kernel)
     jt_cache_size = lambda: jt_kernel.compiled_kernels_cache_size
@@ -781,6 +792,34 @@ class TritonKernelCallTest(parameterized.TestCase):
     out = add(x, y, kernel=kernel, input_output_aliases={0: 0})
     np.testing.assert_allclose(out, expected)
 
+  def test_kernel_in_thread(self):
+    # Inspired by Triton's test. Verifies that calling in a new thread sets a valid
+    # device context.
+    buf = jnp.zeros((38016 * 1024,), dtype=jnp.float32)
+
+    @jt.kernel(out_names="out")
+    @triton.jit
+    def _kernel(P, BLOCK: tl.constexpr, out):
+      pid = tl.program_id(0).to(tl.int64)
+      offset = pid * BLOCK + tl.arange(0, BLOCK)
+
+      p = tl.load(P + offset)
+      tl.store(out + offset, p + 1)
+
+    def call_triton():
+      nonlocal buf
+      N = buf.size
+      grid = lambda meta: (triton.cdiv(N, meta["BLOCK"]),)
+      out = _kernel[grid](buf, BLOCK=1024, out_shape=buf)
+      np.testing.assert_array_equal(buf + 1, out)
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    call_triton()
+    with ThreadPoolExecutor(1) as pool:
+      future = pool.submit(call_triton)
+      future.result()
+
   def test_autodiff_exception(self):
     x, y = create_random_inputs([10, 100], dtype="float32")
     with self.assertRaisesRegex(
@@ -798,3 +837,185 @@ class TritonKernelCallTest(parameterized.TestCase):
       r"jax\.custom_batching\.custom_vmap.*",
     ):
       jax.vmap(lambda x, y: add(x, y, BLOCK_SIZE=32))(x, y)
+
+  def test_memory_leak(self):
+    # Inspired by Triton's test.
+
+    @jt.kernel(out_names="out_ptr0")
+    @triton.jit
+    def kernel(in_ptr0, xnumel, XBLOCK: tl.constexpr, out_ptr0):
+      xnumel = 10
+      xoffset = tl.program_id(0) * XBLOCK
+      xindex = xoffset + tl.arange(0, XBLOCK)[:]
+      xmask = xindex < xnumel
+      x0 = xindex
+      tmp0 = tl.load(in_ptr0 + (x0), xmask)
+      tl.store(out_ptr0 + (x0 + tl.zeros([XBLOCK], tl.int32)), tmp0, xmask)
+
+    import gc
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+      inp = random.normal(random.key(0), (10,))
+      out = kernel[(10,)](inp, 10, XBLOCK=16, out_shape=inp)
+      gc.collect()
+      begin, _ = tracemalloc.get_traced_memory()
+      for _ in range(200):  # originally was 100
+        out = kernel[(10,)](inp, 10, XBLOCK=16, out_shape=inp)
+      del out
+      gc.collect()
+      end, _ = tracemalloc.get_traced_memory()
+      assert end - begin < 71000  # originally this was 30000, but we store extra data
+      # in a JTKernel object and there is JAX's internal caching in the Primitive system
+      # on top of that, so +41k seems reasonable (estimated with the original 100
+      # iterations in the loop above, then the range was raised to 200).
+      # The margin is just about 100 bytes on this system, so if on another system it's
+      # slightly different (i.e., a bit larger and causes a failure), just update the
+      # threshold above.
+    finally:
+      tracemalloc.stop()
+
+  @parameterized.product(
+    signed=[False, True],
+    width=[8, 16, 32, 64, 1],
+  )
+  def test_int_annotation(self, signed, width):
+    # Inspired by an original Triton test.
+    # We could add similar tests for float, but it seems redundant: we delegate to the
+    # original Triton code, and if ints work, everything else should too.
+    if width == 1 and signed:
+      return
+
+    def annotated_function(return_type=None, **arg_types):
+      """A decorator to add annotations to a function."""
+
+      def decorator(func):
+        func.__annotations__ = {**arg_types, "return": return_type}
+        return func
+
+      return decorator
+
+    @jt.kernel
+    @triton.jit
+    @annotated_function(v=f"tl.{'' if signed else 'u'}int{width}")
+    def _kernel(v, X):
+      tl.store(X + v, v)
+
+    _kernel[(1,)](3, out_shape=jnp.zeros(1), _store_asm=True)
+
+    asm = jttl.JTJITFunction(_kernel).asm
+    assert len(asm) == 1
+    ttir = next(iter(asm.values())).get("ttir")
+
+    pfx = "si" if signed else "ui"
+    if not signed and width < 64:
+      assert "arith.extui %v" in ttir
+    assert f"%v: i{width}" in ttir
+    assert f"arith.{pfx}tofp" in ttir
+
+  def test_err_constexpr_and_do_not_specialize(self):
+    # Inspired by the original Triton test. Verifies that our code doesn't break
+    # `do_not_specialize` functionality. Related to the previous test: we delegate to
+    # Triton's own processing here and verify it remains intact.
+    @jt.kernel
+    @triton.jit(do_not_specialize=["N"])
+    def kernel(out_ptr, N: tl.constexpr):
+      pass
+
+    with self.assertRaisesRegex(
+      triton.compiler.errors.CompilationError,
+      r"N marked as constexpr and listed in do_not_specialize",
+    ):
+      kernel[(1,)](5, out_shape=jnp.zeros(1))  # out_shape is needed to prevent DCE
+
+  def test_kernel_default_arg(self):
+    # Inspired by an original Triton test.
+    global GLOBAL_DEFAULT_ARG
+
+    @jt.kernel
+    @triton.jit
+    def kernel(X, i: tl.constexpr = GLOBAL_DEFAULT_ARG):
+      tl.store(X, i)
+
+    x = kernel[(1,)](out_shape=jnp.zeros(1))
+    assert x == jnp.ones_like(x)
+
+    # Changing the global variable should not change the default argument in
+    # `kernel`.  That value gets set at the time the function is declared.
+    GLOBAL_DEFAULT_ARG = 2
+    x = kernel[(1,)](out_shape=jnp.zeros(1))
+    assert x == jnp.ones_like(x)
+
+    assert jttl.JTJITFunction(kernel).compiled_kernels_cache_size == 1
+
+  def test_readme(self):
+    """Code for the README example; effectively an integration test of many features
+    at once, including string passing (not tested elsewhere), precise partial aliasing,
+    and pure outputs."""
+    from triton.language.extra import libdevice
+    from typing import NamedTuple
+    import time
+
+    class Function(NamedTuple):
+      fn: tl.constexpr
+      captured: tuple
+
+    @triton.jit
+    def func1(x_ptr, y_ptr: tl.const, SIZE: tl.constexpr):
+      off = tl.arange(0, SIZE)
+      x = tl.load(x_ptr + off)
+      y = tl.load(y_ptr + off)
+      x1 = libdevice.sin(x)
+      x2 = libdevice.cos(x)
+      z = x1 * x1 + x2 * x2
+      tl.store(x_ptr + off, z)
+      y = libdevice.asin(y) + libdevice.acos(y)
+      return z, libdevice.floor(2 * y)
+
+    @triton.jit
+    def floor_of_func(values, SIZE: tl.constexpr, FUNC_NAME: tl.constexpr):
+      off = tl.arange(0, SIZE)
+      return libdevice.floor(getattr(libdevice, FUNC_NAME)(values))
+
+    @triton.jit
+    def aggregate(Ptrs):
+      z = tl.zeros([], tl.float32)
+      for i in tl.static_range(len(Ptrs)):
+        z += Ptrs[i]
+      return z
+
+    @jt.kernel
+    @triton.jit
+    def kernel(capture, out_ptr, SIZE: tl.constexpr, FUNC_NAME: tl.constexpr):
+      off = tl.arange(0, SIZE)
+      t1, t2 = capture.fn(*capture.captured, SIZE=SIZE)
+      t3 = floor_of_func(t1, SIZE=SIZE, FUNC_NAME=FUNC_NAME)
+      t4 = t2 * t3
+      result = aggregate((t4, t4 * t4)).to(tl.int32)
+      tl.store(out_ptr + off, result)
+
+    size = 8
+    k1, k2 = random.split(random.key(time.perf_counter_ns()), 2)
+    x = random.uniform(k1, (size,), dtype=jnp.float32)
+    y = random.uniform(k2, (size,), dtype=jnp.float32)
+
+    fn = Function(func1, (x, y))
+    out, x = kernel[(1,)](
+      fn,  # essentially a tuple of (func_name, (2 arrays in a subtuple))
+      SIZE=size,
+      FUNC_NAME="exp",
+      out_shape=jnp.zeros(size, dtype=jnp.int32),
+      input_output_aliases=("capture", 1, 0),  # path into `capture`: index 1 of
+      # `captured` tuple, then index 0 of that subtuple, i.e. array `x`. As a tuple
+      # path, it references exactly that one array (not the whole subtuple).
+    )
+    np.testing.assert_array_equal(out, jnp.full((size,), 42, dtype=jnp.int32))
+    assert out.dtype == jnp.int32
+    np.testing.assert_allclose(x, jnp.full((size,), 1.0, dtype=jnp.float32), rtol=5e-7)
+    assert x.dtype == jnp.float32
+
+
+if __name__ == "__main__":
+  os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
+  absltest.main()

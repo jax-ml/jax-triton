@@ -415,6 +415,116 @@ _BACKEND_OPTIONS_FIELD_NAMES = {
 }
 
 
+class JTKernel:
+  def __init__(self, kernel, triton_call_kwargs):
+    if not isinstance(
+      kernel,
+      (
+        triton.JITFunction,
+        gl_runtime.GluonJITFunction,
+        autotuner.Heuristics,
+        autotuner.Autotuner,
+        JTKernel,
+      ),
+    ):
+      raise ValueError(
+        "`kernel` must be a `JTKernel` or Triton's `JITFunction`, `GluonJITFunction`, `Heuristics` or `Autotuner` object."
+      )
+
+    if isinstance(kernel, JTKernel):
+      triton_call_kwargs = {**kernel.triton_call_kwargs, **triton_call_kwargs}
+      kernel = kernel.kernel
+
+    self.kernel = kernel
+
+    if "grid" in triton_call_kwargs:
+      raise ValueError("grid must be provided as an indexing argument to this object")
+
+    # This code runs only once at the kernel declaration site, so we can perform
+    # as much validation as possible here rather than on every kernel launch.
+    if "out_names" in triton_call_kwargs:
+      # We rely on the user to correctly specify the order of elements in "out_names"
+      # to match the kernel's signature. We validate this as thoroughly as possible here.
+      triton_call_kwargs = self._validate_out_names(kernel, triton_call_kwargs)
+
+    self.triton_call_kwargs = triton_call_kwargs
+
+  @staticmethod
+  def _validate_out_names(kernel, triton_call_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Validates the ordering of elements in triton_call_kwargs['out_names'] as
+    thoroughly as possible."""
+    out_names = triton_call_kwargs["out_names"]
+    if isinstance(out_names, (str, int)):
+      out_names = (out_names,)
+    elif isinstance(out_names, list):  # normalize lists to tuples here
+      out_names = tuple(out_names)
+    elif not isinstance(out_names, tuple):
+      raise ValueError("out_names must be a string, or a tuple of specific format")
+    triton_call_kwargs["out_names"] = out_names
+
+    jtfu = JTJITFunction(kernel)  # refactor this out if other validation funcs appear
+    arg_names = jtfu.arg_names
+    last_idx = -1
+    for i, out_elm in enumerate(out_names):
+      is_tuple = isinstance(out_elm, tuple)
+      if is_tuple and len(out_elm) <= 0:
+        raise ValueError(f"out_names[{i}] must be a nonempty tuple")
+      if is_tuple and any(not isinstance(e, int) for e in out_elm[1:]):
+        raise ValueError(
+          "A tuple form of out_names must contain only ints beyond the first element"
+        )
+      is_first_string = is_tuple and isinstance(out_elm[0], str)
+      if isinstance(out_elm, str) or is_first_string:
+        try:
+          param_idx = arg_names.index(out_elm[0] if is_first_string else out_elm)
+        except ValueError:
+          raise ValueError(f"out_names[{i}] must be a valid kernel parameter name")
+        # without args/kwargs we can't look deeper anyway
+      else:
+        param_idx = out_elm[0] if is_tuple else out_elm
+        if not isinstance(out_elm, int):
+          raise ValueError(f"out_names[{i}] must be an int or a string")
+
+      if param_idx <= last_idx:
+        raise ValueError(
+          "The order of elements in out_names must follow the kernel's signature"
+        )
+      last_idx = param_idx
+    return triton_call_kwargs
+
+  def __getitem__(self, grid):
+    return lambda *args, **kwargs: triton_call(
+      *args, kernel=self.kernel, grid=grid, **self.triton_call_kwargs, **kwargs
+    )
+
+
+def kernel(fn=None, **kwargs):
+  """A decorator that wraps a Triton/Gluon kernel function and returns a `JTKernel`
+  object that stores kwargs to be forwarded to `triton_call()` at launch time.
+
+  It can be used in two ways:
+
+  - @jt.kernel
+    @triton.jit  # or @triton.experimental.gluon.jit
+    def kernel_func(x, y, z):
+      ...
+  - @jt.kernel(out_names="z")  # or any other key-value pairs accepted by triton_call()
+    @triton.jit
+    def kernel_func(x, y, z):
+      ...
+
+  The resulting `JTKernel` can be launched with a given grid using the familiar
+  Triton syntax `kernel_func[grid](x, y)`. Note that output arguments remain
+  implicit and must not be passed to the launcher.
+  """
+  if len(kwargs) == 0 or fn is not None:
+    if fn is None:
+      raise ValueError("`kernel` decorator must be used with a kernel function")
+    return JTKernel(fn, kwargs)
+
+  return functools.partial(JTKernel, triton_call_kwargs=kwargs)
+
+
 # nb: the class name is purposely distinct from Triton's JITFunction to simplify writing
 # comments and docstrings, and make them unambiguous without additional context.
 class JTJITFunction:
@@ -445,6 +555,8 @@ class JTJITFunction:
     | Self,
   ):
     # peel off several potential wrapper layers to get to the JITFunction object
+    if isinstance(fn, JTKernel):
+      fn = fn.kernel
     if isinstance(fn, JTJITFunction):
       fn = fn.fn
     if isinstance(fn, autotuner.Autotuner):
