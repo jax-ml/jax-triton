@@ -15,12 +15,23 @@
 from absl.testing import absltest
 
 import jax
+from jax import config
 import jax.numpy as jnp
 import jax_triton as jt
 import numpy as np
 import triton
 import triton.language as tl
 from triton.language.extra import libdevice
+
+config.parse_flags_with_absl()
+
+
+def setUpModule():
+  config.update("jax_enable_x64", True)
+
+
+def tearDownModule():
+  config.update("jax_enable_x64", False)
 
 
 @triton.jit
