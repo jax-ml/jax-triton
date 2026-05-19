@@ -930,7 +930,6 @@ def make_kernel_params(
   grid,
   zeroed_outputs,
   configs: list[triton.Config],
-  operand_output_aliases: dict[int, int],
 ) -> list[dict[str, Any]]:
   """Make kernel call parameters for each config."""
   zeroed_outputs_callable = callable(zeroed_outputs)
@@ -954,14 +953,11 @@ def make_kernel_params(
       zeroed_outputs(config_metaparams) if zeroed_outputs_callable else zeroed_outputs
     )
 
-    # zeroed_params_with_sizes is a dict output_arg_idx -> aval_size_bytes
+    # zeroed_params_with_sizes is a dict raw_array_idx -> aval_size_bytes
     # config_zeroed_outputs contains output ordinal indices
-    output2input = {v: k for k, v in operand_output_aliases.items()}
     zeroed_params_with_sizes = {
-      output2input[i] if i in output2input else i + outputs_offset: aval_size_bytes(
-        ctx.avals_out[i]
-      )
-      for i in sorted(config_zeroed_outputs)
+      i + outputs_offset: aval_size_bytes(ctx.avals_out[i])
+      for i in config_zeroed_outputs
     }
 
     kernel_params.append(
@@ -1138,7 +1134,6 @@ def triton_kernel_call_lowering(
     grid,
     zeroed_outputs,
     configs,
-    operand_output_aliases,
   )
 
   kernel_calls = []
