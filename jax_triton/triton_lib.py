@@ -228,6 +228,8 @@ class CompilationResult:
   shared_mem_bytes: int
   ttgir: str | None
   llir: str | None
+  global_scratch_size: int = 0
+  global_scratch_align: int = 1
 
 
 def compile_ttir_inplace(
@@ -295,6 +297,10 @@ def compile_ttir_to_ptx_inplace(
         f"TMEM size {metadata['tmem_size']} exceeds limit {_TMEM_MAX_SIZE}."
     )
   shared_mem_bytes = metadata["shared"]
+  # Per-CTA global scratch memory the compiled kernel expects as an implicit
+  # trailing argument (e.g. for on-device construction of TMA descriptors).
+  global_scratch_size = metadata.get("global_scratch_size", 0)
+  global_scratch_align = metadata.get("global_scratch_align", 1) or 1
   if cuda_options.debug:
     print(llir)
   ptx = cuda_backend.make_ptx(
@@ -314,6 +320,8 @@ def compile_ttir_to_ptx_inplace(
       shared_mem_bytes=shared_mem_bytes,
       ttgir=ttgir,
       llir=llir,
+      global_scratch_size=global_scratch_size,
+      global_scratch_align=global_scratch_align,
   )
 
 
@@ -613,6 +621,8 @@ class JTJITFunction:
         compilation_result.binary,
         ttir,
         compute_capability,
+        compilation_result.global_scratch_size,
+        compilation_result.global_scratch_align,
       )
 
       self.fn._jT_kernel_cache[cache_key] = kernel
