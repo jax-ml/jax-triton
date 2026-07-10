@@ -12,20 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
+"""
+Main tests for triton_call()
+"""
+
 from unittest import mock
 
-from absl.testing import absltest
 from absl.testing import parameterized
+from copy import deepcopy
 import jax
-from jax import config
-from jax import random
+from jax import config, random, tree_util
 import jax.numpy as jnp
 import jax_triton as jt
 import jax_triton.triton_lib as jttl
 import numpy as np
 import triton
 import triton.language as tl
+import types
 
 config.parse_flags_with_absl()
 
@@ -36,6 +39,115 @@ def setUpModule():
 
 def tearDownModule():
   config.update("jax_enable_x64", False)
+
+
+class ArgsKwargsTest(parameterized.TestCase):
+  def test_serialize_deserialize(self):
+    """Test that serialize_args_kwargs() and deserialize_args_kwargs() are inverses of
+    each other, with correct handling of argument ordering."""
+    args = [
+      1,
+      3.14,
+      jnp.array([1, 2, 3], dtype=jnp.int8),
+      (3, 4),
+      "string",
+      (jnp.array([5, 6], dtype=jnp.int16),),
+      (9, jnp.array([7, 8], dtype=jnp.int32), jnp.array([70, 80], dtype=jnp.float32)),
+      (10, (jnp.array([7, 8], dtype=jnp.int64), 11)),
+    ]
+    kwargs = {  # keys aren't in the order of declaration in the signature
+      "b": 3.14,
+      "g": (
+        9,
+        jnp.array([7, 8], dtype=jnp.uint32),
+        jnp.array([70, 80], dtype=jnp.float16),
+      ),
+      "h": (10, (jnp.array([7, 8], dtype=jnp.uint64), 11)),
+      "a": 1,
+      "e": "string",
+      "c": jnp.array([1, 2, 3], dtype=jnp.uint8),
+      "d": (3, 4),
+      "f": (jnp.array([5, 6], dtype=jnp.uint16),),
+    }
+
+    # kwargs are expected to be sorted
+    @triton.jit
+    def kernel(int_, fl, a1, t1, st, t2, t3, t4, *, a, b, c, d, e, f, g, h):
+      pass
+
+    class FakeAvals:
+      def __init__(self):
+        # Extracting only arrays from the args sequence in kernel signature order.
+        # This ensures that during serialization/deserialization, arrays are in
+        # signature order, so no reshuffling is needed to call the kernel.
+        self.flat = [
+          v
+          for v in tree_util.tree_flatten((
+            args,
+            {k: kwargs[k] for k in sorted(kwargs.keys())},  # restore signature order
+          ))[0]
+          if isinstance(v, jax.Array)
+        ]
+
+        # check the core test assumption that types in args are unique and get_type_id()
+        # is a bijection.
+        unique_types = frozenset(jttl.get_type_id(v) for v in self.flat)
+        assert len(unique_types) == len(self.flat), (
+          "Duplicate types in the args sequence"
+        )
+
+      def __getitem__(self, i):
+        return self.flat[i]
+
+      def __len__(self):
+        return len(self.flat)
+
+    def _make_expected_array_id2idx(args, kwargs):
+      array_id2idx = {}
+      for coll in [args, kwargs]:
+        flat, _ = tree_util.tree_flatten(coll)
+        arrays = [v for v in flat if isinstance(v, jax.Array)]
+        l = len(array_id2idx)
+        array_id2idx.update({id(v): idx + l for idx, v in enumerate(arrays)})
+      return array_id2idx
+
+    kwargs_copy = deepcopy(kwargs)
+    expected_array_id2idx = _make_expected_array_id2idx(args, kwargs_copy)
+
+    abs_args_kwargs, array_id2idx, args_kwargs_meta = jttl.serialize_args_kwargs(
+      jttl.JTJITFunction(kernel),
+      args,
+      kwargs_copy,
+      # kwargs could be modified, hence must copy
+    )
+
+    assert array_id2idx == expected_array_id2idx
+
+    ctx = types.SimpleNamespace(avals_in=FakeAvals())
+    dargs, dkwargs, _ = jttl.deserialize_args_kwargs(
+      ctx, [*abs_args_kwargs], args_kwargs_meta
+    )
+
+    def assert_correct(a, b):
+      if isinstance(a, jax.Array):
+        assert jttl.get_type_id(a) == b.dtype
+        # can't test actual values here, they were abstracted away
+      elif isinstance(a, tuple):
+        assert isinstance(b, tuple)
+        assert len(a) == len(b)
+        for ai, bi in zip(a, b):
+          assert_correct(ai, bi)
+      else:
+        assert isinstance(a, type(b))
+        assert a == b
+
+    assert len(args) == len(dargs)
+    for ai in range(len(args)):
+      assert_correct(args[ai], dargs[ai])
+
+    assert len(kwargs) == len(dkwargs)
+    for k in kwargs.keys():
+      assert_correct(kwargs[k], dkwargs[k])
 
 
 @triton.jit
@@ -51,7 +163,9 @@ def add_kernel(x_ptr, y_ptr, n_elements, output_ptr, BLOCK_SIZE: tl.constexpr):
 
 
 @triton.jit
-def add_inplace_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr, INPLACE_Y: tl.constexpr):
+def add_inplace_kernel(
+  x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr, INPLACE_Y: tl.constexpr
+):
   pid = tl.program_id(axis=0)
   block_start = pid * BLOCK_SIZE
   offsets = block_start + tl.arange(0, BLOCK_SIZE)
@@ -75,46 +189,35 @@ def add(x, y, *, kernel=add_kernel, **kwargs):
 
   default_grid = lambda meta: triton.cdiv(x.size, meta["BLOCK_SIZE"])
   return jt.triton_call(
-      x,
-      y,
-      x.size,
-      kernel=kernel,
-      out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
-      grid=kwargs.pop("grid", default_grid),
-      **kwargs,
+    x,
+    y,
+    x.size,
+    kernel=kernel,
+    out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+    grid=kwargs.pop("grid", default_grid),
+    **kwargs,
   )
 
 
 @triton.jit
-def inc_inplace_kernel(x_in_out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-  pid = tl.program_id(axis=0)
-  block_start = pid * BLOCK_SIZE
-  offsets = block_start + tl.arange(0, BLOCK_SIZE)
-  mask = offsets < n_elements
-  x = tl.load(x_in_out_ptr + offsets, mask=mask)
-  output = x + 1
-  tl.store(x_in_out_ptr + offsets, output, mask=mask)
-
-
-@triton.jit
 def matmul_kernel(
-    a_ptr,
-    b_ptr,
-    M,
-    N,
-    K,
-    stride_am,
-    stride_ak,
-    stride_bk,
-    stride_bn,
-    stride_cm,
-    stride_cn,
-    c_ptr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    K_EXACTLY_DIVISIBLE_BY_BLOCK: tl.constexpr,
+  a_ptr,
+  b_ptr,
+  M,
+  N,
+  K,
+  stride_am,
+  stride_ak,
+  stride_bk,
+  stride_bn,
+  stride_cm,
+  stride_cn,
+  c_ptr,
+  BLOCK_SIZE_M: tl.constexpr,
+  BLOCK_SIZE_N: tl.constexpr,
+  BLOCK_SIZE_K: tl.constexpr,
+  GROUP_SIZE_M: tl.constexpr,
+  K_EXACTLY_DIVISIBLE_BY_BLOCK: tl.constexpr,
 ):
   pid = tl.program_id(axis=0)
   num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
@@ -161,22 +264,22 @@ def matmul(x, y, *, kernel=matmul_kernel, **kwargs):
     return cdiv(m, meta["BLOCK_SIZE_M"]) * cdiv(n, meta["BLOCK_SIZE_N"])
 
   return jt.triton_call(
-      x,
-      y,
-      m,
-      n,
-      k,
-      k,  # stride_am
-      1,  # stride_ak
-      n,  # stride_bk
-      1,  # stride_bn
-      n,  # stride_cm
-      1,  # stride_cn
-      kernel=kernel,
-      out_shape=jax.ShapeDtypeStruct((m, n), dtype=x.dtype),
-      grid=grid,
-      GROUP_SIZE_M=8,
-      **kwargs,
+    x,
+    y,
+    m,
+    n,
+    k,
+    k,  # stride_am
+    1,  # stride_ak
+    n,  # stride_bk
+    1,  # stride_bn
+    n,  # stride_cm
+    1,  # stride_cn
+    kernel=kernel,
+    out_shape=jax.ShapeDtypeStruct((m, n), dtype=x.dtype),
+    grid=grid,
+    GROUP_SIZE_M=8,
+    **kwargs,
   )
 
 
@@ -194,12 +297,14 @@ def create_random_inputs(shape1, shape2=None, *, dtype="float32"):
   return x, y
 
 
-class TritonKernelCallTest(parameterized.TestCase):
+GLOBAL_DEFAULT_ARG = 1
 
+
+class TritonKernelCallTest(parameterized.TestCase):
   @parameterized.product(
-      size=[1, 5, 100, 1024],
-      dtype=["int32", "float32", "float16", "int64", "float64"],
-      block_size=[1, 32, 256],
+    size=[1, 5, 100, 1024],
+    dtype=["int32", "float32", "float16", "int64", "float64"],
+    block_size=[1, 32, 256],
   )
   def test_add(self, size, dtype, block_size):
     x, y = create_random_inputs([size], dtype=dtype)
@@ -208,43 +313,43 @@ class TritonKernelCallTest(parameterized.TestCase):
     np.testing.assert_allclose(out, expected)
 
   @parameterized.product(
-      m=[512, 1024],
-      k=[512],
-      n=[512],
-      dtype=["float32", "float16"],
-      block_size_m=[64, 128],
-      block_size_n=[128, 256],
-      block_size_k=[32],
+    m=[512, 1024],
+    k=[512],
+    n=[512],
+    dtype=["float32", "float16"],
+    block_size_m=[64, 128],
+    block_size_n=[128, 256],
+    block_size_k=[32],
   )
   def test_matmul(
-      self,
-      m,
-      n,
-      k,
-      dtype,
-      block_size_m,
-      block_size_n,
-      block_size_k,
+    self,
+    m,
+    n,
+    k,
+    dtype,
+    block_size_m,
+    block_size_n,
+    block_size_k,
   ):
     if jt.get_compute_capability(0) < 70:
       self.skipTest("Matmul only works on GPUs with capability >= sm70")
 
     x, y = create_random_inputs([m, k], [k, n], dtype=dtype)
     out = matmul(
-        x,
-        y,
-        BLOCK_SIZE_M=block_size_m,
-        BLOCK_SIZE_N=block_size_n,
-        BLOCK_SIZE_K=block_size_k,
-        K_EXACTLY_DIVISIBLE_BY_BLOCK=k % block_size_k == 0,
+      x,
+      y,
+      BLOCK_SIZE_M=block_size_m,
+      BLOCK_SIZE_N=block_size_n,
+      BLOCK_SIZE_K=block_size_k,
+      K_EXACTLY_DIVISIBLE_BY_BLOCK=k % block_size_k == 0,
     )
     expected = jnp.matmul(x, y)
     np.testing.assert_allclose(out, expected, atol=0.05, rtol=0.05)
 
   @parameterized.product(
-      size=[1, 5, 100, 1024],
-      dtype=["int32", "float32", "float16", "int64", "float64"],
-      block_size=[1, 32, 256],
+    size=[1, 5, 100, 1024],
+    dtype=["int32", "float32", "float16", "int64", "float64"],
+    block_size=[1, 32, 256],
   )
   def test_pmap(self, size, dtype, block_size):
     n_devices = jax.local_device_count()
@@ -281,17 +386,135 @@ class TritonKernelCallTest(parameterized.TestCase):
     def add_scalar_kernel(x_ptr, y, output_ptr):
       tl.store(output_ptr, tl.load(x_ptr) + y)
 
-    def add_scalar(x, y):
+    x = jnp.array([1.0])
+    np.testing.assert_allclose(
+      jt.triton_call(x, scalar, out_shape=x, kernel=add_scalar_kernel, grid=1),
+      x + scalar,
+    )
+
+  @parameterized.product(
+    mul=[None, 1, 1.0, 3.14],
+    ofs=[None, 1, 1.0, 2.71],
+    numel=[1, 5, 257],
+    block_size=[1, 32],
+  )
+  def test_scalar_ordering_1None(self, mul, ofs, numel, block_size):
+    """Test that the order of passing scalars doesn't matter, and that special values
+    of 1 and None for runtime arguments are handled correctly.
+    Since most kernels in tests follow the `inputs first, then scalars` scheme, this
+    test only checks the reverse order."""
+
+    @triton.jit
+    def affine_kernel(mul, ofs, in_ptr, in_numel, out_ptr, BLOCK_SIZE: tl.constexpr):
+      pid = tl.program_id(0)
+      start = pid * BLOCK_SIZE
+      end = min(start + BLOCK_SIZE, in_numel)
+      for i in range(start, end):
+        x = tl.load(in_ptr + i)
+        if mul is not None:
+          x *= mul
+        if ofs is not None:
+          x += ofs
+        tl.store(out_ptr + i, x)
+
+    def affine(mul, ofs, x, BLOCK_SIZE):
       return jt.triton_call(
-          x,
-          y,
-          kernel=add_scalar_kernel,
-          out_shape=jax.ShapeDtypeStruct((), x.dtype),
-          grid=1,
+        mul,
+        ofs,
+        x,
+        x.size,
+        kernel=affine_kernel,
+        out_shape=x,
+        grid=(triton.cdiv(x.size, BLOCK_SIZE),),
+        BLOCK_SIZE=BLOCK_SIZE,
       )
 
+    x = jnp.arange(numel, dtype=jnp.float32)
+    y = affine(mul, ofs, x, block_size)
+    expected = x
+    if mul is not None:
+      expected *= mul
+    if ofs is not None:
+      expected += ofs
+    np.testing.assert_allclose(y, expected, rtol=2e-07)
+
+  def test_function_arguments(self):
+    # mostly taken from Triton with necessary changes and a test without tl.constexpr
+    @triton.jit
+    def func1():
+      return 1
+
+    @triton.jit
+    def func2():
+      return 2
+
+    @triton.jit
+    def func3(x):
+      return x
+
+    @triton.jit
+    def func4(x, y):
+      return x + y
+
+    @triton.jit  # callables are explicitly constexpr
+    def kernel(fn_args, Y, fn: tl.constexpr):
+      tl.store(Y, fn(*fn_args))
+
+    @triton.jit  # callables aren't annotated (made constexpr automatically)
+    def kernel2(fn_args, Y, fn):
+      tl.store(Y, fn(*fn_args))
+
+    def launch_kernel(fn, fn_args, kernel=kernel):
+      return jt.triton_call(
+        fn_args,
+        fn=fn,
+        kernel=kernel,
+        out_shape=jax.ShapeDtypeStruct((), jnp.int32),
+        grid=1,
+      )
+
+    rets = [None] * 5
+    k1 = jttl.JTJITFunction(kernel)
+    self.assertEqual(k1.compiled_kernels_cache_size, 0)
+    rets[0] = launch_kernel(func1, tuple())
+    rets[1] = launch_kernel(func2, tuple())
+    rets[2] = launch_kernel(func3, (3,))
+    rets[3] = launch_kernel(func4, (3, 4))
+    rets[4] = launch_kernel(func1, tuple())
+    self.assertEqual(k1.compiled_kernels_cache_size, 4)
+    np.testing.assert_array_equal(rets, [1, 2, 3, 7, 1])
+
+    rets = [None] * 5
+    k2 = jttl.JTJITFunction(kernel2)
+    self.assertEqual(k2.compiled_kernels_cache_size, 0)
+    rets[0] = launch_kernel(func1, tuple(), kernel=kernel2)
+    rets[1] = launch_kernel(func2, tuple(), kernel=kernel2)
+    rets[2] = launch_kernel(func3, (3,), kernel=kernel2)
+    rets[3] = launch_kernel(func4, (3, 4), kernel=kernel2)
+    rets[4] = launch_kernel(func1, tuple(), kernel=kernel2)
+    self.assertEqual(k2.compiled_kernels_cache_size, 4)
+    np.testing.assert_array_equal(rets, [1, 2, 3, 7, 1])
+
+  def test_explicit_constexpr_argument(self):
+    @triton.jit
+    def add_scalar_kernel(x_ptr, y, output_ptr):
+      tl.store(output_ptr, tl.load(x_ptr) + y)
+
+    jt_cache_size = lambda: jttl.JTJITFunction(add_scalar_kernel).compiled_kernels_cache_size
+    self.assertEqual(jt_cache_size(), 0)
+
     x = jnp.array([1.0])
-    np.testing.assert_allclose(add_scalar(x, scalar), x + scalar)
+    call = lambda y: jt.triton_call(x, y, kernel=add_scalar_kernel, out_shape=x, grid=1)
+
+    np.testing.assert_allclose(call(4.0), x + 4)
+    self.assertEqual(jt_cache_size(), 1)
+    np.testing.assert_allclose(call(4.0), x + 4)
+    self.assertEqual(jt_cache_size(), 1)
+
+    np.testing.assert_allclose(call(tl.constexpr(4.0)), x + 4)
+    self.assertEqual(jt_cache_size(), 2)
+    np.testing.assert_allclose(call(tl.constexpr(4.0)), x + 4)
+    self.assertEqual(jt_cache_size(), 2)
 
   def test_explicit_compute_capability(self):
     scalar = np.float32(8)
@@ -300,159 +523,69 @@ class TritonKernelCallTest(parameterized.TestCase):
     def add_scalar_kernel(x_ptr, y, output_ptr):
       tl.store(output_ptr, tl.load(x_ptr) + y)
 
-    def add_scalar(x, y):
-      return jt.triton_call(
-          x,
-          y,
-          kernel=add_scalar_kernel,
-          compute_capability=jt.get_compute_capability(0),
-          out_shape=jax.ShapeDtypeStruct((), x.dtype),
-          grid=1,
-      )
-
     x = jnp.array([1.0])
-    np.testing.assert_allclose(add_scalar(x, scalar), x + scalar)
-
-  @parameterized.parameters(False, True)
-  def test_input_output_aliasing_simple(self, with_donation):
-    size = 8
-    x = random.normal(random.PRNGKey(0), [size])
-    expected = x + 1
-
-    launcher = lambda x: jt.triton_call(
-      x,
-      size,
-      kernel=inc_inplace_kernel,
-      out_shape=x,
-      grid=(8,),
-      BLOCK_SIZE=1,
-      input_output_aliases={0: 0},
+    np.testing.assert_allclose(
+      jt.triton_call(
+        x,
+        scalar,
+        kernel=add_scalar_kernel,
+        out_shape=x,
+        grid=1,
+        compute_capability=jt.get_compute_capability(0),
+      ),
+      x + scalar,
     )
 
-    if with_donation:
-      launcher = jax.jit(launcher, donate_argnums=(0,))
-      x_ptr = x.unsafe_buffer_pointer()
-
-    out = launcher(x)
-
-    if with_donation:
-      np.testing.assert_(x.is_deleted())
-      np.testing.assert_equal(x_ptr, out.unsafe_buffer_pointer())
-
-    np.testing.assert_allclose(out, expected)
-
-  @parameterized.product(with_donation=[False, True], first_is_inout=[False, True])
-  def test_input_output_aliasing_2outputs(self, with_donation, first_is_inout):
-    # this tests aliasing correctness in case of 4 buffer parameters two of which
-    # (0 and 2, or 1 and 3) are in-out params. When first_is_inout=True, buffers 0 and 2
-    # are incremented in place using values from buffers 1 and 3, and otherwise buffers
-    # 1 and 3 are incremented in place with values from buffers 0 and 2.
+  def test_single_namespace_for_constexprs_and_backend_options(self):
+    """Checks that metaparams of triton_call() are passed to the kernel and to backend
+    options. Validates that non-hashable backend options work too."""
 
     @triton.jit
-    def weird_kernel(
-      ptr0,
-      ptr1,
-      ptr2,
-      ptr3,
-      n_elements,
-      BLOCK_SIZE: tl.constexpr,
-      FIRST_INOUT: tl.constexpr,
-    ):
-      """For FIRST_INOUT=True  computes *ptr0[] += *ptr1[], *ptr2[] += *ptr3[],
-      for FIRST_INOUT=False computes *ptr1[] += *ptr0[], *ptr3[] += *ptr2[]"""
-      pid = tl.program_id(axis=0)
-      block_start = pid * BLOCK_SIZE
-      offsets = block_start + tl.arange(0, BLOCK_SIZE)
-      mask = offsets < n_elements
-      if FIRST_INOUT:
-        io0_ptr = ptr0
-        io1_ptr = ptr2
-        i0_ptr = ptr1
-        i1_ptr = ptr3
-      else:
-        io0_ptr = ptr1
-        io1_ptr = ptr3
-        i0_ptr = ptr0
-        i1_ptr = ptr2
+    def kernel(in_ptr, out_ptr, num_warps: tl.constexpr):
+      tl.store(out_ptr, tl.load(in_ptr) * num_warps)
 
-      x0 = tl.load(io0_ptr + offsets, mask=mask)
-      y0 = tl.load(i0_ptr + offsets, mask=mask)
-      x1 = tl.load(io1_ptr + offsets, mask=mask)
-      y1 = tl.load(i1_ptr + offsets, mask=mask)
-      output0 = x0 + y0
-      output1 = x1 + y1
-      tl.store(io0_ptr + offsets, output0, mask=mask)
-      tl.store(io1_ptr + offsets, output1, mask=mask)
+    extern_libs = {"some wild lib": "/path/not/exists/trust_me"}
 
-    size = 8
-    keys = random.split(random.key(0), 4)
-    args = [random.normal(key, [size]) for key in keys]
-    expect0 = args[0] + args[1]
-    expect1 = args[2] + args[3]
-
-    inout_aliases = {0: 0, 2: 1} if first_is_inout else {1: 0, 3: 1}
-    inout_indices = tuple(inout_aliases.keys())
-    in_indices = (1, 3) if first_is_inout else (0, 2)
-
-    launcher = lambda *a: jt.triton_call(
-      *a,
-      size,
-      kernel=weird_kernel,
-      out_shape=tuple(a[io] for io in inout_indices),
-      input_output_aliases=inout_aliases,
-      grid=(8,),
-      BLOCK_SIZE=1,
-      FIRST_INOUT=first_is_inout,
-    )
-    if with_donation:
-      launcher = jax.jit(launcher, donate_argnums=inout_indices)
-      io_ptrs = tuple(args[io].unsafe_buffer_pointer() for io in inout_indices)
-
-    outs = launcher(*args)
-
-    if with_donation:
-      for io in inout_indices:
-        np.testing.assert_(args[io].is_deleted())
-      for i in in_indices:
-        np.testing.assert_(not args[i].is_deleted())
-      np.testing.assert_array_equal(
-        io_ptrs, tuple(o.unsafe_buffer_pointer() for o in outs)
+    def call_kernel(x, mul):
+      return jt.triton_call(
+        x,
+        kernel=kernel,
+        out_shape=x,
+        grid=1,
+        num_warps=mul,
+        extern_libs=extern_libs,
       )
 
-    np.testing.assert_allclose(outs[0], expect0)
-    np.testing.assert_allclose(outs[1], expect1)
+    import triton.backends.nvidia.compiler as cb
+    import triton.backends.amd.compiler as hb
 
-  @parameterized.parameters(False, True)
-  def test_zeroed_outputs(self, use_function):
-    x, y = create_random_inputs([1000000])
-    # We alias `y` with the output, so are performing the add in-place.
-    # If we zero the output before the kernel, the result is `x + 0`.
-    out = add(
-        x,
-        y,
-        input_output_aliases={1: 0},
-        kernel=add_inplace_kernel,
-        INPLACE_Y=True,
-        zeroed_outputs=(lambda _: (0,)) if use_function else (0,),
-    )
-    np.testing.assert_allclose(out, x)
+    # now we need the platform ID, and I didn't find a better way than this ugliness
+    backends = jax.extend.backend.backends()
+    default = jax.extend.backend.get_backend()
+    name = next((n for n, c in backends.items() if c is default))
+    # getting relevant backend options object for hooking its initialization method
+    OptionsObj = {"cuda": cb.CUDAOptions, "rocm": hb.HIPOptions}[name]
 
-  def test_multiple_outputs(self):
-    @triton.jit
-    def copy_twice_kernel(a_ptr, x_ptr, y_ptr):
-      a = tl.load(a_ptr)
-      tl.store(x_ptr, a)
-      tl.store(y_ptr, a)
+    orig_opts_init = OptionsObj.__post_init__
 
-    a = jnp.array([42])
-    x, y = jt.triton_call(
-        a,
-        kernel=copy_twice_kernel,
-        out_shape=[a, a],
-        grid=(1,),
-    )
-    np.testing.assert_array_equal(a, x)
-    np.testing.assert_array_equal(a, y)
+    my_num_warps = 1
+
+    def my_opts_init(self):
+      assert self.num_warps == my_num_warps
+      assert self.extern_libs == extern_libs
+      # cleaning it up to prevent unexpected effects of error handling
+      object.__setattr__(self, "extern_libs", None)
+      orig_opts_init(self)
+
+    x = jnp.array([2.5])
+
+    with mock.patch.object(OptionsObj, "__post_init__", new=my_opts_init):
+      my_num_warps = 1
+      np.testing.assert_allclose(call_kernel(x, my_num_warps), x * my_num_warps)
+      my_num_warps = 2
+      np.testing.assert_allclose(call_kernel(x, my_num_warps), x * my_num_warps)
+      my_num_warps = 4
+      np.testing.assert_allclose(call_kernel(x, my_num_warps), x * my_num_warps)
 
   def test_kernel_cache_equivalent_kernels(self):
     # Create unique JITFunction to avoid conflicts with other tests.
@@ -495,14 +628,12 @@ class TritonKernelCallTest(parameterized.TestCase):
       pid = tl.program_id(axis=0)
       tl.store(output_ptr + pid, tl.load(x_ptr + pid) + tl.load(y_ptr + pid))
 
-    def silly_add(n):
-      x, y = create_random_inputs([n])
-      return jt.triton_call(
+    def silly_add(n, dtype="float32"):
+      x, y = create_random_inputs([n], dtype=dtype)
+      return (
+        jt.triton_call(x, y, out_shape=x, kernel=silly_add_kernel, grid=x.size),
         x,
         y,
-        kernel=silly_add_kernel,
-        out_shape=x,
-        grid=x.size,
       )
 
     jt_kernel = jttl.JTJITFunction(silly_add_kernel)
@@ -522,25 +653,33 @@ class TritonKernelCallTest(parameterized.TestCase):
       "get_or_create_triton_kernel",
       new=my_get_or_create_triton_kernel,
     ):
-      _ = silly_add(42)
+      ret, x, y = silly_add(42)
+      np.testing.assert_array_equal(ret, x + y)
       self.assertEqual(call_count[0], 1)
       self.assertEqual(jt_cache_size(), 1)
 
-      _ = silly_add(42)
+      ret, x, y = silly_add(42)
+      np.testing.assert_array_equal(ret, x + y)
       self.assertEqual(call_count[0], 1)  # Second call hits the Primitive cache.
-      self.assertEqual(jt_cache_size(), 1)
+      self.assertEqual(jt_cache_size(), 1)  # and the lowering doesn't even run
 
-      _ = silly_add(43)
-      # Third call differs in grid size and misses the Primitive cache, but hits
-      # the internal kernel cache.
+      ret, x, y = silly_add(43)
+      np.testing.assert_array_equal(ret, x + y)
+      # Third call differs in grid size and misses the Primitive's cache, but hits
+      # the internal kernel cache
       self.assertEqual(call_count[0], 2)
       self.assertEqual(jt_cache_size(), 1)
 
+      ret, x, y = silly_add(42, "int32")
+      np.testing.assert_array_equal(ret, x + y)
+      self.assertEqual(call_count[0], 3)  # Misses both caches due to a different dtype
+      self.assertEqual(jt_cache_size(), 2)
+
   def test_autotune(self):
     autotune_configs = [
-        triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
-        triton.Config({"BLOCK_SIZE": 64}, num_warps=1),
-        triton.Config({"BLOCK_SIZE": 64}, num_warps=2),
+      triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
+      triton.Config({"BLOCK_SIZE": 64}, num_warps=1),
+      triton.Config({"BLOCK_SIZE": 64}, num_warps=2),
     ]
     kernel = triton.autotune(autotune_configs, key=("n_elements",))(add_kernel)
 
@@ -551,8 +690,8 @@ class TritonKernelCallTest(parameterized.TestCase):
 
   def test_regression_issue_128(self):
     autotune_configs = [
-        triton.Config({"BLOCK_SIZE": 1024}, num_warps=1),
-        triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
+      triton.Config({"BLOCK_SIZE": 1024}, num_warps=1),
+      triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
     ]
     kernel = triton.autotune(autotune_configs, key=("n_elements",))(add_kernel)
 
@@ -567,7 +706,7 @@ class TritonKernelCallTest(parameterized.TestCase):
 
   def test_autotune_pre_hook_error(self):
     autotune_configs = [
-        triton.Config({"BLOCK_SIZE": 32}, num_warps=1, pre_hook=lambda _: None),
+      triton.Config({"BLOCK_SIZE": 32}, num_warps=1, pre_hook=lambda _: None),
     ]
     kernel = triton.autotune(autotune_configs, key=("n_elements",))(add_kernel)
 
@@ -588,12 +727,12 @@ class TritonKernelCallTest(parameterized.TestCase):
     def do_matmul(m, n, k):
       x, y = create_random_inputs([m, k], [k, n])
       return matmul(
-          x,
-          y,
-          kernel=kernel,
-          BLOCK_SIZE_M=32,
-          BLOCK_SIZE_N=32,
-          BLOCK_SIZE_K=32,
+        x,
+        y,
+        kernel=kernel,
+        BLOCK_SIZE_M=32,
+        BLOCK_SIZE_N=32,
+        BLOCK_SIZE_K=32,
       )
 
     _ = do_matmul(m=128, n=128, k=128)
@@ -609,21 +748,21 @@ class TritonKernelCallTest(parameterized.TestCase):
 
     heuristics = {"K_EXACTLY_DIVISIBLE_BY_BLOCK": heuristic_fn}
     autotune_configs = [
-        triton.Config({"BLOCK_SIZE_K": 32}, num_warps=1),
-        triton.Config({"BLOCK_SIZE_K": 64}, num_warps=1),
+      triton.Config({"BLOCK_SIZE_K": 32}, num_warps=1),
+      triton.Config({"BLOCK_SIZE_K": 64}, num_warps=1),
     ]
     kernel = triton.autotune(autotune_configs, key=("M", "N", "K"))(
-        triton.heuristics(heuristics)(matmul_kernel)
+      triton.heuristics(heuristics)(matmul_kernel)
     )
 
     def do_matmul(m, n, k):
       x, y = create_random_inputs([m, k], [k, n])
       return matmul(
-          x,
-          y,
-          kernel=kernel,
-          BLOCK_SIZE_M=32,
-          BLOCK_SIZE_N=32,
+        x,
+        y,
+        kernel=kernel,
+        BLOCK_SIZE_M=32,
+        BLOCK_SIZE_N=32,
       )
 
     _ = do_matmul(m=128, n=128, k=128)
@@ -637,17 +776,17 @@ class TritonKernelCallTest(parameterized.TestCase):
     heuristics = {"K_EXACTLY_DIVISIBLE_BY_BLOCK": heuristic_fn}
     autotune_config = triton.Config({"BLOCK_SIZE_K": 32}, num_warps=1)
     kernel = triton.autotune([autotune_config], key=("M", "N", "K"))(
-        triton.heuristics(heuristics)(matmul_kernel)
+      triton.heuristics(heuristics)(matmul_kernel)
     )
 
     def do_matmul(m, n, k):
       x, y = create_random_inputs([m, k], [k, n])
       return matmul(
-          x,
-          y,
-          kernel=kernel,
-          BLOCK_SIZE_M=32,
-          BLOCK_SIZE_N=32,
+        x,
+        y,
+        kernel=kernel,
+        BLOCK_SIZE_M=32,
+        BLOCK_SIZE_N=32,
       )
 
     _ = do_matmul(m=128, n=128, k=128)
@@ -655,8 +794,8 @@ class TritonKernelCallTest(parameterized.TestCase):
 
   def test_autotune_with_input_output_aliasing(self):
     autotune_configs = [
-        triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
-        triton.Config({"BLOCK_SIZE": 64}, num_warps=1),
+      triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
+      triton.Config({"BLOCK_SIZE": 64}, num_warps=1),
     ]
     kernel = triton.autotune(autotune_configs, key=("n_elements",))(add_inplace_kernel)
 
@@ -668,22 +807,17 @@ class TritonKernelCallTest(parameterized.TestCase):
   def test_autodiff_exception(self):
     x, y = create_random_inputs([10, 100], dtype="float32")
     with self.assertRaisesRegex(
-        NotImplementedError,
-        r"jax_triton.triton_call does not support automatic differentiation.*"
-        r"jax\.custom_jvp or jax\.custom_vjp.*",
+      NotImplementedError,
+      r"jax_triton.triton_call does not support automatic differentiation.*"
+      r"jax\.custom_jvp or jax\.custom_vjp.*",
     ):
       jax.grad(lambda x, y: jnp.sum(add(x, y, BLOCK_SIZE=32)))(x, y)
 
   def test_batching_exception(self):
     x, y = create_random_inputs([10, 100], dtype="float32")
     with self.assertRaisesRegex(
-        NotImplementedError,
-        r"jax_triton.triton_call does not support batching.*"
-        r"jax\.custom_batching\.custom_vmap.*",
+      NotImplementedError,
+      r"jax_triton.triton_call does not support batching.*"
+      r"jax\.custom_batching\.custom_vmap.*",
     ):
       jax.vmap(lambda x, y: add(x, y, BLOCK_SIZE=32))(x, y)
-
-
-if __name__ == "__main__":
-  os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
-  absltest.main()
