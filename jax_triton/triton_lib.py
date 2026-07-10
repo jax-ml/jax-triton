@@ -98,6 +98,79 @@ Grid = Union[int, tuple[int], tuple[int, int], tuple[int, int, int]]
 GridOrLambda = Union[Grid, Callable[[dict[str, Any]], Grid]]
 
 
+@dataclasses.dataclass(frozen=True)
+class TensorDescriptor:
+  """JAX-native tensor descriptor for host-side TMA.
+
+  Mirrors the public fields of Triton's ``TensorDescriptor`` but uses JAX
+  dtypes and avoids the torch-specific validation in Triton's implementation.
+  """
+
+  base: Any  # jax.Array or tracer
+  shape: tuple[int, ...]
+  strides: tuple[int, ...]
+  block_shape: tuple[int, ...]
+  padding: str = "zero"
+  round_f32_to_tf32: bool = False
+
+  def __post_init__(self):
+    rank = len(self.shape)
+    if rank < 1 or rank > 5:
+      raise ValueError(f"TensorDescriptor rank must be in [1, 5], got {rank}")
+    if len(self.strides) != rank:
+      raise ValueError(
+          f"strides length ({len(self.strides)}) != shape length ({rank})"
+      )
+    if len(self.block_shape) != rank:
+      raise ValueError(
+          f"block_shape length ({len(self.block_shape)}) != shape length ({rank})"
+      )
+    if self.strides[-1] != 1:
+      raise ValueError(
+          f"Minormost stride must be 1, got {self.strides[-1]}"
+      )
+    if self.padding not in ("zero", "nan"):
+      raise ValueError(f"padding must be 'zero' or 'nan', got {self.padding!r}")
+
+  @property
+  def rank(self) -> int:
+    return len(self.shape)
+
+  @property
+  def dtype(self):
+    """Return the numpy dtype of the base array."""
+    return np.dtype(self.base.dtype)
+
+
+@dataclasses.dataclass(frozen=True)
+class _TensorDescriptorMetadata:
+  """Hashable descriptor metadata carried as a primitive static parameter."""
+
+  dtype: np.dtype
+  shape: tuple[int, ...]
+  strides: tuple[int, ...]
+  block_shape: tuple[int, ...]
+  padding: str
+  round_f32_to_tf32: bool
+
+  @classmethod
+  def from_descriptor(
+      cls, desc: TensorDescriptor
+  ) -> "_TensorDescriptorMetadata":
+    return cls(
+        dtype=desc.dtype,
+        shape=tuple(int(s) for s in desc.shape),
+        strides=tuple(int(s) for s in desc.strides),
+        block_shape=tuple(int(b) for b in desc.block_shape),
+        padding=desc.padding,
+        round_f32_to_tf32=desc.round_f32_to_tf32,
+    )
+
+  @property
+  def rank(self) -> int:
+    return len(self.shape)
+
+
 def normalize_grid(grid: GridOrLambda, metaparams) -> tuple[int, int, int]:
   if callable(grid):
     grid = grid(metaparams)
@@ -155,6 +228,17 @@ def to_python_type(arg: Any) -> Any:
   # else return as-is and let it possibly, but not necessarily, fail (constexprs and
   # strings pass through, and the rest isn't expected here, so saving cycles on that)
   return arg
+
+
+def _tensordesc_signature_string(desc: _TensorDescriptorMetadata) -> str:
+  """Generate a Triton-compatible ``tensordesc<dtype[block_shape]>`` string."""
+  dtype_str = _JAX_TO_TRITON_TYPE_MAP[desc.dtype]
+  block_str = ",".join(str(b) for b in desc.block_shape)
+  return f"tensordesc<{dtype_str}[{block_str}]>"
+
+
+def _is_tensordesc_signature(dtype: str) -> bool:
+  return dtype.startswith("tensordesc<")
 
 
 triton_kernel_call_p = jex.core.Primitive("triton_kernel_call")
@@ -229,6 +313,9 @@ class CompilationResult:
   shared_mem_bytes: int
   ttgir: str | None
   llir: str | None
+  global_scratch_size: int = 0
+  global_scratch_align: int = 0
+  tensordesc_meta: list[dict] | None = None
 
 
 def compile_ttir_inplace(
@@ -307,14 +394,20 @@ def compile_ttir_to_ptx_inplace(
   if cuda_options.debug:
     print(ptx)
   name = metadata["name"]
-  ttgir = str(ttgir) if _JAX_TRITON_DUMP_DIR else None
-  llir = str(llir) if _JAX_TRITON_DUMP_DIR else None
+  global_scratch_size = metadata.get("global_scratch_size", 0) or 0
+  global_scratch_align = metadata.get("global_scratch_align", 0) or 0
+  tensordesc_meta = metadata.get("tensordesc_meta", None)
+  ttgir_str = str(ttgir) if _JAX_TRITON_DUMP_DIR else None
+  llir_str = str(llir) if _JAX_TRITON_DUMP_DIR else None
   return CompilationResult(
       binary=ptx,
       name=name,
       shared_mem_bytes=shared_mem_bytes,
-      ttgir=ttgir,
-      llir=llir,
+      ttgir=ttgir_str,
+      llir=llir_str,
+      global_scratch_size=global_scratch_size,
+      global_scratch_align=global_scratch_align,
+      tensordesc_meta=tensordesc_meta,
   )
 
 
@@ -483,7 +576,7 @@ class JTJITFunction:
     enable_fp_fusion,
     metaparams,
     dump: bool,
-  ) -> tuple[triton_kernel_call_lib.TritonKernel, Any]:
+  ) -> tuple[triton_kernel_call_lib.TritonKernel, Any, int, list[dict] | None]:
     fn = self.fn
     if num_warps is None:
       num_warps = 4
@@ -505,7 +598,9 @@ class JTJITFunction:
     is_const = False
     do_specialize = True
     specialization = [
-      specialize_impl(
+      (arg_dtype, "")
+      if _is_tensordesc_signature(arg_dtype)
+      else specialize_impl(
         backend,
         types.SimpleNamespace(
           data_ptr=lambda: alignment, dtype=arg_dtype.removeprefix("*")
@@ -618,11 +713,23 @@ class JTJITFunction:
         compilation_result.binary,
         ttir,
         compute_capability,
+        global_scratch_size=compilation_result.global_scratch_size,
+        global_scratch_align=compilation_result.global_scratch_align,
       )
 
-      self.fn._jT_kernel_cache[cache_key] = kernel
+      self.fn._jT_kernel_cache[cache_key] = (
+        kernel,
+        compilation_result.global_scratch_size,
+        compilation_result.tensordesc_meta,
+      )
 
-    return kernel, attrs
+    cached = self.fn._jT_kernel_cache[cache_key]
+    if isinstance(cached, tuple):
+      kernel, scratch_size, tensordesc_meta = cached
+    else:
+      kernel, scratch_size, tensordesc_meta = cached, 0, None
+
+    return kernel, attrs, scratch_size, tensordesc_meta
 
 
 def make_autotuner_configs(
@@ -691,6 +798,7 @@ def triton_kernel_call_lowering(
     *array_args,
     fn,
     scalar_args,
+    descriptor_args=(),
     name,
     out_shapes,
     grid,
@@ -710,12 +818,19 @@ def triton_kernel_call_lowering(
   assert isinstance(metaparams, tuple), "metaparams must be tuple[tuple[str, Any], ...]"
   metaparams = dict(metaparams)  # will crash if tuple format is incompatible
 
+  descriptor_args_dict = dict(descriptor_args)
+  has_tma = bool(descriptor_args_dict)
+
   kernel_call_name = name
   args = list(ctx.avals_in)
   arg_dtypes = list(map(get_type_id, ctx.avals_in))
   for idx, dtype, v in scalar_args:
     args.insert(idx, v)
     arg_dtypes.insert(idx, dtype)
+
+  # Override dtype strings for descriptor positions with tensordesc<...> format.
+  for orig_idx, desc in descriptor_args_dict.items():
+    arg_dtypes[orig_idx] = _tensordesc_signature_string(desc)
   # Extract only the output avals not referenced in the input_output_aliases mapping.
   assert isinstance(input_output_aliases, tuple), "input_output_aliases must be a tuple"
   input_output_aliases = dict(input_output_aliases)
@@ -787,25 +902,61 @@ def triton_kernel_call_lowering(
   jtfu = JTJITFunction(fn)
   kernel_calls = []
   for params in config_params:
-    kernel, specialization_attr = jtfu.get_or_create_triton_kernel(
-      make_gpu_target_func,
-      ctx.module_context.platforms[0],
-      arg_dtypes,
-      scalar_args,
-      num_warps=params["num_warps"],
-      num_stages=params["num_stages"],
-      num_ctas=params["num_ctas"],
-      compute_capability=compute_capability,
-      enable_fp_fusion=enable_fp_fusion,
-      metaparams=dict(params["metaparams"]),
-      dump=debug,
+    kernel, specialization_attr, scratch_size, tensordesc_meta = (
+      jtfu.get_or_create_triton_kernel(
+        make_gpu_target_func,
+        ctx.module_context.platforms[0],
+        arg_dtypes,
+        scalar_args,
+        num_warps=params["num_warps"],
+        num_stages=params["num_stages"],
+        num_ctas=params["num_ctas"],
+        compute_capability=compute_capability,
+        enable_fp_fusion=enable_fp_fusion,
+        metaparams=dict(params["metaparams"]),
+        dump=debug,
+      )
     )
+
+    if scratch_size > 0:
+      has_tma = True
 
     kernel_params = []
     zeroed_params_with_sizes = dict(params["zeroed_params_with_sizes"])
     equal_to_1 = {i for i, _, v in scalar_args if v == 1}
+    desc_meta_iter = iter(tensordesc_meta) if tensordesc_meta else iter([])
     for i, (arg, dtype) in enumerate(zip(args, arg_dtypes)):
-      if isinstance(arg, core.ShapedArray):
+      if i in descriptor_args_dict:
+        desc = descriptor_args_dict[i]
+        meta = next(desc_meta_iter, {})
+        dtype_str = _JAX_TO_TRITON_TYPE_MAP[desc.dtype]
+        kernel_params.append(
+            triton_kernel_call_lib.create_tensor_descriptor_parameter(
+                desc.rank,
+                dtype_str,
+                list(desc.shape),
+                list(desc.strides),
+                list(desc.block_shape),
+                desc.padding == "nan",
+                desc.round_f32_to_tf32,
+                int(meta.get("swizzle", 0)),
+                int(meta.get("elem_size", 0)),
+                int(meta.get("elem_type", 0)),
+                [int(b) for b in meta.get("block_size", [])],
+                bool(meta.get("fp4_padded", False)),
+            )
+        )
+        # Triton's ABI: descriptor payload + rank shape scalars (i32) +
+        # rank stride scalars (i64).
+        for s in desc.shape:
+          kernel_params.append(
+              triton_kernel_call_lib.create_scalar_parameter(int(s), "i32")
+          )
+        for s in desc.strides:
+          kernel_params.append(
+              triton_kernel_call_lib.create_scalar_parameter(int(s), "i64")
+          )
+      elif isinstance(arg, core.ShapedArray):
         arg_attrs = specialization_attr[(i,)]
         kernel_params.append(
             triton_kernel_call_lib.create_array_parameter(
@@ -814,8 +965,6 @@ def triton_kernel_call_lowering(
             )
         )
       elif i not in equal_to_1:
-        # Convert TypedInt/TypedFloat subclasses to plain Python types,
-        # as nanobind's strict-mode integer caster rejects subclasses.
         if isinstance(arg, bool):
           arg = bool(arg)
         elif isinstance(arg, int):
@@ -854,6 +1003,11 @@ def triton_kernel_call_lowering(
 
   # TODO(phawkins): remove forward_compat after 2026-05-04
   if jax.__version_info__ < (0, 10, 1) or ctx.is_forward_compat():
+    if has_tma:
+      raise NotImplementedError(
+          "TMA kernels are not supported in forward-compat mode or with "
+          "JAX < 0.10.1. Update JAX/jaxlib to use TMA features."
+      )
     rule = jax.ffi.ffi_lowering(
         "triton_kernel_call",
         api_version=2,
@@ -861,6 +1015,13 @@ def triton_kernel_call_lowering(
         operand_output_aliases=input_output_aliases,
     )
     return rule(ctx, *array_args)
+  elif has_tma:
+    rule = jax.ffi.ffi_lowering(
+        "triton_kernel_call_ffi_v2",
+        api_version=4,
+        operand_output_aliases=input_output_aliases,
+    )
+    return rule(ctx, *array_args, opaque=zlib.compress(call_proto))
   else:
     rule = jax.ffi.ffi_lowering(
         "triton_kernel_call_ffi",
@@ -1039,8 +1200,12 @@ def triton_call(
 
   array_args = []
   scalar_args = []
+  descriptor_args = {}  # original flat index -> _TensorDescriptorMetadata
   for i, arg in enumerate(flat_args):
-    if isinstance(arg, (bool, int, float)):
+    if isinstance(arg, TensorDescriptor):
+      descriptor_args[i] = _TensorDescriptorMetadata.from_descriptor(arg)
+      array_args.append(arg.base)
+    elif isinstance(arg, (bool, int, float)):
       scalar_args.append((i, get_type_id(arg), arg))
     elif isinstance(arg, np.float32):
       scalar_args.append((i, get_type_id(arg), float(arg)))
@@ -1054,6 +1219,7 @@ def triton_call(
       *array_args,
       fn=kernel,
       scalar_args=tuple(scalar_args),
+      descriptor_args=tuple(sorted(descriptor_args.items())),
       name=name,
       out_shapes=tuple(flat_out_shapes),
       grid=grid,
