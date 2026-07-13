@@ -13,22 +13,15 @@
 # limitations under the License.
 
 """Flash attention example."""
+
 import functools
 
 import jax
 from jax import random
 import jax.numpy as jnp
 import jax_triton as jt
-import numpy as np
 import triton
 import triton.language as tl
-
-
-def _strides(shape):
-  size = np.prod(shape)
-  for s in shape:
-    size = size // s
-    yield int(size)
 
 
 @triton.jit
@@ -109,7 +102,7 @@ def fused_attention(q: jnp.ndarray, k: jnp.ndarray,
                     v: jnp.ndarray) -> jnp.ndarray:
   """Flash attention."""
   block_size = 128
-  grid = (jt.cdiv(q.shape[2], block_size), q.shape[0] * q.shape[1])
+  grid = (triton.cdiv(q.shape[2], block_size), q.shape[0] * q.shape[1])
   out_shape = [
       jax.ShapeDtypeStruct(
           shape=(q.shape[0] * q.shape[1], q.shape[2]), dtype=jnp.float32),

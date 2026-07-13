@@ -16,8 +16,6 @@
 
 __all__ = [
     "triton_call",
-    "cdiv",
-    "next_power_of_2",
     "strides_from_shape",
     "__version__",
     "__version_info__",
@@ -25,8 +23,6 @@ __all__ = [
 
 from jax._src.lib import gpu_triton
 from jax_triton.triton_lib import triton_call
-from jax.experimental.pallas import cdiv
-from jax.experimental.pallas import next_power_of_2
 from jax.experimental.pallas import strides_from_shape
 from jax_triton.version import __version__
 from jax_triton.version import __version_info__
