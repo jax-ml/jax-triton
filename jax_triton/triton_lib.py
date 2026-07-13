@@ -26,7 +26,7 @@ import os
 import pprint
 import tempfile
 import types
-from typing import Any, Protocol, Self, Union
+from typing import Any, Protocol, Self
 import zlib
 
 import jax
@@ -51,7 +51,6 @@ import triton.experimental.gluon.language as gl
 import triton.language as tl
 import triton.runtime.autotuner as autotuner
 
-
 try:
   import triton.backends.nvidia.compiler as cb
 except ImportError:
@@ -63,9 +62,11 @@ except ImportError:
   hb = None  # AMD backend is not available.
 
 
+# TODO(slebedev): Investigate if this is necessary.
 if "TRITON_CACHE_DIR" in os.environ:
   del os.environ["TRITON_CACHE_DIR"]
 _JAX_TRITON_DUMP_DIR = os.environ.get("JAX_TRITON_DUMP_DIR")
+
 map, unsafe_map = util.safe_map, map
 zip, unsafe_zip = util.safe_zip, zip
 
@@ -94,8 +95,8 @@ _JAX_TO_TRITON_TYPE_MAP = {
     jnp.dtype("bool"): "i1",
 }
 
-Grid = Union[int, tuple[int], tuple[int, int], tuple[int, int, int]]
-GridOrLambda = Union[Grid, Callable[[dict[str, Any]], Grid]]
+Grid = int | tuple[int] | tuple[int, int] | tuple[int, int, int]
+GridOrLambda = Grid | Callable[[dict[str, Any]], Grid]
 
 
 def normalize_grid(grid: GridOrLambda, metaparams) -> tuple[int, int, int]:
@@ -233,8 +234,8 @@ class CompilationResult:
 
 def compile_ttir_inplace(
     ttir,
-    backend: [cb.CUDABackend | hb.HIPBackend],
-    options: [cb.CUDAOptions | hb.HIPOptions],
+    backend: cb.CUDABackend | hb.HIPBackend,
+    options: cb.CUDAOptions | hb.HIPOptions,
     compute_capability,
     platform,
 ):
@@ -245,7 +246,6 @@ def compile_ttir_inplace(
         options,
         compute_capability,
     )
-
   elif platform == "rocm":
     return compile_ttir_to_hsaco_inplace(
         ttir,
