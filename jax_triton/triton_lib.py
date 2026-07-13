@@ -113,10 +113,6 @@ def normalize_grid(grid: GridOrLambda, metaparams) -> tuple[int, int, int]:
   return tuple(grid) + (1,) * (3 - len(grid))
 
 
-def avals_to_layouts(avals):
-  return [list(reversed(range(aval.ndim))) for aval in avals]
-
-
 def get_type_id(obj: Any) -> str:
   if isinstance(obj, (jax.core.ShapedArray, state.AbstractRef)):
     return f"*{_JAX_TO_TRITON_TYPE_MAP[obj.dtype]}"
