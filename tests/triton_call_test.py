@@ -341,6 +341,32 @@ class TritonKernelCallTest(parameterized.TestCase):
 
     np.testing.assert_allclose(out, expected)
 
+  def test_input_output_aliasing_scalar_before_array(self):
+    @triton.jit
+    def inc_inplace_kernel(n_elements, x_in_out_ptr, BLOCK_SIZE: tl.constexpr):
+      pid = tl.program_id(axis=0)
+      block_start = pid * BLOCK_SIZE
+      offsets = block_start + tl.arange(0, BLOCK_SIZE)
+      mask = offsets < n_elements
+      x = tl.load(x_in_out_ptr + offsets, mask=mask)
+      output = x + 1
+      tl.store(x_in_out_ptr + offsets, output, mask=mask)
+
+    size = 8
+    x = random.normal(random.PRNGKey(0), [size])
+    expected = x + 1
+
+    out = jt.triton_call(
+        size,
+        x,
+        kernel=inc_inplace_kernel,
+        out_shape=x,
+        grid=(size,),
+        BLOCK_SIZE=1,
+        input_output_aliases={1: 0},
+    )
+    np.testing.assert_array_equal(out, expected)
+
   @parameterized.product(with_donation=[False, True], first_is_inout=[False, True])
   def test_input_output_aliasing_2outputs(self, with_donation, first_is_inout):
     # this tests aliasing correctness in case of 4 buffer parameters two of which

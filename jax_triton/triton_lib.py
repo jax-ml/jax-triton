@@ -694,9 +694,9 @@ def apply_heuristics(
 def triton_kernel_call_lowering(
     make_gpu_target_func,
     ctx,
-    *array_args,
+    *array_args: mlir.Value,
     fn,
-    scalar_args,
+    scalar_args: tuple[tuple[int, str, Any], ...],
     name,
     out_shapes,
     grid,
@@ -749,9 +749,18 @@ def triton_kernel_call_lowering(
         "`kernel` must be a Triton `JITFunction`, `GluonJITFunction`, `Heuristics` or `Autotuner`."
     )
 
+  # output2input maps output index to the original user-facing input index,
+  # which matches the position in the reconstructed args list.
   output2input = {v: k for k, v in input_output_aliases.items()}
   if len(output2input) != len(input_output_aliases):
     raise ValueError("input_output_aliases must be a bijection")
+
+  # Translate input_output_aliases from user-facing, indexing the original
+  # ``*args``, to indices into ``array_args``.
+  input_output_aliases = FrozenDict({
+      k - sum(i < k for i, _, _ in scalar_args): v
+      for k, v in input_output_aliases.items()
+  })
 
   outputs_offset = len(ctx.avals_in) + len(scalar_args)
   equal_to_1 = {i for i, _, v in scalar_args if v == 1}
@@ -992,12 +1001,13 @@ def triton_call(
       When `grid` is a function, it is passed `**metaparams` and should return a
       tuple of up to 3 integers.
     input_output_aliases: A dictionary mapping input argument indices to output
-      indices. Providing a mapping will alias the corresponding buffers.
-    zeroed_outputs: A sequence of indices, or a function returning a sequence of
-      indices, for outputs that should be zeroed before the kernel is launched.
-      Note that this also supports zeroing input-output (i.e. aliased through
-      `input_output_aliases`) arguments that should be treated as outputs in this
-      argument.
+      indices. Providing a mapping will alias the corresponding buffers. The
+      input indices are positions in the original ``*args``.
+    zeroed_outputs: A sequence of indices into ``out_shape``, or a function
+      returning such a sequence, for outputs that should be zeroed before the
+      kernel is launched. Note that this also supports zeroing input-output
+      (i.e. aliased through ``input_output_aliases``) arguments that should
+      be treated as outputs in this argument.
     num_warps: The number of warps used to execute the Triton kernel.
     num_stages: The number of stages emitted by the Triton compiler.
     num_ctas: The size of thread blocks per cluster to be used on GPUs with
