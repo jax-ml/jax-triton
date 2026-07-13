@@ -33,6 +33,7 @@ import zlib
 import jax
 from jax import tree_util
 from jax._src import core
+from jax._src.frozen_dict import FrozenDict
 from jax._src import state
 from jax._src import util
 from jax._src.lib import gpu_triton as triton_kernel_call_lib
@@ -708,17 +709,12 @@ def triton_kernel_call_lowering(
     num_ctas,
     compute_capability,
     enable_fp_fusion,
-    input_output_aliases,
+    input_output_aliases: FrozenDict[int, int],
     zeroed_outputs,
     debug,
     serialized_metadata,
-    metaparams: tuple[tuple[str, Any], ...],
+    metaparams: FrozenDict[str, Any],
 ):
-  # Metaparams must be a tuple to support the hashing required for
-  # lowering via xla_primitive_callable().
-  assert isinstance(metaparams, tuple), "metaparams must be tuple[tuple[str, Any], ...]"
-  metaparams = dict(metaparams)  # will crash if tuple format is incompatible
-
   kernel_call_name = name
   args = list(ctx.avals_in)
   arg_dtypes = list(map(get_type_id, ctx.avals_in))
@@ -726,8 +722,6 @@ def triton_kernel_call_lowering(
     args.insert(idx, v)
     arg_dtypes.insert(idx, dtype)
   # Extract only the output avals not referenced in the input_output_aliases mapping.
-  assert isinstance(input_output_aliases, tuple), "input_output_aliases must be a tuple"
-  input_output_aliases = dict(input_output_aliases)
   strictly_out_avals = [
     aval
     for i, aval in enumerate(ctx.avals_out)
@@ -1053,10 +1047,10 @@ def triton_call(
       num_ctas=num_ctas,
       compute_capability=compute_capability,
       enable_fp_fusion=enable_fp_fusion,
-      input_output_aliases=tuple(input_output_aliases.items()),
+      input_output_aliases=FrozenDict(input_output_aliases),
       zeroed_outputs=zeroed_outputs,
       debug=debug,
       serialized_metadata=serialized_metadata,
-      metaparams=tuple(metaparams.items()),
+      metaparams=FrozenDict(metaparams),
   )
   return tree_util.tree_unflatten(out_tree, out_flat)
