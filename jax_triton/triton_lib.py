@@ -1021,12 +1021,11 @@ def triton_call(
   array_args = []
   scalar_args = []
   for i, arg in enumerate(flat_args):
-    if isinstance(arg, (bool, int, float)):
-      scalar_args.append((i, get_type_id(arg), arg))
-    elif isinstance(arg, np.float32):
-      scalar_args.append((i, get_type_id(arg), float(arg)))
-    else:
+    if isinstance(arg, jax.Array):
       array_args.append(arg)
+    else:
+      arg = to_python_type(arg)
+      scalar_args.append((i, get_type_id(arg), arg))
 
   if input_output_aliases is None:
     input_output_aliases = {}
