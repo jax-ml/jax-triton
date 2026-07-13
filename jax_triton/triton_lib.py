@@ -764,7 +764,10 @@ def triton_kernel_call_lowering(
     raise ValueError("input_output_aliases must be a bijection")
 
   outputs_offset = len(ctx.avals_in) + len(scalar_args)
-  config_params = []
+  equal_to_1 = {i for i, _, v in scalar_args if v == 1}
+
+  jtfu = JTJITFunction(fn)
+  kernel_calls = []
   for config in configs:
     config_metaparams = {**metaparams, **config.kwargs}
     config_grid = normalize_grid(grid, config_metaparams)
@@ -776,43 +779,27 @@ def triton_kernel_call_lowering(
     # zeroed_params_with_sizes is a dict output_arg_idx -> aval_size_bytes
     # config_zeroed_outputs contains output ordinal indices
     zeroed_params_with_sizes = {
-      output2input[i] if i in output2input else i + outputs_offset: aval_size_bytes(
-        ctx.avals_out[i]
-      )
-      for i in sorted(config_zeroed_outputs)
+        output2input.get(i, i + outputs_offset): aval_size_bytes(
+            ctx.avals_out[i]
+        )
+        for i in sorted(config_zeroed_outputs)
     }
 
-    config_params.append(
-        dict(
-            metaparams=tuple(sorted(config_metaparams.items())),
-            num_warps=config.num_warps,
-            num_stages=config.num_stages,
-            num_ctas=config.num_ctas,
-            grid=config_grid,
-            zeroed_params_with_sizes=tuple(zeroed_params_with_sizes.items()),
-        )
-    )
-
-  jtfu = JTJITFunction(fn)
-  kernel_calls = []
-  for params in config_params:
     kernel, specialization_attr = jtfu.get_or_create_triton_kernel(
-      make_gpu_target_func,
-      ctx.module_context.platforms[0],
-      arg_dtypes,
-      scalar_args,
-      num_warps=params["num_warps"],
-      num_stages=params["num_stages"],
-      num_ctas=params["num_ctas"],
-      compute_capability=compute_capability,
-      enable_fp_fusion=enable_fp_fusion,
-      metaparams=dict(params["metaparams"]),
-      dump=debug,
+        make_gpu_target_func,
+        ctx.module_context.platforms[0],
+        arg_dtypes,
+        scalar_args,
+        num_warps=config.num_warps,
+        num_stages=config.num_stages,
+        num_ctas=config.num_ctas,
+        compute_capability=compute_capability,
+        enable_fp_fusion=enable_fp_fusion,
+        metaparams=config_metaparams,
+        dump=debug,
     )
 
     kernel_params = []
-    zeroed_params_with_sizes = dict(params["zeroed_params_with_sizes"])
-    equal_to_1 = {i for i, _, v in scalar_args if v == 1}
     for i, (arg, dtype) in enumerate(zip(args, arg_dtypes)):
       if isinstance(arg, core.ShapedArray):
         arg_attrs = specialization_attr[(i,)]
@@ -825,12 +812,7 @@ def triton_kernel_call_lowering(
       elif i not in equal_to_1:
         # Convert TypedInt/TypedFloat subclasses to plain Python types,
         # as nanobind's strict-mode integer caster rejects subclasses.
-        if isinstance(arg, bool):
-          arg = bool(arg)
-        elif isinstance(arg, int):
-          arg = int(arg)
-        elif isinstance(arg, float):
-          arg = float(arg)
+        arg = to_python_type(arg)
         kernel_params.append(
             triton_kernel_call_lib.create_scalar_parameter(arg, dtype)
         )
@@ -838,9 +820,9 @@ def triton_kernel_call_lowering(
     kernel_calls.append(
         triton_kernel_call_lib.TritonKernelCall(
             kernel,
-            params["grid"][0],
-            params["grid"][1],
-            params["grid"][2],
+            config_grid[0],
+            config_grid[1],
+            config_grid[2],
             kernel_params,
         )
     )
