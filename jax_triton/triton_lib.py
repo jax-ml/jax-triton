@@ -24,6 +24,7 @@ from functools import cached_property
 import inspect
 import os
 import pprint
+import shutil
 import tempfile
 import types
 from typing import Any, Protocol, Self
@@ -66,6 +67,8 @@ except ImportError:
 if "TRITON_CACHE_DIR" in os.environ:
   del os.environ["TRITON_CACHE_DIR"]
 _JAX_TRITON_DUMP_DIR = os.environ.get("JAX_TRITON_DUMP_DIR")
+
+_HSACO_TMPDIR = tempfile.TemporaryDirectory(delete=True)
 
 map, unsafe_map = util.safe_map, map
 zip, unsafe_zip = util.safe_zip, zip
@@ -354,7 +357,7 @@ def compile_ttir_to_hsaco_inplace(
   # to a file and then pass the "string" path. This is needed because
   # nanobind doesn't automatically convert between bytes and string.
   # https://github.com/wjakob/nanobind/discussions/137
-  fd, hsaco_path = tempfile.mkstemp()
+  fd, hsaco_path = tempfile.mkstemp(dir=_HSACO_TMPDIR.name)
   with os.fdopen(fd, "wb") as f:
     f.write(hsaco)
   return CompilationResult(
@@ -593,8 +596,14 @@ class JTJITFunction:
       if _JAX_TRITON_DUMP_DIR:
         with open(f"{_JAX_TRITON_DUMP_DIR}/{kernel_hash}/{kernel_name}.ttir", "w") as f:
           f.write(ttir)
-        with open(f"{_JAX_TRITON_DUMP_DIR}/{kernel_hash}/{kernel_name}.ptx", "w") as f:
-          f.write(compilation_result.binary)
+        if platform == "rocm":
+          shutil.copy2(
+            compilation_result.binary,
+            f"{_JAX_TRITON_DUMP_DIR}/{kernel_hash}/{kernel_name}.hsaco",
+          )
+        else:
+          with open(f"{_JAX_TRITON_DUMP_DIR}/{kernel_hash}/{kernel_name}.ptx", "w") as f:
+            f.write(compilation_result.binary)
         with open(
           f"{_JAX_TRITON_DUMP_DIR}/{kernel_hash}/{kernel_name}.ttgir", "w"
         ) as f:
