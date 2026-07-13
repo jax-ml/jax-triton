@@ -15,7 +15,6 @@
 """Library for JAX-Triton integrations."""
 
 __all__ = [
-    "utils",
     "triton_call",
     "cdiv",
     "next_power_of_2",
@@ -25,7 +24,6 @@ __all__ = [
 ]
 
 from jax._src.lib import gpu_triton
-from jax_triton import utils
 from jax_triton.triton_lib import triton_call
 from jax.experimental.pallas import cdiv
 from jax.experimental.pallas import next_power_of_2
