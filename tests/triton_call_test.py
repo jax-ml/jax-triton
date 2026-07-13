@@ -20,6 +20,7 @@ from absl.testing import parameterized
 import jax
 from jax import config
 from jax import random
+from jax._src.interpreters import partial_eval as pe
 import jax.numpy as jnp
 import jax_triton as jt
 import jax_triton.triton_lib as jttl
@@ -708,6 +709,39 @@ class TritonKernelCallTest(parameterized.TestCase):
         r"jax\.custom_batching\.custom_vmap.*",
     ):
       jax.vmap(lambda x, y: add(x, y, BLOCK_SIZE=32))(x, y)
+
+  def test_has_side_effect_parameter(self):
+    x, y = create_random_inputs([8])
+
+    # Case 1: has_side_effect=True
+    jaxpr_true = jax.make_jaxpr(
+        lambda x, y: add(x, y, BLOCK_SIZE=8, has_side_effect=True)
+    )(x, y)
+    eqns_true = [
+        e for e in jaxpr_true.eqns if e.primitive == jttl.triton_kernel_call_p
+    ]
+    self.assertLen(eqns_true, 1)
+    self.assertTrue(eqns_true[0].params["has_side_effect"])
+
+    # Case 2: has_side_effect=False (default)
+    jaxpr_false = jax.make_jaxpr(lambda x, y: add(x, y, BLOCK_SIZE=8))(x, y)
+    eqns_false = [
+        e for e in jaxpr_false.eqns if e.primitive == jttl.triton_kernel_call_p
+    ]
+    self.assertLen(eqns_false, 1)
+    self.assertFalse(eqns_false[0].params.get("has_side_effect", False))
+
+  def test_triton_kernel_call_never_dced(self):
+    x, y = create_random_inputs([8])
+    jaxpr = jax.make_jaxpr(lambda x, y: add(x, y, BLOCK_SIZE=8))(x, y)
+
+    # Verify that triton_kernel_call_p is NOT removed by JAX-level DCE
+    # even when its outputs are completely unused (instantiation=False).
+    dce_jaxpr, _ = pe.dce_jaxpr(jaxpr.jaxpr, [False])
+    dce_eqns = [
+        e for e in dce_jaxpr.eqns if e.primitive == jttl.triton_kernel_call_p
+    ]
+    self.assertLen(dce_eqns, 1)
 
 
 if __name__ == "__main__":

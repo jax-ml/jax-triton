@@ -36,6 +36,7 @@ from jax._src import core
 from jax._src.frozen_dict import FrozenDict
 from jax._src import state
 from jax._src import util
+from jax._src.interpreters import partial_eval as pe
 from jax._src.lib import gpu_triton as triton_kernel_call_lib
 from jax._src.pallas.triton import gpu_info
 import jax.extend as jex
@@ -171,6 +172,15 @@ def triton_kernel_call_abstract_eval(*_, out_shapes, **__):
       core.ShapedArray(out_shape.shape, out_shape.dtype)
       for out_shape in out_shapes
   ]
+
+
+def _triton_kernel_call_dce_rule(
+    used_outs: list[bool], eqn: core.JaxprEqn
+) -> tuple[list[bool], core.JaxprEqn | None]:
+  return [True] * len(eqn.invars), eqn
+
+
+pe.dce_rules[triton_kernel_call_p] = _triton_kernel_call_dce_rule
 
 
 def aval_size_bytes(aval):
@@ -710,6 +720,7 @@ def triton_kernel_call_lowering(
     debug,
     serialized_metadata,
     metaparams: FrozenDict[str, Any],
+    has_side_effect: bool = False,
 ):
   kernel_call_name = name
   args = list(ctx.avals_in)
@@ -849,6 +860,7 @@ def triton_kernel_call_lowering(
         api_version=2,
         backend_config=zlib.compress(call_proto),
         operand_output_aliases=input_output_aliases,
+        has_side_effect=has_side_effect,
     )
     return rule(ctx, *array_args)
   else:
@@ -856,6 +868,7 @@ def triton_kernel_call_lowering(
         "triton_kernel_call_ffi",
         api_version=4,
         operand_output_aliases=input_output_aliases,
+        has_side_effect=has_side_effect,
     )
     return rule(ctx, *array_args, opaque=zlib.compress(call_proto))
 
@@ -932,6 +945,7 @@ def triton_call(
     ) = (),
     debug: bool = False,
     serialized_metadata: bytes = b"",
+    has_side_effect: bool = False,
     **metaparams: Any,
 ) -> Any:
   """Calls a Triton kernel with `jax.Array` arguments.
@@ -1015,8 +1029,9 @@ def triton_call(
     debug: Prints out intermediate IRs if True for debugging purposes.
     serialized_metadata: Arbitrary metadata that will be added into the
       serialized kernel call.
-    metaparams: A dictionary of arguments that will be provided to a `grid`
-      (if it is a function) and to the Triton kernel as `constexpr` arguments.
+    has_side_effect: Whether the Triton kernel has side effects.
+    metaparams: A dictionary of arguments that will be provided to a `grid` (if
+      it is a function) and to the Triton kernel as `constexpr` arguments.
 
   Returns:
     Outputs from the Triton kernel.
@@ -1057,6 +1072,7 @@ def triton_call(
       zeroed_outputs=zeroed_outputs,
       debug=debug,
       serialized_metadata=serialized_metadata,
+      has_side_effect=has_side_effect,
       metaparams=FrozenDict(metaparams),
   )
   return tree_util.tree_unflatten(out_tree, out_flat)
