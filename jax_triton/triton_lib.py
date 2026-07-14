@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import copy
 import dataclasses
 import functools
@@ -27,15 +27,15 @@ import pprint
 import shutil
 import tempfile
 import types
-from typing import Any, Protocol, Self
+from typing import Any, Protocol, Self, TypeVar
 import zlib
 
 import jax
 from jax import tree_util
 from jax._src import core
-from jax._src.frozen_dict import FrozenDict
 from jax._src import state
 from jax._src import util
+from jax._src.frozen_dict import FrozenDict
 from jax._src.interpreters import partial_eval as pe
 from jax._src.lib import gpu_triton as triton_kernel_call_lib
 from jax._src.pallas.triton import gpu_info
@@ -100,11 +100,22 @@ _JAX_TO_TRITON_TYPE_MAP = {
     jnp.dtype("bool"): "i1",
 }
 
+Kernel = (
+    triton.JITFunction
+    | gl_runtime.GluonJITFunction
+    | triton.runtime.Heuristics
+    | triton.runtime.Autotuner
+)
+
+StaticScalar = bool | int | float | np.float32
+
 Grid = int | tuple[int] | tuple[int, int] | tuple[int, int, int]
-GridOrLambda = Grid | Callable[[dict[str, Any]], Grid]
+
+_T = TypeVar("_T")
+ValueOrFn = _T | Callable[[Mapping[str, Any]], _T]
 
 
-def normalize_grid(grid: GridOrLambda, metaparams) -> tuple[int, int, int]:
+def normalize_grid(grid: ValueOrFn[Grid], metaparams) -> tuple[int, int, int]:
   if callable(grid):
     grid = grid(metaparams)
   if isinstance(grid, int):
@@ -913,15 +924,10 @@ class ShapeDtype(Protocol):
 
 
 def triton_call(
-    *args: jax.Array | bool | int | float | np.float32,
-    kernel: (
-        triton.JITFunction
-        | gl_runtime.GluonJITFunction
-        | triton.runtime.Heuristics
-        | triton.runtime.Autotuner
-    ),
+    *args: jax.Array | StaticScalar,
+    kernel: Kernel,
     out_shape: ShapeDtype | Sequence[ShapeDtype],
-    grid: GridOrLambda,
+    grid: ValueOrFn[Grid],
     name: str = "",
     num_warps: int | None = None,
     num_stages: int | None = None,
@@ -929,9 +935,7 @@ def triton_call(
     compute_capability: int | None = None,
     enable_fp_fusion: bool = True,
     input_output_aliases: dict[int, int] | None = None,
-    zeroed_outputs: (
-        Sequence[int] | Callable[[dict[str, Any]], Sequence[int]]
-    ) = (),
+    zeroed_outputs: ValueOrFn[Sequence[int]] = (),
     debug: bool = False,
     serialized_metadata: bytes = b"",
     has_side_effect: bool = False,
@@ -993,16 +997,19 @@ def triton_call(
     kernel: A Triton kernel (e.g. a function decorated with `triton.jit`). All
       static values should be annotated with `triton.language.constexpr` or
       `triton.experimental.gluon.language.constexpr`.
-    out_shape: A `jax.ShapeDtypeStruct` (or something that has `.shape` and
-      `.dtype` attributes) or a sequence thereof that specify the output(s) of
-      the kernel. Pointers for each of the `jax.ShapeDtypeStruct`s in
-      `out_shape` will be passed into `kernel` following the input parameters.
+    out_shape: An object with ``shape`` and ``dtype`` attributes or a sequence
+      of such objects. Pointers for each of the elements of ``out_shape`` will
+      be passed into ``kernel`` following the inputs.
     grid: An integer, tuple of up to 3 integers, or a function that returns a
       tuple of up to 3 integers. When `grid` is an integer, `kernel` is
       invocated in `grid`-many parallel executions. When `grid` is a sequence of
       integers, `kernel` is launched in a `prod(grid)`-many parallel execution.
       When `grid` is a function, it is passed `**metaparams` and should return a
       tuple of up to 3 integers.
+    name: A name for the kernel call.
+    compute_capability: The GPU compute capability to compile for.
+    enable_fp_fusion: Whether to enable floating-point operation fusion in the
+      Triton compiler.
     input_output_aliases: A dictionary mapping input argument indices to output
       indices. Providing a mapping will alias the corresponding buffers. The
       input indices are positions in the original ``*args``.
@@ -1019,8 +1026,8 @@ def triton_call(
     serialized_metadata: Arbitrary metadata that will be added into the
       serialized kernel call.
     has_side_effect: Whether the Triton kernel has side effects.
-    metaparams: A dictionary of arguments that will be provided to a `grid` (if
-      it is a function) and to the Triton kernel as `constexpr` arguments.
+    **metaparams: A dictionary of arguments that will be provided to a ``grid``
+      (if it is a function) and to the Triton kernel as `constexpr` arguments.
 
   Returns:
     Outputs from the Triton kernel.
