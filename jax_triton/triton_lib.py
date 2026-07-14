@@ -188,7 +188,13 @@ def triton_kernel_call_abstract_eval(*_, out_shapes, **__):
 def _triton_kernel_call_dce_rule(
     used_outs: list[bool], eqn: core.JaxprEqn
 ) -> tuple[list[bool], core.JaxprEqn | None]:
-  return [True] * len(eqn.invars), eqn
+  if eqn.params.get("has_side_effect", False):
+    return [True] * len(eqn.invars), eqn
+
+  if not any(used_outs):
+    return [False] * len(eqn.invars), None
+
+  return [False] * len(eqn.invars), None
 
 
 pe.dce_rules[triton_kernel_call_p] = _triton_kernel_call_dce_rule

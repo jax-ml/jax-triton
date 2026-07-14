@@ -731,17 +731,30 @@ class TritonKernelCallTest(parameterized.TestCase):
     self.assertLen(eqns_false, 1)
     self.assertFalse(eqns_false[0].params.get("has_side_effect", False))
 
-  def test_triton_kernel_call_never_dced(self):
+  def test_triton_kernel_call_dced_behavior(self):
     x, y = create_random_inputs([8])
-    jaxpr = jax.make_jaxpr(lambda x, y: add(x, y, BLOCK_SIZE=8))(x, y)
 
-    # Verify that triton_kernel_call_p is NOT removed by JAX-level DCE
-    # even when its outputs are completely unused (instantiation=False).
-    dce_jaxpr, _ = pe.dce_jaxpr(jaxpr.jaxpr, [False])
-    dce_eqns = [
-        e for e in dce_jaxpr.eqns if e.primitive == jttl.triton_kernel_call_p
+    # 1. By default, it SHOULD be removed by JAX-level DCE when unused
+    jaxpr_false = jax.make_jaxpr(lambda x, y: add(x, y, BLOCK_SIZE=8))(x, y)
+    dce_jaxpr_false, _ = pe.dce_jaxpr(jaxpr_false.jaxpr, [False])
+    dce_eqns_false = [
+        e
+        for e in dce_jaxpr_false.eqns
+        if e.primitive == jttl.triton_kernel_call_p
     ]
-    self.assertLen(dce_eqns, 1)
+    self.assertEmpty(dce_eqns_false)
+
+    # 2. When has_side_effect=True, it SHOULD NOT be removed
+    jaxpr_true = jax.make_jaxpr(
+        lambda x, y: add(x, y, BLOCK_SIZE=8, has_side_effect=True)
+    )(x, y)
+    dce_jaxpr_true, _ = pe.dce_jaxpr(jaxpr_true.jaxpr, [False])
+    dce_eqns_true = [
+        e
+        for e in dce_jaxpr_true.eqns
+        if e.primitive == jttl.triton_kernel_call_p
+    ]
+    self.assertLen(dce_eqns_true, 1)
 
 
 if __name__ == "__main__":
