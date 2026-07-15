@@ -743,6 +743,17 @@ class TritonKernelCallTest(parameterized.TestCase):
     ]
     self.assertLen(dce_eqns, 1)
 
+  def test_backend_options(self):
+    x, y = create_random_inputs([8])
+    out = add(x, y, backend_options={"num_warps": 2}, BLOCK_SIZE=8)
+    expected = x + y
+    np.testing.assert_allclose(out, expected)
+
+  def test_backend_options_conflict(self):
+    x, y = create_random_inputs([8])
+    with self.assertRaisesRegex(ValueError, "backend_options"):
+      add(x, y, num_warps=4, backend_options={"num_warps": 2}, BLOCK_SIZE=8)
+
 
 if __name__ == "__main__":
   os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
