@@ -9,7 +9,7 @@
 
 repos:
 - repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: 2c9f875913ee60ca25ce70243dc24d5b6415598c  # frozen: v4.6.0
+  rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
   hooks:
   - id: check-ast
   - id: check-merge-conflict
@@ -21,11 +21,26 @@ repos:
   - id: debug-statements
     # only include python files
     files: \.py$
+    language_version: python3.12
   - id: trailing-whitespace
     # only include python and markdown files
     files: \.(py|md)$
 
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: 8b5112a3b2ad121439a2092f8ff548c0d80f2514  # frozen: v0.6.1
+  rev: 0470f7c8a653e950f7cc5a653204ceb3fde4c02a  # frozen: v0.15.1
   hooks:
   - id: ruff
+
+- repo: https://github.com/facebook/pyrefly-pre-commit
+  rev: 14025642291adc2db2f9d9fa398e98699ef3fafc  # frozen: v1.1.1
+  hooks:
+    - id: pyrefly-check
+      name: Pyrefly (type checking)
+      pass_filenames: false
+      additional_dependencies:
+        - numpy~=2.4.0
+        - triton~=3.6.0
+        - --pre
+        - --extra-index-url
+        - https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+        - jax

@@ -3,7 +3,7 @@ name = "jax-triton"
 dynamic = ["version"]
 description = "JAX + OpenAI Triton integration"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
   "absl-py>=1.4.0",
   "jax>=0.8.2",
@@ -26,6 +26,16 @@ packages = ["jax_triton"]
 [tool.setuptools.dynamic]
 version = {attr = "jax_triton.version.__version__"}
 
+[tool.pyrefly]
+python-version = "3.13"
+project-includes = [
+    "jax_triton/**/*.py*",
+]
+untyped-def-behavior = "check-and-infer-return-any"
+
+[tool.pyrefly.errors]
+redefinition = "ignore"
+
 [tool.ruff]
 preview = true
 exclude = [
@@ -36,7 +46,7 @@ exclude = [
 ]
 line-length = 88
 indent-width = 2
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 ignore = [

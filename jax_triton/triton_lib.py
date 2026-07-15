@@ -38,7 +38,6 @@ from jax._src import util
 from jax._src.frozen_dict import FrozenDict
 from jax._src.interpreters import partial_eval as pe
 from jax._src.lib import gpu_triton as triton_kernel_call_lib
-from jax._src.pallas.triton import gpu_info
 import jax.extend as jex
 from jax.interpreters import ad
 from jax.interpreters import batching
@@ -55,15 +54,19 @@ import triton.language as tl
 import triton.runtime.autotuner as autotuner
 
 try:
+  from jax._src.pallas.triton import gpu_info  # pyrefly: ignore[missing-module-attribute]
+except ImportError:
+  gpu_info = None  # Only available in JAX 0.11.0+.
+
+try:
   import triton.backends.nvidia.compiler as cb
 except ImportError:
-  cb = None  # NVIDIA backend is not available.
+  cb: Any = None  # NVIDIA backend is not available.
 
 try:
   import triton.backends.amd.compiler as hb
 except ImportError:
-  hb = None  # AMD backend is not available.
-
+  hb: Any = None  # AMD backend is not available.
 
 # TODO(slebedev): Investigate if this is necessary.
 if "TRITON_CACHE_DIR" in os.environ:
@@ -122,7 +125,7 @@ def normalize_grid(grid: ValueOrFn[Grid], metaparams) -> tuple[int, int, int]:
     grid = (grid,)
   elif len(grid) > 3:
     raise ValueError("`grid` should have three or fewer dimensions.")
-  return tuple(grid) + (1,) * (3 - len(grid))
+  return tuple(grid) + (1,) * (3 - len(grid))  # pyrefly: ignore[bad-return]
 
 
 def get_type_id(obj: Any) -> str:
@@ -388,8 +391,8 @@ def compile_ttir_to_hsaco_inplace(
 
 
 def make_backend(
-  make_gpu_target_func, compute_capability: int | None, num_ctas: int
-) -> tuple[tc.BaseBackend, tc.GPUTarget, int]:
+    make_gpu_target_func, compute_capability: int | None, num_ctas: int
+) -> tuple[cb.CUDABackend | hb.HIPBackend, tc.GPUTarget, int]:
   """Resolves compute_capability and creates Triton's Backend and GPUTarget objects."""
 
   # TODO(sharadmv): handle multiple devices, right now we assume device 0
@@ -403,6 +406,8 @@ def make_backend(
     try:
       compute_capability = triton_kernel_call_lib.get_compute_capability(device)
     except RuntimeError:
+      if gpu_info is None:
+        raise
       # TODO(slebedev): Consider *only* using ``gpu_info`` here.
       compute_capability = gpu_info.get_gpu_info().compute_capability
   if num_ctas > 1 and compute_capability < 90:
@@ -516,7 +521,7 @@ class JTJITFunction:
     alignments = [16] * len(arg_dtypes)
     for i, _, _ in scalar_args:
       alignments[i] = 0
-    specialize_impl = _triton.native_specialize_impl
+    specialize_impl = _triton.native_specialize_impl  # pyrefly: ignore[missing-attribute]
     is_const = False
     do_specialize = True
     specialization = [
@@ -550,8 +555,9 @@ class JTJITFunction:
         tuple(sorted(backend_options.items())),
     )
     if not hasattr(self.fn, "_jT_kernel_cache"):
-      self.fn._jT_kernel_cache = {}  # TODO(cjfj): Convert to LRU cache?
-    kernel = self.fn._jT_kernel_cache.get(cache_key)
+      # TODO(cjfj): Convert to LRU cache?
+      self.fn._jT_kernel_cache = {}  # pyrefly: ignore[missing-attribute]
+    kernel = self.fn._jT_kernel_cache.get(cache_key)  # pyrefly: ignore[missing-attribute]
 
     if kernel is None:
       # First, check that the kernel signature and the reconstructed signature have the
@@ -567,7 +573,7 @@ class JTJITFunction:
           "implicit output arguments are no longer required for aliased arguments."
         )
 
-      options = backend.parse_options(backend_options)
+      options = backend.parse_options(backend_options)  # pyrefly: ignore[bad-argument-type]
 
       kernel_hash = abs(hash(cache_key))
       if _JAX_TRITON_DUMP_DIR:
@@ -576,8 +582,8 @@ class JTJITFunction:
           pprint.pprint(cache_key, stream=f)
           pprint.pprint(options, stream=f)
 
-      context = _triton.ir.context()
-      _triton.ir.load_dialects(context)
+      context = _triton.ir.context()  # pyrefly: ignore[missing-attribute]
+      _triton.ir.load_dialects(context)  # pyrefly: ignore[missing-attribute]
       backend.load_dialects(context)
       codegen_fns = backend.get_codegen_implementation(options)
 
@@ -629,15 +635,15 @@ class JTJITFunction:
         compute_capability,
       )
 
-      self.fn._jT_kernel_cache[cache_key] = kernel
+      self.fn._jT_kernel_cache[cache_key] = kernel  # pyrefly: ignore[missing-attribute]
 
     return kernel, attrs
 
 
 def make_autotuner_configs(
-  fn: autotuner.Autotuner,
-  kwargs: dict[str, Any],
-  named_args: dict[str, Any],
+    fn: autotuner.Autotuner,
+    kwargs: Mapping[str, Any],
+    named_args: Mapping[str, Any],
 ) -> list[triton.Config]:
   """Make and prune redundant autotuner configs based on user-provided kwargs.
 
@@ -671,16 +677,16 @@ def make_autotuner_configs(
     return pruned_configs
 
   fn.early_config_prune = prune_configs
-  fn.nargs = named_args
-  configs = fn.prune_configs(kwargs)
+  fn.nargs = named_args  # pyrefly: ignore[bad-assignment]
+  configs = fn.prune_configs(kwargs)  # pyrefly: ignore[bad-argument-type]
   return configs
 
 
 def apply_heuristics(
-  fn: autotuner.Heuristics,
-  configs: list[triton.Config],
-  orig_kwargs: dict[str, Any],
-  named_args: dict[str, Any],
+    fn: autotuner.Heuristics,
+    configs: list[triton.Config],
+    orig_kwargs: Mapping[str, Any],
+    named_args: Mapping[str, Any],
 ) -> list[triton.Config]:
   """Applies heuristics to the configs and returns the updated configs."""
   updated_configs = []
