@@ -58,15 +58,26 @@ try:
 except ImportError:
   gpu_info = None  # Only available in JAX 0.11.0+.
 
+
+class _Stub:
+  ...
+
+
 try:
   import triton.backends.nvidia.compiler as cb
 except ImportError:
-  cb: Any = None  # NVIDIA backend is not available.
+  # NVIDIA backend is not available.
+  cb: Any = types.SimpleNamespace(
+      CUDAOptions=_Stub, CUDABackend=_Stub, GPUTarget=_Stub
+  )
 
 try:
   import triton.backends.amd.compiler as hb
 except ImportError:
-  hb: Any = None  # AMD backend is not available.
+  # AMD backend is not available.
+  hb: Any = types.SimpleNamespace(
+      HIPOptions=_Stub, HIPBackend=_Stub, GPUTarget=_Stub
+  )
 
 # TODO(slebedev): Investigate if this is necessary.
 if "TRITON_CACHE_DIR" in os.environ:
@@ -201,7 +212,26 @@ def aval_size_bytes(aval):
   return np.dtype(aval.dtype).itemsize * aval.size
 
 
-def make_gpu_target_cuda(device, compute_capability):
+def make_cuda_target(
+    compute_capability: int | None, num_ctas: int
+) -> cb.GPUTarget:
+  # TODO(sharadmv): handle multiple devices, right now we assume device 0
+  # which is fine when we have multiple of the same GPU but this won't work in
+  # general. See also how Triton did this in JITFunction's
+  # `self.device_caches = defaultdict(self.create_binder)` -- it spawns a new set of
+  # precomputes for each new device with `x,y,.. = self.device_caches[device]` using the
+  # create_binder() factory function.
+  device = 0
+  if compute_capability is None:
+    try:
+      compute_capability = triton_kernel_call_lib.get_compute_capability(device)
+    except RuntimeError:
+      if gpu_info is None:
+        raise
+      # TODO(slebedev): Consider *only* using ``gpu_info`` here.
+      compute_capability = gpu_info.get_gpu_info().compute_capability
+  if num_ctas > 1 and compute_capability < 90:
+    raise ValueError("num_ctas > 1 unsupported before Hopper.")
   return cb.GPUTarget("cuda", compute_capability, 32)
 
 
@@ -238,10 +268,13 @@ def _patch_hip_backend():
     hb.HIPBackend.is_within_2gb = fixed_is_within_2gb
 
 
-def make_gpu_target_hip(device, compute_capability):
+def make_hip_target(
+    compute_capability: int | None, num_ctas: int
+) -> hb.GPUTarget:
+  del compute_capability, num_ctas
   # TODO(Arech): remove _patch_hip_backend() once Triton releases a fix
   _patch_hip_backend()
-
+  device = 0
   arch = triton_kernel_call_lib.get_arch_details(device)
   arch = arch.split(":")[0]
   return hb.GPUTarget("hip", arch, 64)
@@ -252,33 +285,21 @@ class CompilationResult:
   binary: str
   name: str
   shared_mem_bytes: int
-  ttgir: str | None
-  llir: str | None
+  ttgir: str
+  llir: str
 
 
 def compile_ttir_inplace(
     ttir,
     backend: cb.CUDABackend | hb.HIPBackend,
     options: cb.CUDAOptions | hb.HIPOptions,
-    compute_capability,
-    platform,
-):
-  if platform == "cuda":
-    return compile_ttir_to_ptx_inplace(
-        ttir,
-        backend,
-        options,
-        compute_capability,
-    )
-  elif platform == "rocm":
-    return compile_ttir_to_hsaco_inplace(
-        ttir,
-        backend,
-        options,
-        compute_capability,
-    )
+    gpu_target: tc.GPUTarget,
+) -> CompilationResult:
+  if isinstance(backend, cb.CUDABackend):
+    return compile_ttir_to_ptx_inplace(ttir, backend, options, gpu_target.arch)
   else:
-    raise ValueError("Unsupported device.")
+    assert isinstance(backend, hb.HIPBackend)
+    return compile_ttir_to_hsaco_inplace(ttir, backend, options)
 
 
 def compile_ttir_to_ptx_inplace(
@@ -331,14 +352,12 @@ def compile_ttir_to_ptx_inplace(
   if cuda_options.debug:
     print(ptx)
   name = metadata["name"]
-  ttgir = str(ttgir) if _JAX_TRITON_DUMP_DIR else None
-  llir = str(llir) if _JAX_TRITON_DUMP_DIR else None
   return CompilationResult(
       binary=ptx,
       name=name,
       shared_mem_bytes=shared_mem_bytes,
-      ttgir=ttgir,
-      llir=llir,
+      ttgir=str(ttgir),
+      llir=str(llir),
   )
 
 
@@ -346,7 +365,6 @@ def compile_ttir_to_hsaco_inplace(
     ttir,
     hip_backend: hb.HIPBackend,
     hip_options: hb.HIPOptions,
-    compute_capability,
 ) -> CompilationResult:
   if hip_options.debug:
     print(ttir)
@@ -372,8 +390,6 @@ def compile_ttir_to_hsaco_inplace(
   hsaco = hip_backend.make_hsaco(amdgcn, metadata, hip_options)
 
   name = metadata["name"]
-  ttgir = str(ttgir) if _JAX_TRITON_DUMP_DIR else None
-  llir = str(llir) if _JAX_TRITON_DUMP_DIR else None
   # Instead of passing hsaco which are "bytes", we first write
   # to a file and then pass the "string" path. This is needed because
   # nanobind doesn't automatically convert between bytes and string.
@@ -385,38 +401,106 @@ def compile_ttir_to_hsaco_inplace(
       binary=hsaco_path,
       name=name,
       shared_mem_bytes=shared_mem_bytes,
-      ttgir=ttgir,
-      llir=llir,
+      ttgir=str(ttgir),
+      llir=str(llir),
   )
 
 
-def make_backend(
-    make_gpu_target_func, compute_capability: int | None, num_ctas: int
-) -> tuple[cb.CUDABackend | hb.HIPBackend, tc.GPUTarget, int]:
-  """Resolves compute_capability and creates Triton's Backend and GPUTarget objects."""
+@dataclasses.dataclass(frozen=True)
+class KernelSpecialization:
+  """Kernel specialization for a specific set of argument types and values.
 
-  # TODO(sharadmv): handle multiple devices, right now we assume device 0
-  # which is fine when we have multiple of the same GPU but this won't work in
-  # general. See also how Triton did this in JITFunction's
-  # `self.device_caches = defaultdict(self.create_binder)` -- it spawns a new set of
-  # precomputes for each new device with `x,y,.. = self.device_caches[device]` using the
-  # create_binder() factory function.
-  device = 0
-  if compute_capability is None:
-    try:
-      compute_capability = triton_kernel_call_lib.get_compute_capability(device)
-    except RuntimeError:
-      if gpu_info is None:
-        raise
-      # TODO(slebedev): Consider *only* using ``gpu_info`` here.
-      compute_capability = gpu_info.get_gpu_info().compute_capability
-  if num_ctas > 1 and compute_capability < 90:
-    raise ValueError("num_ctas > 1 unsupported before Hopper.")
+  Attributes:
+    signature: Argument names to dtype strings (e.g. ``"*fp32"``). Constants
+      are mapped to ``"constexpr"``.
+    specialization: Per-argument ``(type_string, specialization_key)`` tuples,
+      used in the compilation cache key.
+    attrs: Per-argument attributes (e.g. divisibility hints) keyed by argument
+      index tuples.
+    constants: Constant argument names to their values.
+  """
 
-  gpu_target = make_gpu_target_func(device, compute_capability)
-  backend = triton.compiler.make_backend(gpu_target)
+  signature: dict[str, str]
+  specialization: list[Any]
+  attrs: dict[tuple[int, ...], Any]
+  constants: dict[str, Any]
 
-  return backend, gpu_target, compute_capability
+  @classmethod
+  def build(
+      cls,
+      arg_names: list[str],
+      arg_dtypes: list[str],
+      scalar_args: tuple[tuple[int, str, Any], ...],
+      metaparams: Mapping[str, Any],
+      backend: tc.BaseBackend,
+  ) -> KernelSpecialization:
+    signature = dict(zip(arg_names, arg_dtypes))
+    # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
+    # We assume that all arrays are aligned to 16 bytes, and Triton may use this
+    # assumption, unless array args are include in the `do_not_specialize` list.
+    alignments = [16] * len(arg_dtypes)
+    for i, _, _ in scalar_args:
+      alignments[i] = 0
+    specialize_impl = _triton.native_specialize_impl
+    is_const = False
+    do_specialize = True
+    specialization = [
+        specialize_impl(
+            backend,
+            types.SimpleNamespace(
+                data_ptr=lambda a=alignment: a,
+                dtype=arg_dtype.removeprefix("*"),
+            ),
+            is_const,
+            do_specialize,
+            alignment > 0,
+        )
+        for arg_dtype, alignment in zip(arg_dtypes, alignments)
+    ]
+    attrs: dict[tuple[int, ...], Any] = {
+        (i,): backend.parse_attr(attr)
+        for i, (_, attr) in enumerate(specialization)
+    }
+    constants = dict(metaparams)
+    constants.update({k: None for _, k, v in scalar_args if v is None})
+    constants.update({arg_names[i]: 1 for i, _, v in scalar_args if v == 1})
+    for constant in constants:
+      signature[constant] = "constexpr"
+    return cls(signature, specialization, attrs, constants)
+
+
+def _dump_kernel_artifacts(
+    cache_key: tuple[Any, ...],
+    options: Any,
+    ttir: str,
+    compilation_result: CompilationResult,
+    platform: str,
+) -> None:
+  base = f"{_JAX_TRITON_DUMP_DIR}/{abs(hash(cache_key))}"
+  os.makedirs(base)
+  kernel_name = compilation_result.name
+  with open(f"{base}/config", "w") as f:
+    pprint.pprint(cache_key, stream=f)
+    pprint.pprint(options, stream=f)
+  with open(f"{base}/{kernel_name}.ttir", "w") as f:
+    f.write(ttir)
+  if platform == "rocm":
+    shutil.copy2(
+        compilation_result.binary,
+        f"{base}/{kernel_name}.hsaco",
+    )
+  else:
+    with open(f"{base}/{kernel_name}.ptx", "w") as f:
+      f.write(compilation_result.binary)
+  with open(f"{base}/{kernel_name}.ttgir", "w") as f:
+    f.write(compilation_result.ttgir)
+  with open(f"{base}/{kernel_name}.llir", "w") as f:
+    f.write(compilation_result.llir)
+  with open(f"{base}/{kernel_name}.compile_info", "w") as f:
+    f.write(
+        f"{kernel_name}: shared_mem_bytes:"
+        f" {compilation_result.shared_mem_bytes}\n"
+    )
 
 
 # nb: the class name is purposely distinct from Triton's JITFunction to simplify writing
@@ -484,10 +568,6 @@ class JTJITFunction:
     return self.fn.params
 
   @property
-  def is_gluon(self) -> bool:
-    return isinstance(self.fn, gl_runtime.GluonJITFunction)
-
-  @property
   def signature(self) -> inspect.Signature:
     return self.fn.signature
 
@@ -497,7 +577,7 @@ class JTJITFunction:
 
   def get_or_create_triton_kernel(
       self,
-      make_gpu_target_func,
+      make_target_func,
       platform,
       arg_dtypes,
       scalar_args,
@@ -510,48 +590,26 @@ class JTJITFunction:
     num_warps = backend_options["num_warps"]
     num_ctas = backend_options["num_ctas"]
 
-    backend, gpu_target, compute_capability = make_backend(
-      make_gpu_target_func, compute_capability, num_ctas
-    )
+    gpu_target = make_target_func(compute_capability, num_ctas)
+    backend = triton.compiler.make_backend(gpu_target)
+    assert isinstance(backend, (cb.CUDABackend, hb.HIPBackend))
 
-    signature = {self.arg_names[i]: v for i, v in enumerate(arg_dtypes)}
-    # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
-    # We assume that all arrays are aligned to 16 bytes, and Triton may use this
-    # assumption, unless array args are include in the `do_not_specialize` list.
-    alignments = [16] * len(arg_dtypes)
-    for i, _, _ in scalar_args:
-      alignments[i] = 0
-    specialize_impl = _triton.native_specialize_impl  # pyrefly: ignore[missing-attribute]
-    is_const = False
-    do_specialize = True
-    specialization = [
-      specialize_impl(
+    spec = KernelSpecialization.build(
+        # ``arg_names`` includes metaparams, which we slice out here.
+        self.arg_names[: len(arg_dtypes)],
+        arg_dtypes,
+        scalar_args,
+        metaparams,
         backend,
-        types.SimpleNamespace(
-          data_ptr=lambda: alignment, dtype=arg_dtype.removeprefix("*")
-        ),
-        is_const,
-        do_specialize,
-        alignment > 0,
-      )
-      for arg_dtype, alignment in zip(arg_dtypes, alignments)
-    ]
-    attrs = {
-      (i,): backend.parse_attr(attr) for i, (_, attr) in enumerate(specialization)
-    }
-    constants = dict(metaparams)
-    constants.update({k: None for _, k, v in scalar_args if v is None})
-    constants.update({self.arg_names[i]: 1 for i, _, v in scalar_args if v == 1})
-    for constant in constants:
-      signature[constant] = "constexpr"
+    )
 
     # Cache key should contain any parameter that can affect the compiler output.
     cache_key = (
         fn,
-        tuple(signature.items()),
-        tuple(specialization),
-        tuple(constants.items()),
-        compute_capability,
+        tuple(spec.signature.items()),
+        tuple(spec.specialization),
+        tuple(spec.constants.items()),
+        gpu_target,
         tuple(sorted(backend_options.items())),
     )
     if not hasattr(self.fn, "_jT_kernel_cache"):
@@ -560,84 +618,58 @@ class JTJITFunction:
     kernel = self.fn._jT_kernel_cache.get(cache_key)  # pyrefly: ignore[missing-attribute]
 
     if kernel is None:
-      # First, check that the kernel signature and the reconstructed signature have the
-      # same number of parameters. A mismatch can occur due to differences in
-      # `triton_call(input_output_aliases=)` handling between jax-triton versions.
-      if len(self.signature.parameters) != len(signature):
+      if len(self.signature.parameters) != len(spec.signature):
         raise TypeError(
-          f"Number of parameters in the kernel '{fn}' signature "
-          f"({len(self.signature.parameters)}: {self.signature}) "
-          f"does not match reconstructed signature ({len(signature)}: {signature}). "
-          "If the kernel was working on an older version of jax-triton and its "
-          "triton_call() launcher uses `input_output_aliases` argument, note that "
-          "implicit output arguments are no longer required for aliased arguments."
+            f"Number of parameters in the kernel '{fn}' signature"
+            f" ({len(self.signature.parameters)}: {self.signature}) does not"
+            f" match reconstructed signature ({len(spec.signature)}:"
+            f" {spec.signature}). If the kernel was working on an older version"
+            " of jax-triton and its triton_call() launcher uses"
+            " `input_output_aliases` argument, note that implicit output"
+            " arguments are no longer required for aliased arguments."
         )
 
       options = backend.parse_options(backend_options)  # pyrefly: ignore[bad-argument-type]
-
-      kernel_hash = abs(hash(cache_key))
-      if _JAX_TRITON_DUMP_DIR:
-        os.makedirs(f"{_JAX_TRITON_DUMP_DIR}/{kernel_hash}")
-        with open(f"{_JAX_TRITON_DUMP_DIR}/{kernel_hash}/config", "w") as f:
-          pprint.pprint(cache_key, stream=f)
-          pprint.pprint(options, stream=f)
 
       context = _triton.ir.context()  # pyrefly: ignore[missing-attribute]
       _triton.ir.load_dialects(context)  # pyrefly: ignore[missing-attribute]
       backend.load_dialects(context)
       codegen_fns = backend.get_codegen_implementation(options)
 
-      real_ASTSource = gl_runtime.GluonASTSource if self.is_gluon else tc.ASTSource
-      module = real_ASTSource(
-        fn, constexprs=constants, signature=signature, attrs=attrs
-      ).make_ir(gpu_target, options, codegen_fns, backend.get_module_map(), context)
-
+      if isinstance(fn, gl_runtime.GluonJITFunction):
+        ast_source_cls = gl_runtime.GluonASTSource
+      else:
+        ast_source_cls = tc.ASTSource
+      ast_source = ast_source_cls(
+          fn, spec.signature, spec.constants, spec.attrs
+      )
+      module = ast_source.make_ir(
+          gpu_target, options, codegen_fns, backend.get_module_map(), context
+      )
       ttir = str(module)
 
       compilation_result = compile_ttir_inplace(
-        module, backend, options, compute_capability, platform
+          module, backend, options, gpu_target
       )
 
-      kernel_name = compilation_result.name
       if _JAX_TRITON_DUMP_DIR:
-        with open(f"{_JAX_TRITON_DUMP_DIR}/{kernel_hash}/{kernel_name}.ttir", "w") as f:
-          f.write(ttir)
-        if platform == "rocm":
-          shutil.copy2(
-            compilation_result.binary,
-            f"{_JAX_TRITON_DUMP_DIR}/{kernel_hash}/{kernel_name}.hsaco",
-          )
-        else:
-          with open(f"{_JAX_TRITON_DUMP_DIR}/{kernel_hash}/{kernel_name}.ptx", "w") as f:
-            f.write(compilation_result.binary)
-        with open(
-          f"{_JAX_TRITON_DUMP_DIR}/{kernel_hash}/{kernel_name}.ttgir", "w"
-        ) as f:
-          f.write(compilation_result.ttgir)
-        with open(f"{_JAX_TRITON_DUMP_DIR}/{kernel_hash}/{kernel_name}.llir", "w") as f:
-          f.write(compilation_result.llir)
-        with open(
-          f"{_JAX_TRITON_DUMP_DIR}/{kernel_hash}/{kernel_name}.compile_info",
-          "w",
-        ) as f:
-          f.write(
-            f"{kernel_name}: shared_mem_bytes:"
-            f" {compilation_result.shared_mem_bytes}\n"
-          )
+        _dump_kernel_artifacts(
+            cache_key, options, ttir, compilation_result, platform
+        )
 
       kernel = triton_kernel_call_lib.TritonKernel(
-        kernel_name,
-        num_warps,
-        num_ctas,
-        compilation_result.shared_mem_bytes,
-        compilation_result.binary,
-        ttir,
-        compute_capability,
+          compilation_result.name,
+          num_warps,
+          num_ctas,
+          compilation_result.shared_mem_bytes,
+          compilation_result.binary,
+          ttir,
+          gpu_target.arch if isinstance(gpu_target.arch, int) else 0,
       )
 
       self.fn._jT_kernel_cache[cache_key] = kernel  # pyrefly: ignore[missing-attribute]
 
-    return kernel, attrs
+    return kernel, spec.attrs
 
 
 def make_autotuner_configs(
@@ -701,7 +733,7 @@ def apply_heuristics(
 
 
 def triton_kernel_call_lowering(
-    make_gpu_target_func,
+    make_target_func,
     ctx,
     *array_args: mlir.Value,
     fn,
@@ -797,7 +829,7 @@ def triton_kernel_call_lowering(
         "num_ctas": config.num_ctas,
     }
     kernel, specialization_attr = jtfu.get_or_create_triton_kernel(
-        make_gpu_target_func,
+        make_target_func,
         ctx.module_context.platforms[0],
         arg_dtypes,
         scalar_args,
@@ -861,13 +893,13 @@ def triton_kernel_call_lowering(
 
 mlir.register_lowering(
     triton_kernel_call_p,
-    functools.partial(triton_kernel_call_lowering, make_gpu_target_cuda),
+    functools.partial(triton_kernel_call_lowering, make_cuda_target),
     platform="cuda",
 )
 
 mlir.register_lowering(
     triton_kernel_call_p,
-    functools.partial(triton_kernel_call_lowering, make_gpu_target_hip),
+    functools.partial(triton_kernel_call_lowering, make_hip_target),
     platform="rocm",
 )
 
