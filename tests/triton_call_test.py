@@ -195,6 +195,7 @@ def create_random_inputs(shape1, shape2=None, *, dtype="float32"):
   return x, y
 
 
+
 class TritonKernelCallTest(parameterized.TestCase):
 
   @parameterized.product(
@@ -753,6 +754,130 @@ class TritonKernelCallTest(parameterized.TestCase):
     x, y = create_random_inputs([8])
     with self.assertRaisesRegex(ValueError, "backend_options"):
       add(x, y, num_warps=4, backend_options={"num_warps": 2}, BLOCK_SIZE=8)
+
+  def test_tuple_tensor_args(self):
+    @triton.jit
+    def add_tuple_kernel(
+        x_ptr, yz, n_elements, output_ptr, BLOCK_SIZE: tl.constexpr
+    ):
+      y_ptr = yz[0]
+      z_ptr = yz[1]
+      pid = tl.program_id(axis=0)
+      block_start = pid * BLOCK_SIZE
+      offsets = block_start + tl.arange(0, BLOCK_SIZE)
+      mask = offsets < n_elements
+      x = tl.load(x_ptr + offsets, mask=mask)
+      y = tl.load(y_ptr + offsets, mask=mask)
+      z = tl.load(z_ptr + offsets, mask=mask)
+      output = x + y + z
+      tl.store(output_ptr + offsets, output, mask=mask)
+
+    size = 8
+    x = jnp.ones(size, dtype=jnp.float32)
+    y = jnp.ones(size, dtype=jnp.float32) * 2
+    z = jnp.ones(size, dtype=jnp.float32) * 3
+    out = jax.jit(
+        lambda x, y, z: jt.triton_call(
+            x,
+            (y, z),
+            size,
+            kernel=add_tuple_kernel,
+            out_shape=jax.ShapeDtypeStruct((size,), jnp.float32),
+            grid=(1,),
+            BLOCK_SIZE=size,
+        )
+    )(x, y, z)
+    np.testing.assert_allclose(out, x + y + z)
+
+  def test_nested_tuple_tensor_args(self):
+    @triton.jit
+    def add_nested_tuple_kernel(
+        x_ptr, ab_c, output_ptr, BLOCK_SIZE: tl.constexpr
+    ):
+      ab = ab_c[0]
+      c_ptr = ab_c[1]
+      a_ptr = ab[0]
+      b_ptr = ab[1]
+      pid = tl.program_id(axis=0)
+      block_start = pid * BLOCK_SIZE
+      offsets = block_start + tl.arange(0, BLOCK_SIZE)
+      mask = offsets < 8
+      x = tl.load(x_ptr + offsets, mask=mask)
+      a = tl.load(a_ptr + offsets, mask=mask)
+      b = tl.load(b_ptr + offsets, mask=mask)
+      c = tl.load(c_ptr + offsets, mask=mask)
+      output = x + a + b + c
+      tl.store(output_ptr + offsets, output, mask=mask)
+
+    size = 8
+    x = jnp.ones(size, dtype=jnp.float32)
+    a = jnp.ones(size, dtype=jnp.float32) * 2
+    b = jnp.ones(size, dtype=jnp.float32) * 3
+    c = jnp.ones(size, dtype=jnp.float32) * 4
+    out = jax.jit(
+        lambda x, a, b, c: jt.triton_call(
+            x,
+            ((a, b), c),
+            kernel=add_nested_tuple_kernel,
+            out_shape=jax.ShapeDtypeStruct((size,), jnp.float32),
+            grid=(1,),
+            BLOCK_SIZE=size,
+        )
+    )(x, a, b, c)
+    np.testing.assert_allclose(out, x + a + b + c)
+
+  def test_scalar_before_tuple(self):
+    @triton.jit
+    def scale_add_kernel(scale, xy, output_ptr, BLOCK_SIZE: tl.constexpr):
+      x_ptr = xy[0]
+      y_ptr = xy[1]
+      pid = tl.program_id(axis=0)
+      offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+      mask = offsets < BLOCK_SIZE
+      x = tl.load(x_ptr + offsets, mask=mask)
+      y = tl.load(y_ptr + offsets, mask=mask)
+      tl.store(output_ptr + offsets, scale * (x + y), mask=mask)
+
+    size = 8
+    x = jnp.ones(size, dtype=jnp.float32)
+    y = jnp.ones(size, dtype=jnp.float32) * 2
+    out = jax.jit(
+        lambda x, y: jt.triton_call(
+            3.0,
+            (x, y),
+            kernel=scale_add_kernel,
+            out_shape=jax.ShapeDtypeStruct((size,), jnp.float32),
+            grid=(1,),
+            BLOCK_SIZE=size,
+        )
+    )(x, y)
+    np.testing.assert_allclose(out, 3.0 * (x + y))
+
+  def test_tuple_with_mixed_dtypes(self):
+    @triton.jit
+    def mixed_kernel(xy, output_ptr, BLOCK_SIZE: tl.constexpr):
+      x_ptr = xy[0]
+      y_ptr = xy[1]
+      pid = tl.program_id(axis=0)
+      offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+      mask = offsets < BLOCK_SIZE
+      x = tl.load(x_ptr + offsets, mask=mask).to(tl.float32)
+      y = tl.load(y_ptr + offsets, mask=mask).to(tl.float32)
+      tl.store(output_ptr + offsets, x + y, mask=mask)
+
+    size = 8
+    x = jnp.ones(size, dtype=jnp.float32)
+    y = jnp.ones(size, dtype=jnp.float16) * 2
+    out = jax.jit(
+        lambda x, y: jt.triton_call(
+            (x, y),
+            kernel=mixed_kernel,
+            out_shape=jax.ShapeDtypeStruct((size,), jnp.float32),
+            grid=(1,),
+            BLOCK_SIZE=size,
+        )
+    )(x, y)
+    np.testing.assert_allclose(out, jnp.float32(3.0) * jnp.ones(size))
 
 
 if __name__ == "__main__":

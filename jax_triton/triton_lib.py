@@ -430,11 +430,19 @@ class KernelSpecialization:
       cls,
       arg_names: list[str],
       arg_dtypes: list[str],
+      in_tree: tree_util.PyTreeDef,
+      objpaths: list[tuple[int, ...]],
       scalar_args: tuple[tuple[int, str, Any], ...],
       metaparams: Mapping[str, Any],
       backend: tc.BaseBackend,
   ) -> KernelSpecialization:
-    signature = dict(zip(arg_names, arg_dtypes))
+    # Build the signature dict, restoring nested structure from ``in_tree``.
+    n = in_tree.num_leaves
+    nested_dtypes = in_tree.unflatten(arg_dtypes[:n])
+    values = list(nested_dtypes) + arg_dtypes[n:]
+    # ``arg_names`` includes metaparams, so we slice them out here.
+    signature = dict(zip(arg_names[:len(values)], values))
+
     # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
     # We assume that all arrays are aligned to 16 bytes, and Triton may use this
     # assumption, unless array args are include in the `do_not_specialize` list.
@@ -457,13 +465,18 @@ class KernelSpecialization:
         )
         for arg_dtype, alignment in zip(arg_dtypes, alignments)
     ]
+
     attrs: dict[tuple[int, ...], Any] = {
-        (i,): backend.parse_attr(attr)
+        objpaths[i]: backend.parse_attr(attr)
         for i, (_, attr) in enumerate(specialization)
     }
+
     constants = dict(metaparams)
-    constants.update({k: None for _, k, v in scalar_args if v is None})
-    constants.update({arg_names[i]: 1 for i, _, v in scalar_args if v == 1})
+    constants.update({
+        arg_names[objpaths[i][0]]: 1
+        for i, _, v in scalar_args
+        if v == 1 and len(objpaths[i]) == 1
+    })
     for constant in constants:
       signature[constant] = "constexpr"
     return cls(signature, specialization, attrs, constants)
@@ -582,6 +595,8 @@ class JTJITFunction:
       arg_dtypes,
       scalar_args,
       *,
+      in_tree: tree_util.PyTreeDef,
+      objpaths: list[tuple[int, ...]],
       compute_capability,
       backend_options: Mapping[str, Any],
       metaparams,
@@ -595,9 +610,10 @@ class JTJITFunction:
     assert isinstance(backend, (cb.CUDABackend, hb.HIPBackend))
 
     spec = KernelSpecialization.build(
-        # ``arg_names`` includes metaparams, which we slice out here.
-        self.arg_names[: len(arg_dtypes)],
+        self.arg_names,
         arg_dtypes,
+        in_tree,
+        objpaths,
         scalar_args,
         metaparams,
         backend,
@@ -739,6 +755,7 @@ def triton_kernel_call_lowering(
     fn,
     scalar_args: tuple[tuple[int, str, Any], ...],
     name,
+    in_tree: tree_util.PyTreeDef,
     out_shapes,
     grid,
     compute_capability,
@@ -801,7 +818,21 @@ def triton_kernel_call_lowering(
   })
 
   outputs_offset = len(ctx.avals_in) + len(scalar_args)
-  equal_to_1 = {i for i, _, v in scalar_args if v == 1}
+
+  # Map flat indices to Triton ObjPath tuples.
+  nested = in_tree.unflatten(range(in_tree.num_leaves))
+  objpaths = [
+      tuple(k.idx for k in kp)
+      for kp, _ in tree_util.tree_leaves_with_path(nested)
+  ]
+  # Outputs are appended as flat params after the input tree.
+  num_top = len(nested)
+  for j in range(len(arg_dtypes) - in_tree.num_leaves):
+    objpaths.append((num_top + j,))
+
+  equal_to_1 = {
+      i for i, _, v in scalar_args if v == 1 and len(objpaths[i]) == 1
+  }
 
   jtfu = JTJITFunction(fn)
   kernel_calls = []
@@ -828,11 +859,14 @@ def triton_kernel_call_lowering(
         "num_stages": config.num_stages,
         "num_ctas": config.num_ctas,
     }
+
     kernel, specialization_attr = jtfu.get_or_create_triton_kernel(
         make_target_func,
         ctx.module_context.platforms[0],
         arg_dtypes,
         scalar_args,
+        in_tree=in_tree,
+        objpaths=objpaths,
         compute_capability=compute_capability,
         backend_options=config_backend_options,
         metaparams=config_metaparams,
@@ -841,7 +875,7 @@ def triton_kernel_call_lowering(
     kernel_params = []
     for i, (arg, dtype) in enumerate(zip(args, arg_dtypes)):
       if isinstance(arg, core.ShapedArray):
-        arg_attrs = specialization_attr[(i,)]
+        arg_attrs = specialization_attr[objpaths[i]]
         kernel_params.append(
             triton_kernel_call_lib.create_array_parameter(
                 zeroed_params_with_sizes.get(i, 0),
@@ -1028,13 +1062,15 @@ def triton_call(
     name: A name for the kernel call.
     compute_capability: The GPU compute capability to compile for.
     input_output_aliases: A dictionary mapping input argument indices to output
-      indices. Providing a mapping will alias the corresponding buffers. The
-      input indices are positions in the original ``*args``.
-    zeroed_outputs: A sequence of indices into ``out_shape``, or a function
-      returning such a sequence, for outputs that should be zeroed before the
-      kernel is launched. Note that this also supports zeroing input-output
-      (i.e. aliased through ``input_output_aliases``) arguments that should
-      be treated as outputs in this argument.
+      indices. Providing a mapping will alias the corresponding buffers. If
+      ``*args`` contains nested tuples, the input indices correspond to the
+      flattened arguments. Similarly, the output indices correspond to the
+      flattened ``out_shape``.
+    zeroed_outputs: A sequence of indices into the flattened ``out_shape``, or a
+      function returning such a sequence, for outputs that should be zeroed
+      before the kernel is launched. Note that this also supports zeroing
+      input-output (i.e. aliased through ``input_output_aliases``) arguments
+      that should be treated as outputs in this argument.
     num_warps: The number of warps used to execute the Triton kernel.
     num_stages: The number of stages emitted by the Triton compiler.
     num_ctas: The size of thread blocks per cluster to be used on GPUs with
@@ -1079,8 +1115,7 @@ def triton_call(
   out_shape = tree_util.tree_map(
       lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), out_shape
   )
-  flat_args, _ = tree_util.tree_flatten(args)
-  # TODO(sharadmv): check in_tree is flat (no Pytrees allowed in triton_call)
+  flat_args, in_tree = tree_util.tree_flatten(args)
   flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
 
   array_args = []
@@ -1101,6 +1136,7 @@ def triton_call(
       fn=kernel,
       scalar_args=tuple(scalar_args),
       name=name,
+      in_tree=in_tree,
       out_shapes=tuple(flat_out_shapes),
       grid=grid,
       compute_capability=compute_capability,
