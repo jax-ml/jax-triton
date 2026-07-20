@@ -881,6 +881,43 @@ class TritonKernelCallTest(parameterized.TestCase):
     )(x, y)
     np.testing.assert_allclose(out, jnp.float32(3.0) * jnp.ones(size))
 
+  def test_constexpr_defaults(self):
+
+    @triton.jit
+    def add_default_kernel(
+        x_ptr, y_ptr, n_elements, output_ptr,
+        BLOCK_SIZE: tl.constexpr = 8,
+    ):
+      pid = tl.program_id(axis=0)
+      block_start = pid * BLOCK_SIZE
+      offsets = block_start + tl.arange(0, BLOCK_SIZE)
+      mask = offsets < n_elements
+      x = tl.load(x_ptr + offsets, mask=mask)
+      y = tl.load(y_ptr + offsets, mask=mask)
+      tl.store(output_ptr + offsets, x + y, mask=mask)
+
+    x = jnp.arange(8, dtype=jnp.float32)
+    y = jnp.ones(8, dtype=jnp.float32)
+    out_shape = jax.ShapeDtypeStruct((8,), jnp.float32)
+
+    out = jt.triton_call(
+        x, y, x.size,
+        kernel=add_default_kernel,
+        out_shape=out_shape,
+        grid=(1,),
+    )
+    np.testing.assert_allclose(out, x + y)
+
+    # Explicit override.
+    out = jt.triton_call(
+        x, y, x.size,
+        kernel=add_default_kernel,
+        out_shape=out_shape,
+        grid=(1,),
+        BLOCK_SIZE=8,
+    )
+    np.testing.assert_allclose(out, x + y)
+
 
 if __name__ == "__main__":
   os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"

@@ -585,6 +585,16 @@ class JTJITFunction:
   def params(self) -> list[triton.runtime.jit.KernelParam]:
     return self.fn.params
 
+  @cached_property
+  def constexpr_param_names(self) -> frozenset[str]:
+    """Names of parameters annotated with ``tl.constexpr`` / ``gl.constexpr``."""
+    return frozenset(p.name for p in self.params if p.is_constexpr)
+
+  @cached_property
+  def param_defaults(self) -> dict[str, Any]:
+    """Declared default values for kernel parameters."""
+    return {p.name: p.default for p in self.params if p.has_default}
+
   @property
   def signature(self) -> inspect.Signature:
     return self.fn.signature
@@ -796,6 +806,14 @@ def triton_kernel_call_lowering(
   args.extend(strictly_out_avals)
   arg_dtypes.extend(map(get_type_id, strictly_out_avals))
 
+  jtfu = JTJITFunction(fn)
+
+  # Fill in missing constexpr defaults before metaparams are used.
+  metaparams: dict[str, Any] = dict(metaparams)
+  for name in jtfu.constexpr_param_names:
+    if name not in metaparams and name in jtfu.param_defaults:
+      metaparams[name] = jtfu.param_defaults[name]
+
   named_args = dict(unsafe_zip(fn.arg_names, args))
 
   if isinstance(fn, autotuner.Autotuner):
@@ -849,7 +867,6 @@ def triton_kernel_call_lowering(
       i for i, _, v in scalar_args if v == 1 and len(objpaths[i]) == 1
   }
 
-  jtfu = JTJITFunction(fn)
   kernel_calls = []
   for config in configs:
     config_metaparams = {**metaparams, **config.kwargs}
@@ -1024,7 +1041,7 @@ def triton_call(
       x_ptr,
       y_ptr,
       output_ptr,
-      block_size: tl.constexpr,
+      block_size: tl.constexpr = 128,
   ):
     pid = tl.program_id(axis=0)
     block_start = pid * block_size
@@ -1098,8 +1115,10 @@ def triton_call(
     serialized_metadata: Arbitrary metadata that will be added into the
       serialized kernel call.
     has_side_effect: Whether the Triton kernel has side effects.
-    **metaparams: A dictionary of arguments that will be provided to a ``grid``
-      (if it is a function) and to the Triton kernel as `constexpr` arguments.
+    **metaparams: ``constexpr`` arguments for the Triton kernel. Missing
+      constexpr arguments are filled from the kernel's declared defaults.
+      Also provided to ``grid`` and ``zeroed_outputs`` when either is a
+      function.
 
   Returns:
     Outputs from the Triton kernel.
