@@ -518,10 +518,7 @@ def _dump_kernel_artifacts(
     )
 
 
-# nb: the class name is purposely distinct from Triton's JITFunction to simplify writing
-# comments and docstrings, and make them unambiguous without additional context.
-# TODO(slebedev): Find a better name, e.g. TritonFn.
-class JTJITFunction:
+class TritonFunction:
   """A unified wrapper around a Triton kernel.
 
   The wrapper is responsible for abstracting away low-level Triton API access,
@@ -608,12 +605,6 @@ class JTJITFunction:
         configs[i] = updated_config
 
     return configs
-
-  @cached_property
-  def arg_name_to_index(self) -> dict[str, int]:
-    """Returns a dictionary mapping the kernel parameter names to their indices in the
-    kernel's signature."""
-    return {name: index for index, name in enumerate(self.arg_names)}
 
   @property
   def params(self) -> list[triton.runtime.jit.KernelParam]:
@@ -780,16 +771,16 @@ def triton_kernel_call_lowering(
   args.extend(strictly_out_avals)
   arg_dtypes.extend(map(get_type_id, strictly_out_avals))
 
-  jtfu = JTJITFunction(fn)
+  triton_fn = TritonFunction(fn)
 
   # Fill in missing constexpr defaults before metaparams are used.
   metaparams: dict[str, Any] = dict(metaparams)
-  for name in jtfu.constexpr_param_names:
-    if name not in metaparams and name in jtfu.param_defaults:
-      metaparams[name] = jtfu.param_defaults[name]
+  for name in triton_fn.constexpr_param_names:
+    if name not in metaparams and name in triton_fn.param_defaults:
+      metaparams[name] = triton_fn.param_defaults[name]
 
-  named_args = dict(unsafe_zip(jtfu.arg_names, args))
-  configs = jtfu.make_configs(backend_options, metaparams, named_args)
+  named_args = dict(unsafe_zip(triton_fn.arg_names, args))
+  configs = triton_fn.make_configs(backend_options, metaparams, named_args)
 
   # output2input maps output index to the original user-facing input index,
   # which matches the position in the reconstructed args list.
@@ -846,7 +837,7 @@ def triton_kernel_call_lowering(
         "num_ctas": config.num_ctas,
     }
 
-    kernel, specialization_attr = jtfu.get_or_create_triton_kernel(
+    kernel, specialization_attr = triton_fn.get_or_create_triton_kernel(
         make_target_func,
         ctx.module_context.platforms[0],
         arg_dtypes,
@@ -887,13 +878,13 @@ def triton_kernel_call_lowering(
     )
 
   if len(kernel_calls) > 1:
-    named_scalar_args = {jtfu.arg_names[i]: v for i, _, v in scalar_args}
+    named_scalar_args = {triton_fn.arg_names[i]: v for i, _, v in scalar_args}
     input_output_aliases_with_sizes = tuple(
         (input_idx, output_idx, aval_size_bytes(ctx.avals_in[input_idx]))
         for input_idx, output_idx in input_output_aliases.items()
     )
     kernel_call = triton_kernel_call_lib.TritonAutotunedKernelCall(
-        f"{kernel_call_name} ({jtfu.name}) {named_scalar_args}",
+        f"{kernel_call_name} ({triton_fn.name}) {named_scalar_args}",
         [(call, str(config)) for call, config in zip(kernel_calls, configs)],
         input_output_aliases_with_sizes,
     )

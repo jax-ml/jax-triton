@@ -491,8 +491,8 @@ class TritonKernelCallTest(parameterized.TestCase):
     fn2 = jax.jit(lambda x, y: add(x, y, BLOCK_SIZE=32, kernel=my_add_kernel))
     fn3 = jax.jit(lambda x, y: add(x, y, BLOCK_SIZE=64, kernel=my_add_kernel))
 
-    jt_kernel = jttl.JTJITFunction(my_add_kernel)
-    jt_cache_size = lambda: jt_kernel.compiled_kernels_cache_size
+    triton_fn = jttl.TritonFunction(my_add_kernel)
+    jt_cache_size = lambda: triton_fn.compiled_kernels_cache_size
     self.assertEqual(jt_cache_size(), 0)
 
     x1, y1 = create_random_inputs([42])
@@ -535,11 +535,11 @@ class TritonKernelCallTest(parameterized.TestCase):
         grid=x.size,
       )
 
-    jt_kernel = jttl.JTJITFunction(silly_add_kernel)
-    jt_cache_size = lambda: jt_kernel.compiled_kernels_cache_size
+    triton_fn = jttl.TritonFunction(silly_add_kernel)
+    jt_cache_size = lambda: triton_fn.compiled_kernels_cache_size
     self.assertEqual(jt_cache_size(), 0)
 
-    get_or_create_triton_kernel = jttl.JTJITFunction.get_or_create_triton_kernel
+    get_or_create_triton_kernel = jttl.TritonFunction.get_or_create_triton_kernel
 
     call_count = [0]
 
@@ -548,7 +548,7 @@ class TritonKernelCallTest(parameterized.TestCase):
       return get_or_create_triton_kernel(*args, **kwargs)
 
     with mock.patch.object(
-      jttl.JTJITFunction,
+      jttl.TritonFunction,
       "get_or_create_triton_kernel",
       new=my_get_or_create_triton_kernel,
     ):
