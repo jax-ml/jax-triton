@@ -20,7 +20,9 @@ from absl.testing import parameterized
 import jax
 from jax import config
 from jax import random
+from jax._src import test_util as jtu
 from jax._src.interpreters import partial_eval as pe
+from jax._src.lib import gpu_triton
 import jax.numpy as jnp
 import jax_triton as jt
 import jax_triton.triton_lib as jttl
@@ -228,7 +230,7 @@ class TritonKernelCallTest(parameterized.TestCase):
       block_size_n,
       block_size_k,
   ):
-    if jt.get_compute_capability(0) < 70:
+    if jtu.is_cuda_compute_capability_at_least("7.0"):
       self.skipTest("Matmul only works on GPUs with capability >= sm70")
 
     x, y = create_random_inputs([m, k], [k, n], dtype=dtype)
@@ -307,7 +309,7 @@ class TritonKernelCallTest(parameterized.TestCase):
           x,
           y,
           kernel=add_scalar_kernel,
-          compute_capability=jt.get_compute_capability(0),
+          compute_capability=gpu_triton.get_compute_capability(0),
           out_shape=jax.ShapeDtypeStruct((), x.dtype),
           grid=1,
       )

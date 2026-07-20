@@ -37,7 +37,6 @@ from jax._src import state
 from jax._src import util
 from jax._src.frozen_dict import FrozenDict
 from jax._src.interpreters import partial_eval as pe
-from jax._src.lib import gpu_triton as triton_kernel_call_lib
 import jax.extend as jex
 from jax.interpreters import ad
 from jax.interpreters import batching
@@ -57,6 +56,12 @@ try:
   from jax._src.pallas.triton import gpu_info  # pyrefly: ignore[missing-module-attribute]
 except ImportError:
   gpu_info = None  # Only available in JAX 0.11.0+.
+
+try:
+  from jax._src.lib import gpu_triton as triton_kernel_call_lib
+except ImportError:
+  # GPU support is not available.
+  triton_kernel_call_lib: Any = None
 
 
 class _Stub:
@@ -748,6 +753,13 @@ def apply_heuristics(
   return updated_configs
 
 
+def _missing_gpu_support_error() -> Exception:
+  return RuntimeError(
+      "jax-triton requires JAX to be installed with GPU support. See "
+      "https://jax.readthedocs.io/en/latest/installation.html."
+  )
+
+
 def triton_kernel_call_lowering(
     make_target_func,
     ctx,
@@ -766,6 +778,9 @@ def triton_kernel_call_lowering(
     metaparams: FrozenDict[str, Any],
     has_side_effect: bool = False,
 ):
+  if triton_kernel_call_lib is None:
+    raise _missing_gpu_support_error()
+
   kernel_call_name = name
   args = list(ctx.avals_in)
   arg_dtypes = list(map(get_type_id, ctx.avals_in))
