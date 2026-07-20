@@ -27,7 +27,7 @@ import pprint
 import shutil
 import tempfile
 import types
-from typing import Any, Protocol, Self, TypeVar
+from typing import Any, Protocol, TypeVar
 import zlib
 
 import jax
@@ -50,7 +50,6 @@ import triton.compiler.compiler as tc
 import triton.experimental.gluon._runtime as gl_runtime
 import triton.experimental.gluon.language as gl
 import triton.language as tl
-import triton.runtime.autotuner as autotuner
 
 try:
   from jax._src.pallas.triton import gpu_info  # pyrefly: ignore[missing-module-attribute]
@@ -119,12 +118,10 @@ _JAX_TO_TRITON_TYPE_MAP = {
     jnp.dtype("bool"): "i1",
 }
 
-Kernel = (
-    triton.JITFunction
-    | gl_runtime.GluonJITFunction
-    | triton.runtime.Heuristics
-    | triton.runtime.Autotuner
-)
+Heuristics = triton.runtime.Heuristics
+Autotuner = triton.runtime.Autotuner
+JITFunction = triton.JITFunction | gl_runtime.GluonJITFunction
+
 
 StaticScalar = bool | int | float | np.float32
 
@@ -523,46 +520,31 @@ def _dump_kernel_artifacts(
 
 # nb: the class name is purposely distinct from Triton's JITFunction to simplify writing
 # comments and docstrings, and make them unambiguous without additional context.
+# TODO(slebedev): Find a better name, e.g. TritonFn.
 class JTJITFunction:
-  """A wrapper around Triton's JITFunction/GluonJITFunction object to isolate the rest
-  of the code from Triton's internals and provide a unified interface to the bits it needs.
+  """A unified wrapper around a Triton kernel.
 
-  Additionally, it provides a persistence layer to ensure that certain data doesn't
-  have to be re-created on each kernel launch. A user may assume that even when they
-  create a new JTJITFunction object wrapping a previously used JITFunction object,
-  the persistent data is reused.
-
-  Since we don't instantiate JTJITFunction objects the way JITFunction objects are
-  instantiated and JTJITFunction objects have short lives, we have to store the data in
-  the very JITFunction object itself. For this we use custom attributes on the
-  JITFunction object, prefixed with `_jT_`. The capitalized letter `T` breaks
-  conventions to reduce the possibility of clashing with anything else. When we're ready
-  to remove `triton_call()` in favor of the corresponding method of JTJITFunction to
-  launch a kernel similarly to how the upstream Triton does it, we'll be able to remove
-  this since JTJITFunction object will have a proper lifetime.
+  The wrapper is responsible for abstracting away low-level Triton API access,
+  kernel compilation and caching.
   """
+  autotuner: Autotuner | None = None
+  heuristics: Heuristics | None = None
+  fn: JITFunction
 
-  def __init__(
-    self,
-    fn: autotuner.Heuristics
-    | autotuner.Autotuner
-    | triton.JITFunction
-    | gl_runtime.GluonJITFunction
-    | Self,
-  ):
-    # peel off several potential wrapper layers to get to the JITFunction object
-    if isinstance(fn, JTJITFunction):
+  def __init__(self, fn: Autotuner | Heuristics | JITFunction):
+    if isinstance(fn, Autotuner):
+      self.autotuner = fn
       fn = fn.fn
-    if isinstance(fn, autotuner.Autotuner):
-      fn = fn.fn
-    if isinstance(fn, autotuner.Heuristics):
+    if isinstance(fn, Heuristics):
+      self.heuristics = fn
       fn = fn.fn
 
-    if not isinstance(fn, (triton.JITFunction, gl_runtime.GluonJITFunction)):
-      raise TypeError(
-        "`kernel` must be a Triton `JITFunction`, `GluonJITFunction`, `Heuristics`, or `Autotuner` object."
-      )
     self.fn = fn
+
+  @property
+  def name(self) -> str:
+    """Name of the underlying kernel function."""
+    return self.fn.fn.__name__
 
   @cached_property
   def arg_names(self) -> list[str]:
@@ -574,6 +556,58 @@ class JTJITFunction:
       if hasattr(self.fn, "arg_names")
       else [p.name for p in self.fn.params]
     )
+
+  def make_configs(
+      self,
+      backend_options: Mapping[str, Any],
+      metaparams: Mapping[str, Any],
+      named_args: Mapping[str, Any],
+  ) -> list[triton.Config]:
+    """Returns the list of Triton configs.
+
+    Autotuner configs that conflict with user-provided metaparams are pruned at
+    lowering time. Unlike Triton, which errors when a config key also appears
+    in metaparams, we allow it as long as the values match.
+    """
+    if self.autotuner is not None:
+      prev_early_config_prune_fn = self.autotuner.early_config_prune
+
+      def prune_configs(configs, named_args, **conf_kwargs):
+        pruned_configs = []
+        for config in configs:
+          if config.pre_hook is not None:
+            raise NotImplementedError("`pre_hook` is not supported")
+          if all(config.kwargs.get(k, v) == v for k, v in metaparams.items()):
+            pruned_configs.append(config)
+        if prev_early_config_prune_fn is not None:
+          pruned_configs = prev_early_config_prune_fn(
+              pruned_configs, named_args
+          )
+        return pruned_configs
+
+      self.autotuner.early_config_prune = prune_configs
+      self.autotuner.nargs = named_args  # pyrefly: ignore[bad-assignment]
+      configs = self.autotuner.prune_configs(metaparams)  # pyrefly: ignore[bad-argument-type]
+    else:
+      configs = [
+          triton.Config(
+              {},
+              num_warps=backend_options["num_warps"],
+              num_stages=backend_options["num_stages"],
+              num_ctas=backend_options["num_ctas"],
+          )
+      ]
+
+    if self.heuristics is not None:
+      for i, config in enumerate(configs):
+        kwargs = config.kwargs.copy()
+        for name, heuristic in self.heuristics.values.items():
+          kwargs[name] = heuristic({**named_args, **metaparams, **kwargs})
+        updated_config = copy.copy(config)
+        updated_config.kwargs = kwargs
+        configs[i] = updated_config
+
+    return configs
 
   @cached_property
   def arg_name_to_index(self) -> dict[str, int]:
@@ -703,66 +737,6 @@ class JTJITFunction:
     return kernel, spec.attrs
 
 
-def make_autotuner_configs(
-    fn: autotuner.Autotuner,
-    kwargs: Mapping[str, Any],
-    named_args: Mapping[str, Any],
-) -> list[triton.Config]:
-  """Make and prune redundant autotuner configs based on user-provided kwargs.
-
-  If any kwargs have been specified explicitly, we prune any configs that conflict.
-  The pruning serves a specific need in jax-triton's architecture: unlike native Triton
-  where autotuning happens dynamically at kernel launch, jax-triton must decide at
-  lowering/tracing time which configs to compile. If the user has already fixed certain
-  metaparameters (e.g., num_warps=4, BLOCK_SIZE=128), there's no point compiling or
-  benchmarking autotuner configs that specify different values for those same
-  parameters. The pruning eliminates those contradictory configs, reducing compilation
-  and benchmarking work.
-
-  Note that our implementation is more permissive than Triton's autotuner
-  implementation, which will throw an error if any keys match.
-  """
-  prev_early_config_prune_fn = fn.early_config_prune
-
-  def prune_configs(configs, named_args, **conf_kwargs):
-    pruned_configs = []
-    for config in configs:
-      if config.pre_hook is not None:
-        raise NotImplementedError("`pre_hook` is not supported")
-
-      # Keep the config IFF for every user-provided kwargs(k->v), the config
-      # either doesn't specify k at all, or specifies the same value v. This ensures
-      # the config is coherent with explicit user choices.
-      if all(config.kwargs.get(k, v) == v for k, v in kwargs.items()):
-        pruned_configs.append(config)
-    if prev_early_config_prune_fn is not None:
-      pruned_configs = prev_early_config_prune_fn(pruned_configs, named_args)
-    return pruned_configs
-
-  fn.early_config_prune = prune_configs
-  fn.nargs = named_args  # pyrefly: ignore[bad-assignment]
-  configs = fn.prune_configs(kwargs)  # pyrefly: ignore[bad-argument-type]
-  return configs
-
-
-def apply_heuristics(
-    fn: autotuner.Heuristics,
-    configs: list[triton.Config],
-    orig_kwargs: Mapping[str, Any],
-    named_args: Mapping[str, Any],
-) -> list[triton.Config]:
-  """Applies heuristics to the configs and returns the updated configs."""
-  updated_configs = []
-  for config in configs:
-    kwargs = config.kwargs.copy()
-    for name, heuristic in fn.values.items():
-      kwargs[name] = heuristic({**named_args, **orig_kwargs, **kwargs})
-    updated_config = copy.copy(config)
-    updated_config.kwargs = kwargs
-    updated_configs.append(updated_config)
-  return updated_configs
-
-
 def _missing_gpu_support_error() -> Exception:
   return RuntimeError(
       "jax-triton requires JAX to be installed with GPU support. See "
@@ -814,28 +788,8 @@ def triton_kernel_call_lowering(
     if name not in metaparams and name in jtfu.param_defaults:
       metaparams[name] = jtfu.param_defaults[name]
 
-  named_args = dict(unsafe_zip(fn.arg_names, args))
-
-  if isinstance(fn, autotuner.Autotuner):
-    configs = make_autotuner_configs(fn, metaparams, named_args)
-    fn = fn.fn
-  else:
-    config = triton.Config(
-        {},
-        num_warps=backend_options["num_warps"],
-        num_stages=backend_options["num_stages"],
-        num_ctas=backend_options["num_ctas"],
-    )
-    configs = [config]
-
-  if isinstance(fn, autotuner.Heuristics):
-    configs = apply_heuristics(fn, configs, metaparams, named_args)
-    fn = fn.fn
-
-  if not isinstance(fn, (triton.JITFunction, gl_runtime.GluonJITFunction)):
-    raise ValueError(
-        "`kernel` must be a Triton `JITFunction`, `GluonJITFunction`, `Heuristics` or `Autotuner`."
-    )
+  named_args = dict(unsafe_zip(jtfu.arg_names, args))
+  configs = jtfu.make_configs(backend_options, metaparams, named_args)
 
   # output2input maps output index to the original user-facing input index,
   # which matches the position in the reconstructed args list.
@@ -933,13 +887,13 @@ def triton_kernel_call_lowering(
     )
 
   if len(kernel_calls) > 1:
-    named_scalar_args = {fn.arg_names[i]: v for i, _, v in scalar_args}
+    named_scalar_args = {jtfu.arg_names[i]: v for i, _, v in scalar_args}
     input_output_aliases_with_sizes = tuple(
         (input_idx, output_idx, aval_size_bytes(ctx.avals_in[input_idx]))
         for input_idx, output_idx in input_output_aliases.items()
     )
     kernel_call = triton_kernel_call_lib.TritonAutotunedKernelCall(
-        f"{kernel_call_name} ({fn.fn.__name__}) {named_scalar_args}",
+        f"{kernel_call_name} ({jtfu.name}) {named_scalar_args}",
         [(call, str(config)) for call, config in zip(kernel_calls, configs)],
         input_output_aliases_with_sizes,
     )
@@ -1009,7 +963,7 @@ class ShapeDtype(Protocol):
 
 def triton_call(
     *args: jax.Array | StaticScalar,
-    kernel: Kernel,
+    kernel: Autotuner | Heuristics | JITFunction,
     out_shape: ShapeDtype | Sequence[ShapeDtype],
     grid: ValueOrFn[Grid],
     name: str = "",
