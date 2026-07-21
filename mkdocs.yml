@@ -45,5 +45,6 @@ plugins:
 nav:
   - "index.md"
   - "triton_call.md"
+  - "changelog.md"
 
 strict: true
