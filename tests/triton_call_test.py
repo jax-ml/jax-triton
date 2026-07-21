@@ -918,6 +918,37 @@ class TritonKernelCallTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(out, x + y)
 
+  def test_do_not_specialize(self):
+    @triton.jit(do_not_specialize=["n_elements"])
+    def add_kernel(
+        x_ptr, y_ptr, n_elements, output_ptr, BLOCK_SIZE: tl.constexpr = 8
+    ):
+      pid = tl.program_id(axis=0)
+      offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+      mask = offsets < n_elements
+      x = tl.load(x_ptr + offsets, mask=mask)
+      y = tl.load(y_ptr + offsets, mask=mask)
+      tl.store(output_ptr + offsets, x + y, mask=mask)
+
+    x = y = jnp.ones(8)
+    out_shape = jax.ShapeDtypeStruct(x.shape, x.dtype)
+    _ = jt.triton_call(
+        x, y, x.size, kernel=add_kernel, out_shape=out_shape, grid=(1,),
+    )
+
+    triton_fn = jttl.TritonFunction(add_kernel)
+    cache_size_after_first = triton_fn.compiled_kernels_cache_size
+
+    # Same ``BLOCK_SIZE``, different ``n_elements`` -- no recompilation.
+    x2 = y2 = jnp.ones(4)
+    out_shape2 = jax.ShapeDtypeStruct(x2.shape, x2.dtype)
+    _ = jt.triton_call(
+        x2, y2, x2.size, kernel=add_kernel, out_shape=out_shape2, grid=(1,),
+    )
+    self.assertEqual(
+        triton_fn.compiled_kernels_cache_size, cache_size_after_first,
+    )
+
 
 if __name__ == "__main__":
   os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"

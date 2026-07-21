@@ -436,6 +436,8 @@ class KernelSpecialization:
       objpaths: list[tuple[int, ...]],
       scalar_args: tuple[tuple[int, str, Any], ...],
       metaparams: Mapping[str, Any],
+      constexpr_param_names: frozenset[str],
+      do_not_specialize_param_names: frozenset[str],
       backend: tc.BaseBackend,
   ) -> KernelSpecialization:
     # Build the signature dict, restoring nested structure from ``in_tree``.
@@ -453,7 +455,6 @@ class KernelSpecialization:
       alignments[i] = 0
     specialize_impl = _triton.native_specialize_impl
     is_const = False
-    do_specialize = True
     specialization = [
         specialize_impl(
             backend,
@@ -462,18 +463,21 @@ class KernelSpecialization:
                 dtype=arg_dtype.removeprefix("*"),
             ),
             is_const,
-            do_specialize,
+            arg_names[objpaths[i][0]] not in do_not_specialize_param_names,
             alignment > 0,
         )
-        for arg_dtype, alignment in zip(arg_dtypes, alignments)
+        for i, (arg_dtype, alignment) in enumerate(zip(arg_dtypes, alignments))
     ]
 
     attrs: dict[tuple[int, ...], Any] = {
         objpaths[i]: backend.parse_attr(attr)
         for i, (_, attr) in enumerate(specialization)
+        if attr is not None
     }
 
-    constants = dict(metaparams)
+    constants = {
+        k: v for k, v in metaparams.items() if k in constexpr_param_names
+    }
     constants.update({
         arg_names[objpaths[i][0]]: 1
         for i, _, v in scalar_args
@@ -616,6 +620,11 @@ class TritonFunction:
     return frozenset(p.name for p in self.params if p.is_constexpr)
 
   @cached_property
+  def do_not_specialize_param_names(self) -> frozenset[str]:
+    """Names of parameters marked with ``do_not_specialize``."""
+    return frozenset(p.name for p in self.params if p.do_not_specialize)
+
+  @cached_property
   def param_defaults(self) -> dict[str, Any]:
     """Declared default values for kernel parameters."""
     return {p.name: p.default for p in self.params if p.has_default}
@@ -656,6 +665,8 @@ class TritonFunction:
         objpaths,
         scalar_args,
         metaparams,
+        self.constexpr_param_names,
+        self.do_not_specialize_param_names,
         backend,
     )
 
