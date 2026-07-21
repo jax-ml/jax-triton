@@ -242,7 +242,7 @@ class TritonKernelCallTest(parameterized.TestCase):
         BLOCK_SIZE_K=block_size_k,
         K_EXACTLY_DIVISIBLE_BY_BLOCK=k % block_size_k == 0,
     )
-    expected = jnp.matmul(x, y)
+    expected = jnp.matmul(x, y, precision="high")
     np.testing.assert_allclose(out, expected, atol=0.05, rtol=0.05)
 
   @parameterized.product(
