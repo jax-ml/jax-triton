@@ -20,6 +20,8 @@ Remember to align the itemized text with the first line of an item within a list
     check is deferred until lowering time.
 
 * Breaking changes
+  * `triton_call` now validates that all metaparams correspond to kernel
+    parameters annotated with `tl.constexpr`.
   * Removed the `jax_triton.utils` submodule together with `jax_triton.cdiv` and
     `jax_triton.next_power_of_2`. Use `triton.cdiv` and
     `triton.next_power_of_2` instead.

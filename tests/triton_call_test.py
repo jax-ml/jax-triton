@@ -918,6 +918,21 @@ class TritonKernelCallTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(out, x + y)
 
+  def test_non_constexpr_kwarg_raises(self):
+    x = jnp.arange(8, dtype=jnp.float32)
+    y = jnp.ones(8, dtype=jnp.float32)
+    out_shape = jax.ShapeDtypeStruct((8,), jnp.float32)
+
+    with self.assertRaisesRegex(TypeError, "not declared as tl.constexpr"):
+      jt.triton_call(
+          x, y,
+          kernel=add_kernel,
+          out_shape=out_shape,
+          grid=(1,),
+          BLOCK_SIZE=8,
+          n_elements=x.size,  # n_elements is not tl.constexpr
+      )
+
 
 if __name__ == "__main__":
   os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"

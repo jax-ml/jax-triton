@@ -787,6 +787,14 @@ def triton_kernel_call_lowering(
     if name not in metaparams and name in triton_fn.param_defaults:
       metaparams[name] = triton_fn.param_defaults[name]
 
+  non_constexpr_metaparams = set(metaparams) - triton_fn.constexpr_param_names
+  if non_constexpr_metaparams:
+    raise TypeError(
+        "The following kwargs are not declared as tl.constexpr in the"
+        f" kernel: {non_constexpr_metaparams}. Either annotate them with"
+        " tl.constexpr or pass them as positional arguments."
+    )
+
   # Unflatten args to reconstruct top-level arguments for heuristics.
   n = full_tree.num_leaves
   nested_args = full_tree.unflatten(args[:n])
