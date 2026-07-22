@@ -431,10 +431,10 @@ class KernelSpecialization:
   def build(
       cls,
       arg_names: list[str],
+      args: list[Any],
       arg_dtypes: list[str],
       in_tree: tree_util.PyTreeDef,
       objpaths: list[tuple[int, ...]],
-      scalar_args: tuple[tuple[int, str, Any], ...],
       metaparams: Mapping[str, Any],
       backend: tc.BaseBackend,
   ) -> KernelSpecialization:
@@ -448,9 +448,10 @@ class KernelSpecialization:
     # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
     # We assume that all arrays are aligned to 16 bytes, and Triton may use this
     # assumption, unless array args are include in the `do_not_specialize` list.
-    alignments = [16] * len(arg_dtypes)
-    for i, _, _ in scalar_args:
-      alignments[i] = 0
+    static_indices = {
+        i for i, a in enumerate(args) if not isinstance(a, core.AbstractValue)
+    }
+    alignments = [0 if i in static_indices else 16 for i in range(len(args))]
     specialize_impl = _triton.native_specialize_impl
     is_const = False
     do_specialize = True
@@ -476,8 +477,8 @@ class KernelSpecialization:
     constants = dict(metaparams)
     constants.update({
         arg_names[objpaths[i][0]]: 1
-        for i, _, v in scalar_args
-        if v == 1 and len(objpaths[i]) == 1
+        for i in static_indices
+        if args[i] == 1 and len(objpaths[i]) == 1
     })
     for constant in constants:
       signature[constant] = "constexpr"
@@ -632,8 +633,8 @@ class TritonFunction:
       self,
       make_target_func,
       platform,
+      args,
       arg_dtypes,
-      scalar_args,
       *,
       in_tree: tree_util.PyTreeDef,
       objpaths: list[tuple[int, ...]],
@@ -651,10 +652,10 @@ class TritonFunction:
 
     spec = KernelSpecialization.build(
         self.arg_names,
+        args,
         arg_dtypes,
         in_tree,
         objpaths,
-        scalar_args,
         metaparams,
         backend,
     )
@@ -740,7 +741,6 @@ def triton_kernel_call_lowering(
     ctx,
     *array_args: mlir.Value,
     fn,
-    scalar_args: tuple[tuple[int, str, Any], ...],
     name,
     in_tree: tree_util.PyTreeDef,
     out_shapes,
@@ -757,11 +757,19 @@ def triton_kernel_call_lowering(
     raise _missing_gpu_support_error()
 
   kernel_call_name = name
-  args = list(ctx.avals_in)
-  arg_dtypes = list(map(get_type_id, ctx.avals_in))
-  for idx, dtype, v in scalar_args:
-    args.insert(idx, v)
-    arg_dtypes.insert(idx, dtype)
+
+  # Reconstruct the full args list. Scalar values are taken from the
+  # ``PyTreeDef``, avals for array arguments -- from ``ctx.avals_in``.
+  in_avals_nested = in_tree.unflatten(ctx.avals_in)
+  flat_in_avals_with_path, full_tree = tree_util.tree_flatten_with_path(
+      in_avals_nested, is_leaf=lambda x: isinstance(x, _StaticArg)
+  )
+  args = [
+      a.value if isinstance(a, _StaticArg) else a
+      for _, a in flat_in_avals_with_path
+  ]
+  arg_dtypes = list(map(get_type_id, args))
+
   # Extract only the output avals not referenced in the input_output_aliases mapping.
   strictly_out_avals = [
     aval
@@ -779,7 +787,11 @@ def triton_kernel_call_lowering(
     if name not in metaparams and name in triton_fn.param_defaults:
       metaparams[name] = triton_fn.param_defaults[name]
 
-  named_args = dict(unsafe_zip(triton_fn.arg_names, args))
+  # Unflatten args to reconstruct top-level arguments for heuristics.
+  n = full_tree.num_leaves
+  nested_args = full_tree.unflatten(args[:n])
+  top_level_args = list(nested_args) + args[n:]
+  named_args = dict(unsafe_zip(triton_fn.arg_names, top_level_args))
   configs = triton_fn.make_configs(backend_options, metaparams, named_args)
 
   # output2input maps output index to the original user-facing input index,
@@ -790,26 +802,22 @@ def triton_kernel_call_lowering(
 
   # Translate input_output_aliases from user-facing, indexing the original
   # ``*args``, to indices into ``array_args``.
+  static_indices = {
+      i for i, a in enumerate(args) if not isinstance(a, core.AbstractValue)
+  }
   input_output_aliases = FrozenDict({
-      k - sum(i < k for i, _, _ in scalar_args): v
+      k - sum(i < k for i in static_indices): v
       for k, v in input_output_aliases.items()
   })
 
-  outputs_offset = len(ctx.avals_in) + len(scalar_args)
-
   # Map flat indices to Triton ObjPath tuples.
-  nested = in_tree.unflatten(range(in_tree.num_leaves))
-  objpaths = [
-      tuple(k.idx for k in kp)
-      for kp, _ in tree_util.tree_leaves_with_path(nested)
-  ]
-  # Outputs are appended as flat params after the input tree.
-  num_top = len(nested)
-  for j in range(len(arg_dtypes) - in_tree.num_leaves):
-    objpaths.append((num_top + j,))
+  objpaths = [tuple(k.idx for k in kp) for kp, _ in flat_in_avals_with_path]
+  # Outputs are appended after the inputs.
+  for j in range(len(arg_dtypes) - n):
+    objpaths.append((len(in_avals_nested) + j,))
 
   equal_to_1 = {
-      i for i, _, v in scalar_args if v == 1 and len(objpaths[i]) == 1
+      i for i in static_indices if args[i] == 1 and len(objpaths[i]) == 1
   }
 
   kernel_calls = []
@@ -824,9 +832,7 @@ def triton_kernel_call_lowering(
     # zeroed_params_with_sizes is a dict output_arg_idx -> aval_size_bytes
     # config_zeroed_outputs contains output ordinal indices
     zeroed_params_with_sizes = {
-        output2input.get(i, i + outputs_offset): aval_size_bytes(
-            ctx.avals_out[i]
-        )
+        output2input.get(i, i + n): aval_size_bytes(ctx.avals_out[i])
         for i in sorted(config_zeroed_outputs)
     }
 
@@ -840,9 +846,9 @@ def triton_kernel_call_lowering(
     kernel, specialization_attr = triton_fn.get_or_create_triton_kernel(
         make_target_func,
         ctx.module_context.platforms[0],
+        args,
         arg_dtypes,
-        scalar_args,
-        in_tree=in_tree,
+        in_tree=full_tree,
         objpaths=objpaths,
         compute_capability=compute_capability,
         backend_options=config_backend_options,
@@ -878,13 +884,17 @@ def triton_kernel_call_lowering(
     )
 
   if len(kernel_calls) > 1:
-    named_scalar_args = {triton_fn.arg_names[i]: v for i, _, v in scalar_args}
+    named_static_args = {}
+    for i in static_indices:
+      arg_name = triton_fn.arg_names[objpaths[i][0]]
+      path_str = "".join(f"[{idx}]" for idx in objpaths[i][1:])
+      named_static_args[f"{arg_name}{path_str}"] = args[i]
     input_output_aliases_with_sizes = tuple(
         (input_idx, output_idx, aval_size_bytes(ctx.avals_in[input_idx]))
         for input_idx, output_idx in input_output_aliases.items()
     )
     kernel_call = triton_kernel_call_lib.TritonAutotunedKernelCall(
-        f"{kernel_call_name} ({triton_fn.name}) {named_scalar_args}",
+        f"{kernel_call_name} ({triton_fn.name}) {named_static_args}",
         [(call, str(config)) for call, config in zip(kernel_calls, configs)],
         input_output_aliases_with_sizes,
     )
@@ -950,6 +960,14 @@ class ShapeDtype(Protocol):
   @property
   def dtype(self) -> np.dtype:
     ...
+
+
+@tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class _StaticArg:
+  """Wraps a static kernel argument so it is baked into the ``PyTreeDef``."""
+
+  value: Any = dataclasses.field(metadata=dict(static=True))
 
 
 def triton_call(
@@ -1094,18 +1112,15 @@ def triton_call(
   out_shape = tree_util.tree_map(
       lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), out_shape
   )
-  flat_args, in_tree = tree_util.tree_flatten(args)
-  flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
 
-  array_args = []
-  scalar_args = []
-  for i, arg in enumerate(flat_args):
-    if isinstance(arg, (bool, int, float)):
-      scalar_args.append((i, get_type_id(arg), arg))
-    elif isinstance(arg, np.float32):
-      scalar_args.append((i, get_type_id(arg), float(arg)))
-    else:
-      array_args.append(arg)
+  # TODO(slebedev): Drop np.ndarray once all callers are migrated.
+  _is_scalar = lambda a: not isinstance(a, (jax.Array, np.ndarray))
+  args = tree_util.tree_map(
+      lambda a: _StaticArg(a) if _is_scalar(a) else a,
+      args,
+  )
+  array_args, in_tree = tree_util.tree_flatten(args)
+  flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
 
   if input_output_aliases is None:
     input_output_aliases = {}
@@ -1113,7 +1128,6 @@ def triton_call(
   out_flat = triton_kernel_call_p.bind(
       *array_args,
       fn=kernel,
-      scalar_args=tuple(scalar_args),
       name=name,
       in_tree=in_tree,
       out_shapes=tuple(flat_out_shapes),
