@@ -197,7 +197,6 @@ def create_random_inputs(shape1, shape2=None, *, dtype="float32"):
   return x, y
 
 
-
 class TritonKernelCallTest(parameterized.TestCase):
 
   @parameterized.product(
@@ -917,6 +916,30 @@ class TritonKernelCallTest(parameterized.TestCase):
         BLOCK_SIZE=8,
     )
     np.testing.assert_allclose(out, x + y)
+
+  def test_cost_estimate(self):
+    x, y = create_random_inputs([8])
+    cost = {"flops": 123, "bytes_accessed": 456}
+
+    def add_with_cost(x, y):
+      default_grid = lambda meta: triton.cdiv(x.size, meta["BLOCK_SIZE"])
+      return jt.triton_call(
+          x,
+          y,
+          x.size,
+          kernel=add_kernel,
+          out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+          grid=default_grid,
+          BLOCK_SIZE=8,
+          cost_estimate=cost,
+      )
+
+    hlo = jax.jit(add_with_cost).lower(x, y).compiler_ir("hlo").as_hlo_text()
+    self.assertIn("cost_estimate_json", hlo)
+    self.assertRegex(hlo, r"cost_estimate_json\s*=\s*.*flops\\22\s*:\s*123")
+    self.assertRegex(
+        hlo, r"cost_estimate_json\s*=\s*.*bytes_accessed\\22\s*:\s*456"
+    )
 
 
 if __name__ == "__main__":

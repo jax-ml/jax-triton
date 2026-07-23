@@ -22,12 +22,13 @@ import dataclasses
 import functools
 from functools import cached_property
 import inspect
+import json
 import os
 import pprint
 import shutil
 import tempfile
 import types
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol, Self, TypeVar, TypedDict
 import zlib
 
 import jax
@@ -87,6 +88,12 @@ except ImportError:
 if "TRITON_CACHE_DIR" in os.environ:
   del os.environ["TRITON_CACHE_DIR"]
 _JAX_TRITON_DUMP_DIR = os.environ.get("JAX_TRITON_DUMP_DIR")
+
+
+class CostEstimate(TypedDict, total=False):
+  flops: int
+  bytes_accessed: int
+
 
 _HSACO_TMPDIR = tempfile.TemporaryDirectory(delete=True)
 
@@ -752,6 +759,7 @@ def triton_kernel_call_lowering(
     serialized_metadata,
     metaparams: FrozenDict[str, Any],
     has_side_effect: bool = False,
+    cost_estimate: CostEstimate | None = None,
 ):
   if triton_kernel_call_lib is None:
     raise _missing_gpu_support_error()
@@ -909,7 +917,10 @@ def triton_kernel_call_lowering(
       operand_output_aliases=input_output_aliases,
       has_side_effect=has_side_effect,
   )
-  return rule(ctx, *array_args, opaque=zlib.compress(call_proto))
+  kwargs: dict[str, Any] = {"opaque": zlib.compress(call_proto)}
+  if cost_estimate is not None:
+    kwargs["cost_estimate_json"] = json.dumps(dict(cost_estimate))
+  return rule(ctx, *array_args, **kwargs)
 
 
 mlir.register_lowering(
@@ -986,6 +997,7 @@ def triton_call(
     zeroed_outputs: ValueOrFn[Sequence[int]] = (),
     debug: bool = False,
     serialized_metadata: bytes = b"",
+    cost_estimate: CostEstimate | None = None,
     has_side_effect: bool = False,
     **metaparams: Any,
 ) -> Any:
@@ -1077,11 +1089,14 @@ def triton_call(
       It is an error to specify the same option in both.
     serialized_metadata: Arbitrary metadata that will be added into the
       serialized kernel call.
+    cost_estimate: An estimate of the number of floating point operations
+      ("flops") and memory bytes accessed ("bytes_accessed") by this kernel
+      invocation. This is used by profiling tools to compute the performance
+      metrics of this custom call (e.g. FLOPs/s and bandwidth).
     has_side_effect: Whether the Triton kernel has side effects.
     **metaparams: ``constexpr`` arguments for the Triton kernel. Missing
-      constexpr arguments are filled from the kernel's declared defaults.
-      Also provided to ``grid`` and ``zeroed_outputs`` when either is a
-      function.
+      constexpr arguments are filled from the kernel's declared defaults. Also
+      provided to ``grid`` and ``zeroed_outputs`` when either is a function.
 
   Returns:
     Outputs from the Triton kernel.
@@ -1137,6 +1152,7 @@ def triton_call(
       input_output_aliases=FrozenDict(input_output_aliases),
       zeroed_outputs=zeroed_outputs,
       serialized_metadata=serialized_metadata,
+      cost_estimate=FrozenDict(cost_estimate) if cost_estimate else None,
       has_side_effect=has_side_effect,
       metaparams=FrozenDict(metaparams),
   )
