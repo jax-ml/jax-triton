@@ -18,6 +18,8 @@ Remember to align the itemized text with the first line of an item within a list
   * Missing metaparams are now filled in from the kernel parameter defaults.
   * `jax_triton` is now importable on hosts without GPU support; the GPU support
     check is deferred until lowering time.
+  * Exposed the custom call name `CUSTOM_CALL_TARGET_NAME`, which can be used
+    with `disabled_checks` in `jax.export.export` without hand-coding this name.
 
 * Breaking changes
   * Removed the `jax_triton.utils` submodule together with `jax_triton.cdiv` and

@@ -28,7 +28,7 @@ import pprint
 import shutil
 import tempfile
 import types
-from typing import Any, Protocol, Self, TypeVar, TypedDict
+from typing import Any, Final, Protocol, TypeVar, TypedDict
 import zlib
 
 import jax
@@ -93,6 +93,8 @@ _JAX_TRITON_DUMP_DIR = os.environ.get("JAX_TRITON_DUMP_DIR")
 class CostEstimate(TypedDict, total=False):
   flops: int
   bytes_accessed: int
+
+CUSTOM_CALL_TARGET_NAME: Final[str] = "triton_kernel_call_ffi"
 
 
 _HSACO_TMPDIR = tempfile.TemporaryDirectory(delete=True)
@@ -912,7 +914,7 @@ def triton_kernel_call_lowering(
   call_proto = kernel_call.to_proto(kernel_call_name, serialized_metadata)
 
   rule = jax.ffi.ffi_lowering(
-      "triton_kernel_call_ffi",
+      CUSTOM_CALL_TARGET_NAME,
       api_version=4,
       operand_output_aliases=input_output_aliases,
       has_side_effect=has_side_effect,
