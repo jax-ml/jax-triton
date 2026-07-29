@@ -16,6 +16,10 @@ Remember to align the itemized text with the first line of an item within a list
   * Added a `has_side_effect` argument to `triton_call` to prevent dead-code
     elimination (DCE) at the XLA level.
   * Missing metaparams are now filled in from the kernel parameter defaults.
+  * `triton_call` now accepts kernel operands (arrays and scalars) as keyword
+    arguments, matched by kernel parameter name. Keywords naming `constexpr`
+    parameters, or names that are not kernel parameters, are still treated as
+    metaparams.
   * `jax_triton` is now importable on hosts without GPU support; the GPU support
     check is deferred until lowering time.
   * Exposed the custom call name `CUSTOM_CALL_TARGET_NAME`, which can be used
@@ -30,6 +34,9 @@ Remember to align the itemized text with the first line of an item within a list
   * When using `input_output_aliases`, aliased buffers must no longer be
     declared as implicit outputs; the aliased input buffer is used directly. A
     clearer error is now raised for the old calling convention.
+  * `triton_call` keyword arguments that name a non-`constexpr` kernel
+    parameter are now treated as operands (subject to scalar-static/array
+    separation), not metaparams.
 
 * Bug fixes
   * Fixed `input_output_aliases` indexing when positional scalar arguments

@@ -296,6 +296,103 @@ class TritonKernelCallTest(parameterized.TestCase):
     x = jnp.array([1.0])
     np.testing.assert_allclose(add_scalar(x, scalar), x + scalar)
 
+  def test_kwarg_scalar_operand_stays_static(self):
+    x = jnp.arange(8, dtype=jnp.float32)
+    y = jnp.ones(8, dtype=jnp.float32)
+    call = lambda x, y: jt.triton_call(
+        x,
+        y_ptr=y,
+        n_elements=x.size,
+        kernel=add_kernel,
+        out_shape=x,
+        grid=(1,),
+        BLOCK_SIZE=8,
+    )
+
+    # Scalar kwargs must stay static and not leak into metaparams.
+    jaxpr = jax.make_jaxpr(call)(x, y)
+    (eqn,) = [e for e in jaxpr.eqns if e.primitive == jttl.triton_kernel_call_p]
+    self.assertLen(eqn.invars, 2)
+    self.assertNotIn("n_elements", eqn.params["metaparams"])
+    self.assertIn("BLOCK_SIZE", eqn.params["metaparams"])
+
+  def test_kwarg_operands_out_of_order(self):
+    x = jnp.arange(8, dtype=jnp.float32)
+    y = jnp.ones(8, dtype=jnp.float32)
+    # Kwargs out of declaration order; lowering must restore it.
+    out = jt.triton_call(
+        x,
+        n_elements=x.size,
+        y_ptr=y,
+        kernel=add_kernel,
+        out_shape=x,
+        grid=(1,),
+        BLOCK_SIZE=8,
+    )
+    np.testing.assert_allclose(out, x + y)
+
+  def test_kwarg_operands_with_aliasing(self):
+    @triton.jit
+    def inc_inplace_kernel(n_elements, x_in_out_ptr, BLOCK_SIZE: tl.constexpr):
+      pid = tl.program_id(axis=0)
+      block_start = pid * BLOCK_SIZE
+      offsets = block_start + tl.arange(0, BLOCK_SIZE)
+      mask = offsets < n_elements
+      x = tl.load(x_in_out_ptr + offsets, mask=mask)
+      output = x + 1
+      tl.store(x_in_out_ptr + offsets, output, mask=mask)
+
+    size = 8
+    x = random.normal(random.PRNGKey(0), [size])
+    expected = x + 1
+    out = jt.triton_call(
+        x_in_out_ptr=x,
+        n_elements=size,
+        kernel=inc_inplace_kernel,
+        out_shape=x,
+        grid=(size,),
+        BLOCK_SIZE=1,
+        input_output_aliases={1: 0},
+    )
+    np.testing.assert_array_equal(out, expected)
+
+  def test_kwarg_operand_conflict_raises(self):
+    x = jnp.arange(8, dtype=jnp.float32)
+    with self.assertRaisesRegex(
+        TypeError, "multiple values for argument 'x_ptr'"
+    ):
+      jt.triton_call(
+          x,
+          x_ptr=x,
+          kernel=add_kernel,
+          out_shape=x,
+          grid=(1,),
+          BLOCK_SIZE=8,
+      )
+
+  def test_constexpr_before_operand(self):
+    @triton.jit
+    def kernel(x_ptr, BLOCK_SIZE: tl.constexpr, y_ptr, n_elements, output_ptr):
+      pid = tl.program_id(axis=0)
+      offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+      mask = offsets < n_elements
+      x = tl.load(x_ptr + offsets, mask=mask)
+      y = tl.load(y_ptr + offsets, mask=mask)
+      tl.store(output_ptr + offsets, x + y, mask=mask)
+
+    x = jnp.arange(8, dtype=jnp.float32)
+    y = jnp.ones(8, dtype=jnp.float32)
+    out = jt.triton_call(
+        x,
+        y_ptr=y,
+        n_elements=x.size,
+        kernel=kernel,
+        out_shape=x,
+        grid=(1,),
+        BLOCK_SIZE=8,
+    )
+    np.testing.assert_allclose(out, x + y)
+
   def test_explicit_compute_capability(self):
     scalar = np.float32(8)
 
