@@ -29,15 +29,18 @@ import shutil
 import tempfile
 import types
 from typing import Any, Final, Protocol, TypeVar, TypedDict
+import warnings
 import zlib
 
 import jax
 from jax import tree_util
+from jax._src import config
 from jax._src import core
 from jax._src import state
 from jax._src import util
 from jax._src.frozen_dict import FrozenDict
 from jax._src.interpreters import partial_eval as pe
+from jax._src.state import discharge as state_discharge
 import jax.extend as jex
 from jax.interpreters import ad
 from jax.interpreters import batching
@@ -197,17 +200,39 @@ def to_python_type(arg: Any) -> Any:
 
 triton_kernel_call_p = jex.core.Primitive("triton_kernel_call")
 triton_kernel_call_p.multiple_results = True
-triton_kernel_call_p.def_impl(
-    functools.partial(xla.apply_primitive, triton_kernel_call_p)
-)
 
 
-@triton_kernel_call_p.def_abstract_eval
-def triton_kernel_call_abstract_eval(*_, out_shapes, **__):
-  return [
-      core.ShapedArray(out_shape.shape, out_shape.dtype)
-      for out_shape in out_shapes
-  ]
+def _is_ref(x: Any) -> bool:
+  try:
+    return isinstance(core.typeof(x), state.AbstractRef)
+  except TypeError:
+    return False
+
+
+def _triton_kernel_call_impl(*args, **params):
+  if any(_is_ref(a) for a in args):
+    # Ensure the jit is enabled to trigger the discharge.
+    with config.disable_jit(False):
+      return jax.jit(functools.partial(triton_kernel_call_p.bind, **params))(
+          *args
+      )
+  return xla.apply_primitive(triton_kernel_call_p, *args, **params)
+
+
+triton_kernel_call_p.def_impl(_triton_kernel_call_impl)
+
+
+@triton_kernel_call_p.def_effectful_abstract_eval
+def triton_kernel_call_abstract_eval(*in_avals, out_shapes, **__):
+  # We emit a read and write effect for each ref input, as there is no easy
+  # way to tell whether a ref is read from/written to in the kernel.
+  effects = {
+      effect(i)
+      for i, aval in enumerate(in_avals)
+      if isinstance(aval, state.AbstractRef)
+      for effect in (state.ReadEffect, state.WriteEffect)
+  }
+  return [core.ShapedArray(s.shape, s.dtype) for s in out_shapes], effects
 
 
 def _triton_kernel_call_dce_rule(
@@ -217,6 +242,63 @@ def _triton_kernel_call_dce_rule(
 
 
 pe.dce_rules[triton_kernel_call_p] = _triton_kernel_call_dce_rule
+
+
+def _triton_kernel_call_discharge_rule(
+    ctx: state_discharge.DischargeContext,
+    *args,
+    in_tree,
+    out_shapes,
+    input_output_aliases,
+    **params,
+):
+  if input_output_aliases:
+    raise NotImplementedError(
+        "input_output_aliases cannot be combined with ref arguments"
+    )
+
+  ref_indices = []
+  arr_idx = op_idx = -1
+  for _, leaf in tree_util.tree_leaves_with_path(
+      in_tree.unflatten(ctx.in_avals),
+      is_leaf=lambda a: isinstance(a, (_StaticArg, _OutputPlaceholder)),
+  ):
+    if isinstance(leaf, _OutputPlaceholder):
+      continue
+    op_idx += 1
+    if isinstance(leaf, _StaticArg):
+      continue
+    arr_idx += 1
+    if isinstance(leaf, state.AbstractRef):
+      ref_indices.append((arr_idx, op_idx))
+
+  # Turn each ref into an input-output alias: append an extra output and alias
+  # it to the corresponding operand.
+  num_out_orig = len(out_shapes)
+  new_out_shapes = list(out_shapes)
+  new_aliases: dict[int, int] = {}
+  for out_idx, (arr_idx, op_idx) in enumerate(ref_indices):
+    new_out_shapes.append(
+        jax.ShapeDtypeStruct.like(ctx.in_avals[arr_idx].inner_aval)
+    )
+    new_aliases[op_idx] = num_out_orig + out_idx
+  res = triton_kernel_call_p.bind(
+      *args,
+      in_tree=in_tree,
+      out_shapes=tuple(new_out_shapes),
+      input_output_aliases=FrozenDict(new_aliases),
+      **params,
+  )
+  ans, updated_refs = util.split_list(res, [num_out_orig])
+  new_invals: list[Any] = [None] * len(ctx.in_avals)
+  for out_idx, (arr_idx, _) in enumerate(ref_indices):
+    new_invals[arr_idx] = updated_refs[out_idx]
+  return new_invals, ans
+
+
+state_discharge.register_discharge_rule(triton_kernel_call_p)(
+    _triton_kernel_call_discharge_rule
+)
 
 
 def aval_size_bytes(aval):
@@ -969,7 +1051,7 @@ class _StaticArg:
   @classmethod
   def maybe_wrap(cls, x: Any) -> _StaticArg | Any:
     # TODO(slebedev): Drop np.ndarray once all callers are migrated.
-    if isinstance(x, (jax.Array, np.ndarray)):
+    if isinstance(x, (jax.Array, np.ndarray)) or _is_ref(x):
       return x
     return cls(x)
 
@@ -1054,10 +1136,13 @@ def triton_call(
   ```
 
   Args:
-    *args: Positional operands for the Triton kernel. Arrays are passed as
-      runtime buffers; non-array scalars are baked in as static (specialization)
-      values. An argument bound to a ``constexpr`` parameter becomes a
-      metaparam.
+    *args: Positional operands for the Triton kernel. Array and ``Ref``
+      arguments are passed as runtime buffers in their positional order before
+      any ``out_shape`` pointers. ``Ref`` arguments, created via ``jax.new_ref``
+      are read-write buffers that the kernel mutates in-place. Unlike
+      ``input_output_aliases``, they should not be included in ``out_shape``.
+      Non-array scalars are baked in as static (specialization) values, and any
+      argument bound to a ``constexpr`` parameter becomes a metaparam.
     kernel: A Triton kernel (e.g. a function decorated with `triton.jit`). All
       static values should be annotated with `triton.language.constexpr` or
       `triton.experimental.gluon.language.constexpr`.
@@ -1072,18 +1157,19 @@ def triton_call(
       tuple of up to 3 integers.
     name: A name for the kernel call.
     compute_capability: The GPU compute capability to compile for.
-    input_output_aliases: A dictionary mapping input argument indices to output
-      indices. Providing a mapping will alias the corresponding buffers. Input
-      indices refer to the flattened non-``constexpr`` operands in kernel
-      parameter declaration order (whether passed positionally or as keyword
-      arguments). If operands contain nested tuples, the indices correspond to
-      the flattened leaves. Output indices correspond to the flattened
-      ``out_shape``.
-    zeroed_outputs: A sequence of indices into the flattened ``out_shape``, or a
-      function returning such a sequence, for outputs that should be zeroed
-      before the kernel is launched. Note that this also supports zeroing
-      input-output (i.e. aliased through ``input_output_aliases``) arguments
-      that should be treated as outputs in this argument.
+    input_output_aliases: Deprecated. A dictionary mapping input argument
+      indices to output indices. Providing a mapping will alias the
+      corresponding buffers. Input indices refer to the flattened
+      non-``constexpr`` operands in kernel parameter declaration order (whether
+      passed positionally or as keyword arguments). If operands contain nested
+      tuples, the indices correspond to the flattened leaves. Output indices
+      correspond to the flattened ``out_shape``.
+    zeroed_outputs: Deprecated. A sequence of indices into the flattened
+      ``out_shape``, or a function returning such a sequence, for outputs that
+      should be zeroed before the kernel is launched. Note that this also
+      supports zeroing input-output (i.e. aliased through
+      ``input_output_aliases``) arguments that should be treated as outputs in
+      this argument.
     num_warps: The number of warps used to execute the Triton kernel.
     num_stages: The number of stages emitted by the Triton compiler.
     num_ctas: The size of thread blocks per cluster to be used on GPUs with
@@ -1102,12 +1188,13 @@ def triton_call(
     has_side_effect: Whether the Triton kernel has side effects.
     **kwargs: Keyword arguments for the Triton kernel. A keyword that names a
       non-``constexpr`` kernel parameter is treated as an operand and is subject
-      to the same scalar-static/array separation as positional ``*args``. All
-      other keywords -- ``constexpr`` parameters and names that are not kernel
-      parameters -- are treated as metaparams. Missing constexpr arguments are
-      filled from the kernel's declared defaults. Metaparams are also provided
-      to ``grid`` and ``zeroed_outputs`` when either is a function. A misspelled
-      operand name silently becomes a metaparam rather than raising an error.
+      to the same scalar-static/runtime buffer separation as positional
+      ``*args``. All other keywords -- ``constexpr`` parameters and names that
+      are not kernel parameters -- are treated as metaparams. Missing constexpr
+      arguments are filled from the kernel's declared defaults. Metaparams are
+      also provided to ``grid`` and ``zeroed_outputs`` when either is a
+      function. A misspelled operand name silently becomes a metaparam rather
+      than raising an error.
 
   Returns:
     Outputs from the Triton kernel.
@@ -1159,16 +1246,46 @@ def triton_call(
   bound = triton_fn.signature.bind_partial(*args, **kernel_kwargs)
 
   operands: dict[str, Any] = {}
+  has_refs = False
   for p_name, value in bound.arguments.items():
     if p_name in constexpr_names:
       metaparams[p_name] = value
-    else:
-      operands[p_name] = tree_util.tree_map(_StaticArg.maybe_wrap, value)
+      continue
+    leaves = tree_util.tree_leaves(
+        value, is_leaf=lambda a: isinstance(a, state.TransformedRef)
+    )
+    if any(isinstance(leaf, state.TransformedRef) for leaf in leaves):
+      raise NotImplementedError(
+          "TransformedRefs are not supported as triton_call arguments"
+      )
+    has_refs = has_refs or any(map(_is_ref, leaves))
+    operands[p_name] = tree_util.tree_map(_StaticArg.maybe_wrap, value)
 
   flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
 
   if input_output_aliases is None:
     input_output_aliases = {}
+  elif input_output_aliases:
+    warnings.warn(
+        "input_output_aliases is deprecated. Pass inputs you want to alias as"
+        " Ref arguments instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+    if has_refs:
+      raise ValueError(
+          "input_output_aliases cannot be combined with Ref arguments. Refs"
+          " express input/output aliasing implicitly"
+      )
+
+  if zeroed_outputs if callable(zeroed_outputs) else len(zeroed_outputs):
+    warnings.warn(
+        "zeroed_outputs is deprecated. Zero the buffer explicitly and pass"
+        " it as a Ref argument instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
   # Aliased outputs reuse their input buffer; unaliased outputs are matched
   # to the kernel parameters not supplied by the caller.

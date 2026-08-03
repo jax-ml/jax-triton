@@ -467,6 +467,78 @@ class TritonKernelCallTest(parameterized.TestCase):
     )
     np.testing.assert_array_equal(out, expected)
 
+  @parameterized.parameters(False, True)
+  def test_ref_simple(self, jit):
+    size = 8
+    x, _ = create_random_inputs([size])
+    x_ref = jax.new_ref(x)
+
+    def f(x_ref):
+      return jt.triton_call(
+          x_ref, size, kernel=inc_inplace_kernel, out_shape=(),
+          grid=(size,), BLOCK_SIZE=1)
+
+    if jit:
+      f = jax.jit(f)
+    self.assertEqual(f(x_ref), ())
+    np.testing.assert_array_equal(x_ref[...], x + 1)
+
+  def test_ref_scalar_before_ref(self):
+    @triton.jit
+    def kernel(n_elements, x_in_out_ptr, BLOCK_SIZE: tl.constexpr):
+      offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+      mask = offsets < n_elements
+      x = tl.load(x_in_out_ptr + offsets, mask=mask)
+      tl.store(x_in_out_ptr + offsets, x + 1, mask=mask)
+
+    size = 8
+    x, _ = create_random_inputs([size])
+    x_ref = jax.new_ref(x)
+    jt.triton_call(
+        size, x_ref, kernel=kernel, out_shape=(), grid=(size,), BLOCK_SIZE=1
+    )
+    np.testing.assert_array_equal(x_ref[...], x + 1)
+
+  def test_ref_with_allocated_output(self):
+    @triton.jit
+    def kernel(x_ptr, acc_ptr, n_elements, out_ptr, BLOCK_SIZE: tl.constexpr):
+      offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+      mask = offsets < n_elements
+      x = tl.load(x_ptr + offsets, mask=mask)
+      acc = tl.load(acc_ptr + offsets, mask=mask)
+      tl.store(out_ptr + offsets, x + acc, mask=mask)
+      tl.store(acc_ptr + offsets, acc + x, mask=mask)
+
+    size = 8
+    x, acc = create_random_inputs([size])
+    acc_ref = jax.new_ref(acc)
+    out = jt.triton_call(
+        x,
+        acc_ref,
+        size,
+        kernel=kernel,
+        out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+        grid=(size,),
+        BLOCK_SIZE=1,
+    )
+    np.testing.assert_array_equal(out, x + acc)
+    np.testing.assert_array_equal(acc_ref[...], acc + x)
+
+  def test_ref_rejects_input_output_aliases(self):
+    size = 8
+    x, _ = create_random_inputs([size])
+    x_ref = jax.new_ref(x)
+    with self.assertRaisesRegex(ValueError, "cannot be combined with Ref"):
+      jt.triton_call(
+          x_ref,
+          size,
+          kernel=inc_inplace_kernel,
+          out_shape=(),
+          grid=(size,),
+          BLOCK_SIZE=1,
+          input_output_aliases={0: 0},
+      )
+
   @parameterized.product(with_donation=[False, True], first_is_inout=[False, True])
   def test_input_output_aliasing_2outputs(self, with_donation, first_is_inout):
     # this tests aliasing correctness in case of 4 buffer parameters two of which

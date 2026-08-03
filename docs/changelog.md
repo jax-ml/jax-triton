@@ -24,6 +24,9 @@ Remember to align the itemized text with the first line of an item within a list
     check is deferred until lowering time.
   * Exposed the custom call name `CUSTOM_CALL_TARGET_NAME`, which can be used
     with `disabled_checks` in `jax.export.export` without hand-coding this name.
+  * `triton_call` now accepts `Ref` arguments for in-place buffer updates,
+    replacing the `input_output_aliases` and `zeroed_outputs` arguments,
+    which are now deprecated.
 
 * Breaking changes
   * Removed the `jax_triton.utils` submodule together with `jax_triton.cdiv` and
