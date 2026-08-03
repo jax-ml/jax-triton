@@ -54,7 +54,9 @@ def add_kernel(x_ptr, y_ptr, n_elements, output_ptr, BLOCK_SIZE: tl.constexpr):
 
 
 @triton.jit
-def add_inplace_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr, INPLACE_Y: tl.constexpr):
+def add_inplace_kernel(
+    x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr, INPLACE_Y: tl.constexpr
+):
   pid = tl.program_id(axis=0)
   block_start = pid * BLOCK_SIZE
   offsets = block_start + tl.arange(0, BLOCK_SIZE)
@@ -71,8 +73,11 @@ def add_inplace_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr, INPLA
 def add(x, y, *, kernel=add_kernel, **kwargs):
   if kernel is add_kernel or kernel is add_inplace_kernel:
     kwargs.setdefault("BLOCK_SIZE", 8)
-  if kernel is add_inplace_kernel or (  # handling autotuner & possibly other wrappers
-    hasattr(kernel, "fn") and kernel.fn is add_inplace_kernel
+  if (
+      kernel is add_inplace_kernel
+      or (  # handling autotuner & possibly other wrappers
+          hasattr(kernel, "fn") and kernel.fn is add_inplace_kernel
+      )
   ):
     kwargs.setdefault("INPLACE_Y", False)
 
@@ -420,13 +425,13 @@ class TritonKernelCallTest(parameterized.TestCase):
     expected = x + 1
 
     launcher = lambda x: jt.triton_call(
-      x,
-      size,
-      kernel=inc_inplace_kernel,
-      out_shape=x,
-      grid=(8,),
-      BLOCK_SIZE=1,
-      input_output_aliases={0: 0},
+        x,
+        size,
+        kernel=inc_inplace_kernel,
+        out_shape=x,
+        grid=(8,),
+        BLOCK_SIZE=1,
+        input_output_aliases={0: 0},
     )
 
     if with_donation:
@@ -467,7 +472,9 @@ class TritonKernelCallTest(parameterized.TestCase):
     )
     np.testing.assert_array_equal(out, expected)
 
-  @parameterized.product(with_donation=[False, True], first_is_inout=[False, True])
+  @parameterized.product(
+      with_donation=[False, True], first_is_inout=[False, True]
+  )
   def test_input_output_aliasing_2outputs(self, with_donation, first_is_inout):
     # this tests aliasing correctness in case of 4 buffer parameters two of which
     # (0 and 2, or 1 and 3) are in-out params. When first_is_inout=True, buffers 0 and 2
@@ -476,16 +483,18 @@ class TritonKernelCallTest(parameterized.TestCase):
 
     @triton.jit
     def weird_kernel(
-      ptr0,
-      ptr1,
-      ptr2,
-      ptr3,
-      n_elements,
-      BLOCK_SIZE: tl.constexpr,
-      FIRST_INOUT: tl.constexpr,
+        ptr0,
+        ptr1,
+        ptr2,
+        ptr3,
+        n_elements,
+        BLOCK_SIZE: tl.constexpr,
+        FIRST_INOUT: tl.constexpr,
     ):
       """For FIRST_INOUT=True  computes *ptr0[] += *ptr1[], *ptr2[] += *ptr3[],
-      for FIRST_INOUT=False computes *ptr1[] += *ptr0[], *ptr3[] += *ptr2[]"""
+
+      for FIRST_INOUT=False computes *ptr1[] += *ptr0[], *ptr3[] += *ptr2[]
+      """
       pid = tl.program_id(axis=0)
       block_start = pid * BLOCK_SIZE
       offsets = block_start + tl.arange(0, BLOCK_SIZE)
@@ -521,14 +530,14 @@ class TritonKernelCallTest(parameterized.TestCase):
     in_indices = (1, 3) if first_is_inout else (0, 2)
 
     launcher = lambda *a: jt.triton_call(
-      *a,
-      size,
-      kernel=weird_kernel,
-      out_shape=tuple(a[io] for io in inout_indices),
-      input_output_aliases=inout_aliases,
-      grid=(8,),
-      BLOCK_SIZE=1,
-      FIRST_INOUT=first_is_inout,
+        *a,
+        size,
+        kernel=weird_kernel,
+        out_shape=tuple(a[io] for io in inout_indices),
+        input_output_aliases=inout_aliases,
+        grid=(8,),
+        BLOCK_SIZE=1,
+        FIRST_INOUT=first_is_inout,
     )
     if with_donation:
       launcher = jax.jit(launcher, donate_argnums=inout_indices)
@@ -542,7 +551,7 @@ class TritonKernelCallTest(parameterized.TestCase):
       for i in in_indices:
         np.testing.assert_(not args[i].is_deleted())
       np.testing.assert_array_equal(
-        io_ptrs, tuple(o.unsafe_buffer_pointer() for o in outs)
+          io_ptrs, tuple(o.unsafe_buffer_pointer() for o in outs)
       )
 
     np.testing.assert_allclose(outs[0], expect0)
@@ -624,18 +633,20 @@ class TritonKernelCallTest(parameterized.TestCase):
     def silly_add(n):
       x, y = create_random_inputs([n])
       return jt.triton_call(
-        x,
-        y,
-        kernel=silly_add_kernel,
-        out_shape=x,
-        grid=x.size,
+          x,
+          y,
+          kernel=silly_add_kernel,
+          out_shape=x,
+          grid=x.size,
       )
 
     triton_fn = jttl.TritonFunction(silly_add_kernel)
     jt_cache_size = lambda: triton_fn.compiled_kernels_cache_size
     self.assertEqual(jt_cache_size(), 0)
 
-    get_or_create_triton_kernel = jttl.TritonFunction.get_or_create_triton_kernel
+    get_or_create_triton_kernel = (
+        jttl.TritonFunction.get_or_create_triton_kernel
+    )
 
     call_count = [0]
 
@@ -644,16 +655,18 @@ class TritonKernelCallTest(parameterized.TestCase):
       return get_or_create_triton_kernel(*args, **kwargs)
 
     with mock.patch.object(
-      jttl.TritonFunction,
-      "get_or_create_triton_kernel",
-      new=my_get_or_create_triton_kernel,
+        jttl.TritonFunction,
+        "get_or_create_triton_kernel",
+        new=my_get_or_create_triton_kernel,
     ):
       _ = silly_add(42)
       self.assertEqual(call_count[0], 1)
       self.assertEqual(jt_cache_size(), 1)
 
       _ = silly_add(42)
-      self.assertEqual(call_count[0], 1)  # Second call hits the Primitive cache.
+      self.assertEqual(
+          call_count[0], 1
+      )  # Second call hits the Primitive cache.
       self.assertEqual(jt_cache_size(), 1)
 
       _ = silly_add(43)
@@ -784,7 +797,9 @@ class TritonKernelCallTest(parameterized.TestCase):
         triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
         triton.Config({"BLOCK_SIZE": 64}, num_warps=1),
     ]
-    kernel = triton.autotune(autotune_configs, key=("n_elements",))(add_inplace_kernel)
+    kernel = triton.autotune(autotune_configs, key=("n_elements",))(
+        add_inplace_kernel
+    )
 
     x, y = create_random_inputs([1024])
     expected = x + y
@@ -981,7 +996,10 @@ class TritonKernelCallTest(parameterized.TestCase):
 
     @triton.jit
     def add_default_kernel(
-        x_ptr, y_ptr, n_elements, output_ptr,
+        x_ptr,
+        y_ptr,
+        n_elements,
+        output_ptr,
         BLOCK_SIZE: tl.constexpr = 8,
     ):
       pid = tl.program_id(axis=0)
@@ -997,7 +1015,9 @@ class TritonKernelCallTest(parameterized.TestCase):
     out_shape = jax.ShapeDtypeStruct((8,), jnp.float32)
 
     out = jt.triton_call(
-        x, y, x.size,
+        x,
+        y,
+        x.size,
         kernel=add_default_kernel,
         out_shape=out_shape,
         grid=(1,),
@@ -1006,7 +1026,9 @@ class TritonKernelCallTest(parameterized.TestCase):
 
     # Explicit override.
     out = jt.triton_call(
-        x, y, x.size,
+        x,
+        y,
+        x.size,
         kernel=add_default_kernel,
         out_shape=out_shape,
         grid=(1,),
