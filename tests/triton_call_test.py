@@ -278,7 +278,9 @@ class TritonKernelCallTest(parameterized.TestCase):
     expected = x + y
     np.testing.assert_allclose(out, expected)
 
-  @parameterized.parameters(42.0, np.float32(42.0))
+  @parameterized.parameters(
+      42.0, np.float32(42.0), 1e-30, float("inf"), float("-inf")
+  )
   def test_add_float_scalar(self, scalar):
     @triton.jit
     def add_scalar_kernel(x_ptr, y, output_ptr):

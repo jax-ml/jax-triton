@@ -24,11 +24,18 @@ Remember to align the itemized text with the first line of an item within a list
     check is deferred until lowering time.
   * Exposed the custom call name `CUSTOM_CALL_TARGET_NAME`, which can be used
     with `disabled_checks` in `jax.export.export` without hand-coding this name.
-  * `triton_call` now accepts `Ref` arguments for in-place buffer updates,
-    replacing the `input_output_aliases` and `zeroed_outputs` arguments,
-    which are now deprecated.
+  * `triton_call` now accepts `Ref` arguments for in-place buffer updates.
+
+* Deprecations
+  * The `input_output_aliases` and `zeroed_outputs` arguments to `triton_call`
+    are deprecated; use `Ref` arguments for in-place buffer updates instead.
+  * Passing `np.float32` scalars to `triton_call` is deprecated. Use plain
+    Python `float` instead, which now maps to `fp32` by default.
 
 * Breaking changes
+  * Python `float` scalar arguments are now conditionally mapped to `"fp32"`
+    if representable in the float32 range (matching upstream Triton), falling
+    back to `"fp64"` otherwise.
   * Removed the `jax_triton.utils` submodule together with `jax_triton.cdiv` and
     `jax_triton.next_power_of_2`. Use `triton.cdiv` and
     `triton.next_power_of_2` instead.

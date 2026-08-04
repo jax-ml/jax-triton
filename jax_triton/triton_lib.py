@@ -172,8 +172,24 @@ def get_type_id(obj: Any) -> str:
     else:
       raise ValueError(f"integer overflow representing {obj}")
   if isinstance(obj, float):
-    return "fp64"
+    fi = np.finfo(np.float32)
+    abs_obj = abs(obj)
+    if (
+        np.isinf(obj)
+        or np.isnan(obj)
+        or abs_obj == 0.0
+        or fi.tiny <= abs_obj <= fi.max
+    ):
+      return "fp32"
+    else:
+      return "fp64"
   if isinstance(obj, np.float32):
+    warnings.warn(
+        "Passing np.float32 scalars to triton_call is deprecated, use"
+        " float instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return "fp32"
   if isinstance(obj, str):
     return "str"
