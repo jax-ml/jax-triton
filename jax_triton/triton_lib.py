@@ -28,7 +28,7 @@ import pprint
 import shutil
 import tempfile
 import types
-from typing import Any, Final, Protocol, TypeVar, TypedDict
+from typing import Any, Final, Protocol, TypedDict
 import warnings
 import zlib
 
@@ -132,15 +132,10 @@ _JAX_TO_TRITON_TYPE_MAP = {
 
 Heuristics = triton.runtime.Heuristics
 Autotuner = triton.runtime.Autotuner
-JITFunction = triton.JITFunction | gl_runtime.GluonJITFunction
-
-
-StaticScalar = bool | int | float | np.float32
-
-Grid = int | tuple[int] | tuple[int, int] | tuple[int, int, int]
-
-_T = TypeVar("_T")
-ValueOrFn = _T | Callable[[Mapping[str, Any]], _T]
+type JITFunction = triton.JITFunction | gl_runtime.GluonJITFunction
+type StaticScalar = bool | int | float | np.float32
+type Grid = int | tuple[int] | tuple[int, int] | tuple[int, int, int]
+type ValueOrFn[T] = T | Callable[[Mapping[str, Any]], T]
 
 
 def normalize_grid(grid: ValueOrFn[Grid], metaparams) -> tuple[int, int, int]:
