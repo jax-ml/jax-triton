@@ -102,8 +102,7 @@ CUSTOM_CALL_TARGET_NAME: Final[str] = "triton_kernel_call_ffi"
 
 _HSACO_TMPDIR = tempfile.TemporaryDirectory(delete=True)
 
-map, unsafe_map = util.safe_map, map
-zip, unsafe_zip = util.safe_zip, zip
+strict_zip = functools.partial(zip, strict=True)
 
 # b/447434580: Exceeding this limit will cause Triton to emit a single trap
 # instruction, which will cause the GPU to hang indefinitely. See
@@ -541,7 +540,7 @@ class KernelSpecialization:
       backend: tc.BaseBackend,
   ) -> KernelSpecialization:
     # Build the signature dict, restoring nested structure from ``in_tree``.
-    signature = dict(zip(arg_names, in_tree.unflatten(arg_dtypes)))
+    signature = dict(strict_zip(arg_names, in_tree.unflatten(arg_dtypes)))
 
     # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
     # We assume that all arrays are aligned to 16 bytes, and Triton may use this
@@ -564,7 +563,7 @@ class KernelSpecialization:
             do_specialize,
             alignment > 0,
         )
-        for arg_dtype, alignment in zip(arg_dtypes, alignments)
+        for arg_dtype, alignment in strict_zip(arg_dtypes, alignments)
     ]
 
     attrs: dict[tuple[int, ...], Any] = {
@@ -888,7 +887,9 @@ def triton_kernel_call_lowering(
 
   triton_fn = TritonFunction(fn)
   named_args = dict(
-      zip(triton_fn.non_constexpr_param_names, full_tree.unflatten(args)),
+      strict_zip(
+          triton_fn.non_constexpr_param_names, full_tree.unflatten(args)
+      ),
       **metaparams,
   )
   configs = triton_fn.make_configs(backend_options, metaparams, named_args)
@@ -943,7 +944,7 @@ def triton_kernel_call_lowering(
     )
 
     kernel_params = []
-    for i, (arg, dtype) in enumerate(zip(args, arg_dtypes)):
+    for i, (arg, dtype) in enumerate(strict_zip(args, arg_dtypes)):
       if isinstance(arg, core.ShapedArray):
         arg_attrs = specialization_attr[objpaths[i]]
         kernel_params.append(
@@ -982,7 +983,10 @@ def triton_kernel_call_lowering(
     )
     kernel_call = triton_kernel_call_lib.TritonAutotunedKernelCall(
         f"{kernel_call_name} ({triton_fn.name}) {named_static_args}",
-        [(call, str(config)) for call, config in zip(kernel_calls, configs)],
+        [
+            (call, str(config))
+            for call, config in strict_zip(kernel_calls, configs)
+        ],
         input_output_aliases_with_sizes,
     )
   else:
