@@ -544,7 +544,7 @@ class KernelSpecialization:
 
     # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
     # We assume that all arrays are aligned to 16 bytes, and Triton may use this
-    # assumption, unless array args are include in the `do_not_specialize` list.
+    # assumption, unless array args are included in the `do_not_specialize` list.
     static_indices = {
         i for i, a in enumerate(args) if not isinstance(a, core.AbstractValue)
     }
@@ -1134,13 +1134,12 @@ def triton_call(
   import jax_triton as jt
 
   def add(x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
-    out_shape = jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)
     block_size = 8
     return jt.triton_call(
         x,
         y,
         kernel=add_kernel,
-        out_shape=out_shape,
+        out_shape=jax.typeof(x),
         grid=(x.size // block_size,),
         block_size=block_size)
 
@@ -1165,10 +1164,10 @@ def triton_call(
       of such objects. Pointers for each of the elements of ``out_shape`` will
       be passed into ``kernel`` following the inputs.
     grid: An integer, tuple of up to 3 integers, or a function that returns a
-      tuple of up to 3 integers. When `grid` is an integer, `kernel` is
-      invocated in `grid`-many parallel executions. When `grid` is a sequence of
-      integers, `kernel` is launched in a `prod(grid)`-many parallel execution.
-      When `grid` is a function, it is passed `**metaparams` and should return a
+      tuple of up to 3 integers. When `grid` is an integer, `kernel` is invoked
+      in `grid`-many parallel executions. When `grid` is a sequence of integers,
+      `kernel` is launched in a `prod(grid)`-many parallel executions. When
+      `grid` is a function, it is passed `**metaparams` and should return a
       tuple of up to 3 integers.
     name: A name for the kernel call.
     compute_capability: The GPU compute capability to compile for.
