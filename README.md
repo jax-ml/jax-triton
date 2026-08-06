@@ -121,9 +121,11 @@ Some other use-cases are also covered in [tests](https://github.com/jax-ml/jax-t
 $ pip install jax-triton
 ```
 
-Make sure you have a CUDA- or ROCm- compatible `jax` installed. For example you could run:
+Make sure you have a CUDA- or ROCm- compatible `jax` installed. For example you
+could run:
+
 ```bash
-$ pip install "jax[cuda12]"
+$ pip install "jax[cuda13]"
 ```
 
 ## Development
