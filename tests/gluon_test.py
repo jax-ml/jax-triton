@@ -95,10 +95,10 @@ class GluonTest(parameterized.TestCase):
       assert input.size == 1 and input.ndim == 0
       # note, this also checks behaviour in the absence of metaparams args.
       return jt.triton_call(
-        input,
-        kernel=copy_scalar_kernel,
-        out_shape=jax.ShapeDtypeStruct(shape=input.shape, dtype=input.dtype),
-        grid=1,
+          input,
+          kernel=copy_scalar_kernel,
+          out_type=jax.typeof(input),
+          grid=1,
       )
 
     input = jnp.array(42.314, dtype=dtype)
@@ -112,13 +112,13 @@ class GluonTest(parameterized.TestCase):
     def memcpy(input, XBLOCK):
       xnumel = input.size
       return jt.triton_call(
-        input,
-        xnumel,
-        kernel=memcpy_kernel,
-        out_shape=jax.ShapeDtypeStruct(shape=input.shape, dtype=input.dtype),
-        grid=(triton.cdiv(xnumel, XBLOCK),),
-        num_warps=1,
-        XBLOCK=XBLOCK,
+          input,
+          xnumel,
+          kernel=memcpy_kernel,
+          out_type=jax.typeof(input),
+          grid=(triton.cdiv(xnumel, XBLOCK),),
+          num_warps=1,
+          XBLOCK=XBLOCK,
       )
 
     input = random.uniform(random.key(0), (xnumel,), dtype=dtype)
@@ -137,15 +137,15 @@ class GluonTest(parameterized.TestCase):
       assert input.shape == output.shape
       xnumel = input.size
       return jt.triton_call(
-        input,
-        output,
-        xnumel,
-        kernel=memcpy_inplace_output_kernel,
-        out_shape=jax.ShapeDtypeStruct(shape=input.shape, dtype=input.dtype),
-        input_output_aliases={1: 0},
-        grid=(triton.cdiv(xnumel, XBLOCK),),
-        num_warps=1,
-        XBLOCK=XBLOCK,
+          input,
+          output,
+          xnumel,
+          kernel=memcpy_inplace_output_kernel,
+          out_type=jax.typeof(input),
+          input_output_aliases={1: 0},
+          grid=(triton.cdiv(xnumel, XBLOCK),),
+          num_warps=1,
+          XBLOCK=XBLOCK,
       )
 
     input = random.uniform(random.key(0), (xnumel,), dtype=dtype)
@@ -168,15 +168,15 @@ class GluonTest(parameterized.TestCase):
       assert input.shape == output.shape
       xnumel = input.size
       return jt.triton_call(
-        input,
-        output,
-        xnumel,
-        kernel=memcpy_inplace_output_kernel,
-        out_shape=jax.ShapeDtypeStruct(shape=input.shape, dtype=input.dtype),
-        input_output_aliases={1: 0},
-        grid=(triton.cdiv(xnumel, XBLOCK),),
-        num_warps=1,
-        XBLOCK=XBLOCK,
+          input,
+          output,
+          xnumel,
+          kernel=memcpy_inplace_output_kernel,
+          out_type=jax.typeof(input),
+          input_output_aliases={1: 0},
+          grid=(triton.cdiv(xnumel, XBLOCK),),
+          num_warps=1,
+          XBLOCK=XBLOCK,
       )
 
     input = random.uniform(random.key(0), (xnumel,), dtype=dtype)

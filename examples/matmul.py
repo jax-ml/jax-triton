@@ -117,13 +117,12 @@ def matmul(a, b, activation=None):
   group_size_m = 8
   m, k = a.shape
   _, n = b.shape
-  out_shape = jax.ShapeDtypeStruct(shape=(m, n), dtype=a.dtype)
   grid = (m //  block_size_m * n // block_size_n,)
   return jt.triton_call(
       a,
       b,
       kernel=matmul_kernel,
-      out_shape=out_shape,
+      out_type=jax.ShapeDtypeStruct(shape=(m, n), dtype=a.dtype),
       grid=grid,
       num_warps=8,
       num_stages=3,

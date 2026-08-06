@@ -25,8 +25,12 @@ Remember to align the itemized text with the first line of an item within a list
   * Exposed the custom call name `CUSTOM_CALL_TARGET_NAME`, which can be used
     with `disabled_checks` in `jax.export.export` without hand-coding this name.
   * `triton_call` now accepts `Ref` arguments for in-place buffer updates.
+  * The `out_shape` argument to `triton_call` has been renamed to `out_type`
+    to match the modern Pallas APIs.
 
 * Deprecations
+  * The `out_shape` argument to `triton_call` is deprecated in favor of
+    `out_type`.
   * The `input_output_aliases` and `zeroed_outputs` arguments to `triton_call`
     are deprecated; use `Ref` arguments for in-place buffer updates instead.
   * Passing `np.float32` scalars to `triton_call` is deprecated. Use plain

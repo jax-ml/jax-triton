@@ -34,7 +34,7 @@ def _dummy_fn(x):
     offs = tl.program_id(axis=0) * 4 + tl.arange(0, 4)
     tl.store(o_ptr + offs, tl.load(x_ptr + offs))
 
-  return jt.triton_call(x, kernel=dummy_kernel, out_shape=x, grid=(x.size // 4))
+  return jt.triton_call(x, kernel=dummy_kernel, out_type=x, grid=(x.size // 4))
 
 
 class ClusterTest(parameterized.TestCase):

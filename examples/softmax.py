@@ -13,15 +13,12 @@
 # limitations under the License.
 
 """Softmax example."""
-import math
 
 import jax
 import jax.numpy as jnp
 import jax_triton as jt
 import triton
 import triton.language as tl
-
-next_pow2 = lambda x: int(math.pow(2, math.ceil(math.log(x, 2))))
 
 
 @triton.jit
@@ -53,13 +50,12 @@ def softmax_kernel(
 
 
 def softmax(x: jnp.ndarray) -> jnp.ndarray:
-  out_shape = jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)
-  block_size = next_pow2(x.shape[1])
+  block_size = triton.next_power_of_2(x.shape[1])
   strides = jt.strides_from_shape(x.shape)
   return jt.triton_call(
       x,
       kernel=softmax_kernel,
-      out_shape=out_shape,
+      out_type=jax.typeof(x),
       input_row_stride=strides[0],
       output_row_stride=strides[0],
       n_cols=x.shape[1],

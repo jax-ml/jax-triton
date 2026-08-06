@@ -83,7 +83,7 @@ def add(x, y, *, kernel=add_kernel, **kwargs):
       y,
       x.size,
       kernel=kernel,
-      out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+      out_type=jax.typeof(x),
       grid=kwargs.pop("grid", default_grid),
       **kwargs,
   )
@@ -177,7 +177,7 @@ def matmul(x, y, *, kernel=matmul_kernel, **kwargs):
       n,  # stride_cm
       1,  # stride_cn
       kernel=kernel,
-      out_shape=jax.ShapeDtypeStruct((m, n), dtype=x.dtype),
+      out_type=jax.ShapeDtypeStruct((m, n), dtype=x.dtype),
       grid=grid,
       GROUP_SIZE_M=8,
       **kwargs,
@@ -292,7 +292,7 @@ class TritonKernelCallTest(parameterized.TestCase):
           x,
           y,
           kernel=add_scalar_kernel,
-          out_shape=jax.ShapeDtypeStruct((), x.dtype),
+          out_type=jax.ShapeDtypeStruct((), x.dtype),
           grid=1,
       )
 
@@ -310,7 +310,7 @@ class TritonKernelCallTest(parameterized.TestCase):
         1,
         x,
         kernel=scaled_copy_kernel,
-        out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+        out_type=jax.typeof(x),
         grid=(x.size,),
     )
     np.testing.assert_array_equal(out, x)
@@ -323,7 +323,7 @@ class TritonKernelCallTest(parameterized.TestCase):
         y_ptr=y,
         n_elements=x.size,
         kernel=add_kernel,
-        out_shape=x,
+        out_type=jax.typeof(x),
         grid=(1,),
         BLOCK_SIZE=8,
     )
@@ -344,7 +344,7 @@ class TritonKernelCallTest(parameterized.TestCase):
         n_elements=x.size,
         y_ptr=y,
         kernel=add_kernel,
-        out_shape=x,
+        out_type=jax.typeof(x),
         grid=(1,),
         BLOCK_SIZE=8,
     )
@@ -368,7 +368,7 @@ class TritonKernelCallTest(parameterized.TestCase):
         x_in_out_ptr=x,
         n_elements=size,
         kernel=inc_inplace_kernel,
-        out_shape=x,
+        out_type=jax.typeof(x),
         grid=(size,),
         BLOCK_SIZE=1,
         input_output_aliases={1: 0},
@@ -384,7 +384,7 @@ class TritonKernelCallTest(parameterized.TestCase):
           x,
           x_ptr=x,
           kernel=add_kernel,
-          out_shape=x,
+          out_type=jax.typeof(x),
           grid=(1,),
           BLOCK_SIZE=8,
       )
@@ -406,7 +406,7 @@ class TritonKernelCallTest(parameterized.TestCase):
         y_ptr=y,
         n_elements=x.size,
         kernel=kernel,
-        out_shape=x,
+        out_type=jax.typeof(x),
         grid=(1,),
         BLOCK_SIZE=8,
     )
@@ -425,7 +425,7 @@ class TritonKernelCallTest(parameterized.TestCase):
           y,
           kernel=add_scalar_kernel,
           compute_capability=gpu_triton.get_compute_capability(0),
-          out_shape=jax.ShapeDtypeStruct((), x.dtype),
+          out_type=jax.ShapeDtypeStruct((), x.dtype),
           grid=1,
       )
 
@@ -439,13 +439,13 @@ class TritonKernelCallTest(parameterized.TestCase):
     expected = x + 1
 
     launcher = lambda x: jt.triton_call(
-      x,
-      size,
-      kernel=inc_inplace_kernel,
-      out_shape=x,
-      grid=(8,),
-      BLOCK_SIZE=1,
-      input_output_aliases={0: 0},
+        x,
+        size,
+        kernel=inc_inplace_kernel,
+        out_type=jax.typeof(x),
+        grid=(8,),
+        BLOCK_SIZE=1,
+        input_output_aliases={0: 0},
     )
 
     if with_donation:
@@ -479,7 +479,7 @@ class TritonKernelCallTest(parameterized.TestCase):
         size,
         x,
         kernel=inc_inplace_kernel,
-        out_shape=x,
+        out_type=jax.typeof(x),
         grid=(size,),
         BLOCK_SIZE=1,
         input_output_aliases={1: 0},
@@ -494,8 +494,13 @@ class TritonKernelCallTest(parameterized.TestCase):
 
     def f(x_ref):
       return jt.triton_call(
-          x_ref, size, kernel=inc_inplace_kernel, out_shape=(),
-          grid=(size,), BLOCK_SIZE=1)
+          x_ref,
+          size,
+          kernel=inc_inplace_kernel,
+          out_type=(),
+          grid=(size,),
+          BLOCK_SIZE=1,
+      )
 
     if jit:
       f = jax.jit(f)
@@ -514,7 +519,7 @@ class TritonKernelCallTest(parameterized.TestCase):
     x, _ = create_random_inputs([size])
     x_ref = jax.new_ref(x)
     jt.triton_call(
-        size, x_ref, kernel=kernel, out_shape=(), grid=(size,), BLOCK_SIZE=1
+        size, x_ref, kernel=kernel, out_type=(), grid=(size,), BLOCK_SIZE=1
     )
     np.testing.assert_array_equal(x_ref[...], x + 1)
 
@@ -536,7 +541,7 @@ class TritonKernelCallTest(parameterized.TestCase):
         acc_ref,
         size,
         kernel=kernel,
-        out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+        out_type=jax.typeof(x),
         grid=(size,),
         BLOCK_SIZE=1,
     )
@@ -564,7 +569,7 @@ class TritonKernelCallTest(parameterized.TestCase):
         x,
         (acc_ref, bias),
         kernel=acc_kernel,
-        out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+        out_type=jax.typeof(x),
         grid=(size,),
     )
     np.testing.assert_allclose(out, x + acc + bias)
@@ -579,7 +584,7 @@ class TritonKernelCallTest(parameterized.TestCase):
           x_ref,
           size,
           kernel=inc_inplace_kernel,
-          out_shape=(),
+          out_type=(),
           grid=(size,),
           BLOCK_SIZE=1,
           input_output_aliases={0: 0},
@@ -639,14 +644,14 @@ class TritonKernelCallTest(parameterized.TestCase):
     in_indices = (1, 3) if first_is_inout else (0, 2)
 
     launcher = lambda *a: jt.triton_call(
-      *a,
-      size,
-      kernel=weird_kernel,
-      out_shape=tuple(a[io] for io in inout_indices),
-      input_output_aliases=inout_aliases,
-      grid=(8,),
-      BLOCK_SIZE=1,
-      FIRST_INOUT=first_is_inout,
+        *a,
+        size,
+        kernel=weird_kernel,
+        out_type=tuple(a[io] for io in inout_indices),
+        input_output_aliases=inout_aliases,
+        grid=(8,),
+        BLOCK_SIZE=1,
+        FIRST_INOUT=first_is_inout,
     )
     if with_donation:
       launcher = jax.jit(launcher, donate_argnums=inout_indices)
@@ -692,7 +697,7 @@ class TritonKernelCallTest(parameterized.TestCase):
     x, y = jt.triton_call(
         a,
         kernel=copy_twice_kernel,
-        out_shape=[a, a],
+        out_type=[jax.typeof(a), jax.typeof(a)],
         grid=(1,),
     )
     np.testing.assert_array_equal(a, x)
@@ -735,11 +740,11 @@ class TritonKernelCallTest(parameterized.TestCase):
     def silly_add(n):
       x, y = create_random_inputs([n])
       return jt.triton_call(
-        x,
-        y,
-        kernel=silly_add_kernel,
-        out_shape=x,
-        grid=x.size,
+          x,
+          y,
+          kernel=silly_add_kernel,
+          out_type=jax.typeof(x),
+          grid=x.size,
       )
 
     triton_fn = jttl.TritonFunction(silly_add_kernel)
@@ -796,7 +801,7 @@ class TritonKernelCallTest(parameterized.TestCase):
           x,
           y,
           kernel=dispatch_kernel,
-          out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+          out_type=jax.typeof(x),
           grid=(1,),
           FN=fn,
           BLOCK_SIZE=8,
@@ -974,7 +979,7 @@ class TritonKernelCallTest(parameterized.TestCase):
         (a_ref, b_ref),
         size,
         kernel=kernel,
-        out_shape=(),
+        out_type=(),
         grid=(size,),
     )
     self.assertEqual(result, ())
@@ -1088,7 +1093,7 @@ class TritonKernelCallTest(parameterized.TestCase):
             (y, z),
             size,
             kernel=add_tuple_kernel,
-            out_shape=jax.ShapeDtypeStruct((size,), jnp.float32),
+            out_type=jax.ShapeDtypeStruct((size,), jnp.float32),
             grid=(1,),
             BLOCK_SIZE=size,
         )
@@ -1125,7 +1130,7 @@ class TritonKernelCallTest(parameterized.TestCase):
             x,
             ((a, b), c),
             kernel=add_nested_tuple_kernel,
-            out_shape=jax.ShapeDtypeStruct((size,), jnp.float32),
+            out_type=jax.ShapeDtypeStruct((size,), jnp.float32),
             grid=(1,),
             BLOCK_SIZE=size,
         )
@@ -1152,7 +1157,7 @@ class TritonKernelCallTest(parameterized.TestCase):
             3.0,
             (x, y),
             kernel=scale_add_kernel,
-            out_shape=jax.ShapeDtypeStruct((size,), jnp.float32),
+            out_type=jax.ShapeDtypeStruct((size,), jnp.float32),
             grid=(1,),
             BLOCK_SIZE=size,
         )
@@ -1178,7 +1183,7 @@ class TritonKernelCallTest(parameterized.TestCase):
         lambda x, y: jt.triton_call(
             (x, y),
             kernel=mixed_kernel,
-            out_shape=jax.ShapeDtypeStruct((size,), jnp.float32),
+            out_type=jax.ShapeDtypeStruct((size,), jnp.float32),
             grid=(1,),
             BLOCK_SIZE=size,
         )
@@ -1202,21 +1207,24 @@ class TritonKernelCallTest(parameterized.TestCase):
 
     x = jnp.arange(8, dtype=jnp.float32)
     y = jnp.ones(8, dtype=jnp.float32)
-    out_shape = jax.ShapeDtypeStruct((8,), jnp.float32)
 
     out = jt.triton_call(
-        x, y, x.size,
+        x,
+        y,
+        x.size,
         kernel=add_default_kernel,
-        out_shape=out_shape,
+        out_type=jax.typeof(x),
         grid=(1,),
     )
     np.testing.assert_allclose(out, x + y)
 
     # Explicit override.
     out = jt.triton_call(
-        x, y, x.size,
+        x,
+        y,
+        x.size,
         kernel=add_default_kernel,
-        out_shape=out_shape,
+        out_type=jax.typeof(x),
         grid=(1,),
         BLOCK_SIZE=8,
     )
@@ -1233,7 +1241,7 @@ class TritonKernelCallTest(parameterized.TestCase):
           y,
           x.size,
           kernel=add_kernel,
-          out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+          out_type=jax.typeof(x),
           grid=default_grid,
           BLOCK_SIZE=8,
           cost_estimate=cost,

@@ -1120,7 +1120,7 @@ class _OutputPlaceholder:
 def triton_call(
     *args: jax.Array | StaticScalar,
     kernel: Autotuner | Heuristics | JITFunction,
-    out_shape: ShapeDtype | Sequence[ShapeDtype],
+    out_type: ShapeDtype | Sequence[ShapeDtype] | None = None,
     grid: ValueOrFn[Grid],
     name: str = "",
     num_warps: int | None = None,
@@ -1177,7 +1177,7 @@ def triton_call(
         x,
         y,
         kernel=add_kernel,
-        out_shape=jax.typeof(x),
+        out_type=jax.typeof(x),
         grid=(x.size // block_size,),
         block_size=block_size)
 
@@ -1190,17 +1190,17 @@ def triton_call(
   Args:
     *args: Positional operands for the Triton kernel. Array and ``Ref``
       arguments are passed as runtime buffers in their positional order before
-      any ``out_shape`` pointers. ``Ref`` arguments, created via ``jax.new_ref``
+      any ``out_type`` pointers. ``Ref`` arguments, created via ``jax.new_ref``
       are read-write buffers that the kernel mutates in-place. Unlike
-      ``input_output_aliases``, they should not be included in ``out_shape``.
+      ``input_output_aliases``, they should not be included in ``out_type``.
       Non-array scalars are baked in as static (specialization) values, and any
       argument bound to a ``constexpr`` parameter becomes a metaparam.
     kernel: A Triton kernel (e.g. a function decorated with `triton.jit`). All
       static values should be annotated with `triton.language.constexpr` or
       `triton.experimental.gluon.language.constexpr`.
-    out_shape: An object with ``shape`` and ``dtype`` attributes or a sequence
-      of such objects. Pointers for each of the elements of ``out_shape`` will
-      be passed into ``kernel`` following the inputs.
+    out_type: An object with ``shape`` and ``dtype`` attributes or a sequence of
+      such objects. Pointers for each of the elements of ``out_type`` will be
+      passed into ``kernel`` following the inputs.
     grid: An integer, tuple of up to 3 integers, or a function that returns a
       tuple of up to 3 integers. When `grid` is an integer, `kernel` is invoked
       in `grid`-many parallel executions. When `grid` is a sequence of integers,
@@ -1215,9 +1215,9 @@ def triton_call(
       non-``constexpr`` operands in kernel parameter declaration order (whether
       passed positionally or as keyword arguments). If operands contain nested
       tuples, the indices correspond to the flattened leaves. Output indices
-      correspond to the flattened ``out_shape``.
+      correspond to the flattened ``out_type``.
     zeroed_outputs: Deprecated. A sequence of indices into the flattened
-      ``out_shape``, or a function returning such a sequence, for outputs that
+      ``out_type``, or a function returning such a sequence, for outputs that
       should be zeroed before the kernel is launched. Note that this also
       supports zeroing input-output (i.e. aliased through
       ``input_output_aliases``) arguments that should be treated as outputs in
@@ -1281,8 +1281,24 @@ def triton_call(
           f"backend_options[{k!r}] must be hashable, got {v!r}"
       ) from None
 
-  out_shape = tree_util.tree_map(
-      lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), out_shape
+  if "out_shape" in kwargs:
+    if out_type is not None:
+      raise TypeError(
+          "Cannot specify both out_type= and the deprecated out_shape="
+      )
+    warnings.warn(
+        "out_shape= is deprecated in favor of out_type=",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    out_type = kwargs.pop("out_shape")
+  elif out_type is None:
+    raise TypeError(
+        "Either out_type= or the deprecated out_shape= must be provided"
+    )
+
+  out_type = tree_util.tree_map(
+      lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), out_type
   )
 
   triton_fn = TritonFunction(kernel)
@@ -1320,7 +1336,7 @@ def triton_call(
     has_refs = has_refs or any(map(_is_ref, leaves))
     operands[p_name] = tree_util.tree_map(_StaticArg.maybe_wrap, value)
 
-  flat_out_shapes, out_tree = tree_util.tree_flatten(out_shape)
+  flat_out_shapes, out_tree = tree_util.tree_flatten(out_type)
 
   if input_output_aliases is None:
     input_output_aliases = {}
@@ -1355,7 +1371,7 @@ def triton_call(
   n_unaliased_outputs = len(flat_out_shapes) - len(aliased_out_ordinals)
   if n_missing_operands != n_unaliased_outputs:
     raise ValueError(
-        f"out_shape has {n_unaliased_outputs} unaliased outputs, but"
+        f"out_type has {n_unaliased_outputs} unaliased outputs, but"
         f" {n_missing_operands} kernel parameters are missing an argument"
     )
   out_ordinals = iter(

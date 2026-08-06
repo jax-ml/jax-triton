@@ -103,7 +103,7 @@ def fused_attention(q: jnp.ndarray, k: jnp.ndarray,
   """Flash attention."""
   block_size = 128
   grid = (triton.cdiv(q.shape[2], block_size), q.shape[0] * q.shape[1])
-  out_shape = [
+  out_type = [
       jax.ShapeDtypeStruct(
           shape=(q.shape[0] * q.shape[1], q.shape[2]), dtype=jnp.float32),
       jax.ShapeDtypeStruct(
@@ -125,7 +125,7 @@ def fused_attention(q: jnp.ndarray, k: jnp.ndarray,
       *jt.strides_from_shape(q.shape),
       q.shape[0], q.shape[1], q.shape[2],
       kernel=fused_attention_kernel,
-      out_shape=out_shape,
+      out_type=out_type,
       grid=grid,
       **metaparams)
   return output

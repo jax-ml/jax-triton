@@ -38,14 +38,13 @@ def add_kernel(
   tl.store(output_ptr + offsets, output, mask=mask)
 
 def add(x: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
-  out_shape = jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)
   block_size = 8
   grid = (triton.cdiv(x.size, block_size),)
   return jt.triton_call(
       x,
       y,
       kernel=add_kernel,
-      out_shape=out_shape,
+      out_type=jax.typeof(x),
       grid=grid,
       block_size=block_size)
 

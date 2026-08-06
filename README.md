@@ -54,7 +54,7 @@ def add(x: jax.Array, y: jax.Array) -> jax.Array:
       y,
       x.size,
       kernel=add_kernel,
-      out_shape=jax.typeof(x),
+      out_type=jax.typeof(x),
       grid=(x.size // block_size,),
       block_size=block_size)
 
@@ -97,7 +97,7 @@ def add_inplace_y(x: jax.Array, y_ref) -> None:
       y_ref,         # read-write Ref argument, mutated in place
       x.size,
       kernel=add_inplace_y_kernel,
-      out_shape=(),  # no allocated outputs; the Ref is mutated in place
+      out_type=(),  # no allocated outputs; the Ref is mutated in place
       grid=(x.size // block_size,),
       block_size=block_size)
 
