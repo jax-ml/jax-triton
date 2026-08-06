@@ -20,7 +20,6 @@ from collections.abc import Callable, Mapping, Sequence
 import copy
 import dataclasses
 import functools
-from functools import cached_property
 import inspect
 import json
 import os
@@ -636,21 +635,14 @@ class TritonFunction:
 
     self.fn = fn
 
+    # TODO(cjfj): Convert to LRU cache?
+    if not hasattr(fn, "_jT_kernel_cache"):
+      fn._jT_kernel_cache = {}  # pyrefly: ignore[missing-attribute]
+
   @property
   def name(self) -> str:
     """Name of the underlying kernel function."""
     return self.fn.fn.__name__
-
-  @cached_property
-  def arg_names(self) -> list[str]:
-    """Returns a list of the kernel parameter names in the order they are declared in
-    the kernel's signature."""
-    # JITFunction::arg_names is deprecated, per the deprecation notice
-    return (
-      self.fn.arg_names
-      if hasattr(self.fn, "arg_names")
-      else [p.name for p in self.fn.params]
-    )
 
   def make_configs(
       self,
@@ -708,17 +700,27 @@ class TritonFunction:
   def params(self) -> list[triton.runtime.jit.KernelParam]:
     return self.fn.params
 
-  @cached_property
+  @functools.cached_property
+  def param_names(self) -> list[str]:
+    """Kernel parameter names in declaration order."""
+    # JITFunction::arg_names is deprecated, per the deprecation notice.
+    return (
+        self.fn.arg_names
+        if hasattr(self.fn, "arg_names")
+        else [p.name for p in self.params]
+    )
+
+  @functools.cached_property
   def constexpr_param_names(self) -> frozenset[str]:
-    """Names of parameters annotated with ``tl.constexpr`` / ``gl.constexpr``."""
+    """Names of parameters annotated with ``constexpr``."""
     return frozenset(p.name for p in self.params if p.is_constexpr)
 
-  @cached_property
+  @functools.cached_property
   def non_constexpr_param_names(self) -> list[str]:
-    """Names of parameters not annotated with ``tl.constexpr`` / ``gl.constexpr``."""
+    """Names of parameters not annotated with ``constexpr``."""
     return [p.name for p in self.params if not p.is_constexpr]
 
-  @cached_property
+  @functools.cached_property
   def param_defaults(self) -> dict[str, Any]:
     """Declared default values for kernel parameters."""
     return {p.name: p.default for p in self.params if p.has_default}
@@ -728,10 +730,96 @@ class TritonFunction:
     return self.fn.signature
 
   @property
-  def compiled_kernels_cache_size(self) -> int:
-    return len(self.fn._jT_kernel_cache) if hasattr(self.fn, "_jT_kernel_cache") else 0
+  def _kernel_cache(self) -> dict[tuple[Any, ...], Any]:
+    return self.fn._jT_kernel_cache  # pyrefly: ignore[missing-attribute]
 
-  def get_or_create_triton_kernel(
+  def _make_cache_key(
+      self,
+      spec: KernelSpecialization,
+      gpu_target: tc.GPUTarget,
+      backend_options: Mapping[str, Any],
+  ) -> tuple[Any, ...]:
+    """Builds the cache key from parameters that affect the compiler output."""
+    return (
+        self.fn,
+        tuple(spec.signature.items()),
+        tuple(spec.specialization),
+        tuple(spec.constants.items()),
+        gpu_target,
+        tuple(sorted(backend_options.items())),
+    )
+
+  def _compile_kernel(
+      self,
+      spec: KernelSpecialization,
+      gpu_target: tc.GPUTarget,
+      backend: cb.CUDABackend | hb.HIPBackend,
+      backend_options: Mapping[str, Any],
+  ) -> tuple[triton_kernel_call_lib.TritonKernel, str, Any, CompilationResult]:
+    """Compiles a Triton kernel from a specialization.
+
+    Args:
+      spec: The kernel specialization.
+      gpu_target: The GPU target to compile for.
+      backend: The Triton backend (CUDA or HIP).
+      backend_options: Backend-specific compiler options.
+
+    Returns:
+      A ``(kernel, ttir, options, compilation_result)`` tuple.
+    """
+    fn = self.fn
+    if len(self.signature.parameters) != len(spec.signature):
+      raise TypeError(
+          f"Number of parameters in the kernel '{fn}' signature"
+          f" ({len(self.signature.parameters)}: {self.signature})"
+          " does not match reconstructed signature"
+          f" ({len(spec.signature)}: {spec.signature}). If the"
+          " kernel was working on an older version of jax-triton"
+          " and its triton_call() launcher uses"
+          " `input_output_aliases` argument, note that implicit"
+          " output arguments are no longer required for aliased"
+          " arguments."
+      )
+
+    options = backend.parse_options(backend_options)  # pyrefly: ignore[bad-argument-type]
+
+    context = _triton.ir.context()  # pyrefly: ignore[missing-attribute]
+    _triton.ir.load_dialects(context)  # pyrefly: ignore[missing-attribute]
+    backend.load_dialects(context)
+    codegen_fns = backend.get_codegen_implementation(options)
+
+    if isinstance(fn, gl_runtime.GluonJITFunction):
+      ast_source_cls = gl_runtime.GluonASTSource
+    else:
+      ast_source_cls = tc.ASTSource
+    ast_source = ast_source_cls(fn, spec.signature, spec.constants, spec.attrs)
+    module = ast_source.make_ir(
+        gpu_target,
+        options,
+        codegen_fns,
+        backend.get_module_map(),
+        context,
+    )
+    ttir = str(module)
+
+    compilation_result = compile_ttir_inplace(
+        module, backend, options, gpu_target
+    )
+
+    num_warps = backend_options["num_warps"]
+    num_ctas = backend_options["num_ctas"]
+    kernel = triton_kernel_call_lib.TritonKernel(
+        compilation_result.name,
+        num_warps,
+        num_ctas,
+        compilation_result.shared_mem_bytes,
+        compilation_result.binary,
+        ttir,
+        gpu_target.arch if isinstance(gpu_target.arch, int) else 0,
+    )
+    return kernel, ttir, options, compilation_result
+
+  def get_or_create_kernel(
       self,
       make_target_func,
       platform,
@@ -744,11 +832,9 @@ class TritonFunction:
       backend_options: Mapping[str, Any],
       metaparams,
   ) -> tuple[triton_kernel_call_lib.TritonKernel, Any]:
-    fn = self.fn
-    num_warps = backend_options["num_warps"]
-    num_ctas = backend_options["num_ctas"]
-
-    gpu_target = make_target_func(compute_capability, num_ctas)
+    gpu_target = make_target_func(
+        compute_capability, backend_options["num_ctas"]
+    )
     backend = triton.compiler.make_backend(gpu_target)
     assert isinstance(backend, (cb.CUDABackend, hb.HIPBackend))
 
@@ -762,71 +848,23 @@ class TritonFunction:
         backend,
     )
 
-    # Cache key should contain any parameter that can affect the compiler output.
-    cache_key = (
-        fn,
-        tuple(spec.signature.items()),
-        tuple(spec.specialization),
-        tuple(spec.constants.items()),
-        gpu_target,
-        tuple(sorted(backend_options.items())),
-    )
-    if not hasattr(self.fn, "_jT_kernel_cache"):
-      # TODO(cjfj): Convert to LRU cache?
-      self.fn._jT_kernel_cache = {}  # pyrefly: ignore[missing-attribute]
-    kernel = self.fn._jT_kernel_cache.get(cache_key)  # pyrefly: ignore[missing-attribute]
+    cache_key = self._make_cache_key(spec, gpu_target, backend_options)
+    kernel = self._kernel_cache.get(cache_key)
 
     if kernel is None:
-      if len(self.signature.parameters) != len(spec.signature):
-        raise TypeError(
-            f"Number of parameters in the kernel '{fn}' signature"
-            f" ({len(self.signature.parameters)}: {self.signature}) does not"
-            f" match reconstructed signature ({len(spec.signature)}:"
-            f" {spec.signature}). If the kernel was working on an older version"
-            " of jax-triton and its triton_call() launcher uses"
-            " `input_output_aliases` argument, note that implicit output"
-            " arguments are no longer required for aliased arguments."
-        )
-
-      options = backend.parse_options(backend_options)  # pyrefly: ignore[bad-argument-type]
-
-      context = _triton.ir.context()  # pyrefly: ignore[missing-attribute]
-      _triton.ir.load_dialects(context)  # pyrefly: ignore[missing-attribute]
-      backend.load_dialects(context)
-      codegen_fns = backend.get_codegen_implementation(options)
-
-      if isinstance(fn, gl_runtime.GluonJITFunction):
-        ast_source_cls = gl_runtime.GluonASTSource
-      else:
-        ast_source_cls = tc.ASTSource
-      ast_source = ast_source_cls(
-          fn, spec.signature, spec.constants, spec.attrs
+      kernel, ttir, options, compilation_result = self._compile_kernel(
+          spec, gpu_target, backend, backend_options
       )
-      module = ast_source.make_ir(
-          gpu_target, options, codegen_fns, backend.get_module_map(), context
-      )
-      ttir = str(module)
-
-      compilation_result = compile_ttir_inplace(
-          module, backend, options, gpu_target
-      )
+      self._kernel_cache[cache_key] = kernel
 
       if _JAX_TRITON_DUMP_DIR:
         _dump_kernel_artifacts(
-            cache_key, options, ttir, compilation_result, platform
+            cache_key,
+            options,
+            ttir,
+            compilation_result,
+            platform,
         )
-
-      kernel = triton_kernel_call_lib.TritonKernel(
-          compilation_result.name,
-          num_warps,
-          num_ctas,
-          compilation_result.shared_mem_bytes,
-          compilation_result.binary,
-          ttir,
-          gpu_target.arch if isinstance(gpu_target.arch, int) else 0,
-      )
-
-      self.fn._jT_kernel_cache[cache_key] = kernel  # pyrefly: ignore[missing-attribute]
 
     return kernel, spec.attrs
 
@@ -931,7 +969,7 @@ def triton_kernel_call_lowering(
         "num_ctas": config.num_ctas,
     }
 
-    kernel, specialization_attr = triton_fn.get_or_create_triton_kernel(
+    kernel, specialization_attr = triton_fn.get_or_create_kernel(
         make_target_func,
         ctx.module_context.platforms[0],
         args,
@@ -1242,7 +1280,7 @@ def triton_call(
 
   triton_fn = TritonFunction(kernel)
   constexpr_names = triton_fn.constexpr_param_names
-  param_names = frozenset(triton_fn.arg_names)
+  param_names = frozenset(triton_fn.param_names)
 
   # Keywords naming a kernel parameter are bound to it; the rest are metaparams.
   metaparams: dict[str, Any] = {
