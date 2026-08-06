@@ -746,7 +746,7 @@ class TritonFunction:
         tuple(spec.specialization),
         tuple(spec.constants.items()),
         gpu_target,
-        tuple(sorted(backend_options.items())),
+        FrozenDict(backend_options),
     )
 
   def _compile_kernel(
@@ -1273,6 +1273,13 @@ def triton_call(
   backend_options.setdefault("num_warps", 4)
   backend_options.setdefault("num_stages", 3)
   backend_options.setdefault("num_ctas", 1)
+  for k, v in backend_options.items():
+    try:
+      hash(v)
+    except TypeError:
+      raise TypeError(
+          f"backend_options[{k!r}] must be hashable, got {v!r}"
+      ) from None
 
   out_shape = tree_util.tree_map(
       lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), out_shape

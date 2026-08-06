@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import concurrent.futures
 import os
 from unittest import mock
 
@@ -298,6 +299,22 @@ class TritonKernelCallTest(parameterized.TestCase):
     x = jnp.array([1.0])
     np.testing.assert_allclose(add_scalar(x, scalar), x + scalar)
 
+  def test_scalar_equal_to_1_specialization(self):
+    @triton.jit
+    def scaled_copy_kernel(scale, x_ptr, output_ptr):
+      pid = tl.program_id(0)
+      tl.store(output_ptr + pid, scale * tl.load(x_ptr + pid))
+
+    x = jnp.arange(8, dtype=jnp.float32) + 1.0
+    out = jt.triton_call(
+        1,
+        x,
+        kernel=scaled_copy_kernel,
+        out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+        grid=(x.size,),
+    )
+    np.testing.assert_array_equal(out, x)
+
   def test_kwarg_scalar_operand_stays_static(self):
     x = jnp.arange(8, dtype=jnp.float32)
     y = jnp.ones(8, dtype=jnp.float32)
@@ -526,6 +543,33 @@ class TritonKernelCallTest(parameterized.TestCase):
     np.testing.assert_array_equal(out, x + acc)
     np.testing.assert_array_equal(acc_ref[...], acc + x)
 
+  def test_ref_in_tuple_with_allocated_output(self):
+    @triton.jit
+    def acc_kernel(x_ptr, acc_and_bias, out_ptr):
+      acc_ptr = acc_and_bias[0]
+      bias_ptr = acc_and_bias[1]
+      pid = tl.program_id(0)
+      x = tl.load(x_ptr + pid)
+      acc = tl.load(acc_ptr + pid)
+      bias = tl.load(bias_ptr + pid)
+      tl.store(out_ptr + pid, x + acc + bias)
+      tl.store(acc_ptr + pid, acc + x)
+
+    size = 8
+    x, acc = create_random_inputs([size])
+    bias = random.normal(random.key(42), [size])
+    acc_ref = jax.new_ref(acc)
+
+    out = jt.triton_call(
+        x,
+        (acc_ref, bias),
+        kernel=acc_kernel,
+        out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+        grid=(size,),
+    )
+    np.testing.assert_allclose(out, x + acc + bias)
+    np.testing.assert_allclose(acc_ref[...], acc + x)
+
   def test_ref_rejects_input_output_aliases(self):
     size = 8
     x, _ = create_random_inputs([size])
@@ -721,6 +765,55 @@ class TritonKernelCallTest(parameterized.TestCase):
       self.assertEqual(mock_get_or_create.call_count, 2)
       self.assertLen(triton_fn._kernel_cache, 1)
 
+  def test_callable_constexpr_and_cache(self):
+    @triton.jit
+    def add_fn(x, y):
+      return x + y
+
+    @triton.jit
+    def mul_fn(x, y):
+      return x * y
+
+    @triton.jit
+    def dispatch_kernel(
+        x_ptr,
+        y_ptr,
+        output_ptr,
+        FN: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+      offsets = tl.arange(0, BLOCK_SIZE)
+      x = tl.load(x_ptr + offsets)
+      y = tl.load(y_ptr + offsets)
+      tl.store(output_ptr + offsets, FN(x, y))
+
+    x, y = create_random_inputs([8])
+    triton_fn = jttl.TritonFunction(dispatch_kernel)
+    self.assertEmpty(triton_fn._kernel_cache)
+
+    def call(fn):
+      return jt.triton_call(
+          x,
+          y,
+          kernel=dispatch_kernel,
+          out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+          grid=(1,),
+          FN=fn,
+          BLOCK_SIZE=8,
+      )
+
+    out_add = call(add_fn)
+    np.testing.assert_array_equal(out_add, x + y)
+    self.assertLen(triton_fn._kernel_cache, 1)
+
+    out_mul = call(mul_fn)
+    np.testing.assert_array_equal(out_mul, x * y)
+    self.assertLen(triton_fn._kernel_cache, 2)
+
+    # Calling again with the same callable should hit the cache.
+    _ = call(add_fn)
+    self.assertLen(triton_fn._kernel_cache, 2)
+
   def test_autotune(self):
     autotune_configs = [
         triton.Config({"BLOCK_SIZE": 32}, num_warps=1),
@@ -850,6 +943,44 @@ class TritonKernelCallTest(parameterized.TestCase):
     out = add(x, y, kernel=kernel, input_output_aliases={0: 0})
     np.testing.assert_allclose(out, expected)
 
+  def test_autotune_with_ref_and_tuple(self):
+    @triton.jit
+    def inc_tuple_kernel(pair, n_elements, BLOCK_SIZE: tl.constexpr):
+      a_ptr = pair[0]
+      b_ptr = pair[1]
+      pid = tl.program_id(axis=0)
+      offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+      mask = offsets < n_elements
+      a = tl.load(a_ptr + offsets, mask=mask)
+      b = tl.load(b_ptr + offsets, mask=mask)
+      tl.store(a_ptr + offsets, a + 1, mask=mask)
+      tl.store(b_ptr + offsets, b + 2, mask=mask)
+
+    autotune_configs = [
+        triton.Config({"BLOCK_SIZE": 1}, num_warps=1),
+        triton.Config({"BLOCK_SIZE": 8}, num_warps=1),
+    ]
+    kernel = triton.autotune(autotune_configs, key=("n_elements",))(
+        inc_tuple_kernel
+    )
+
+    size = 8
+    a = random.normal(random.key(0), [size])
+    b = random.normal(random.key(1), [size])
+    a_ref = jax.new_ref(a)
+    b_ref = jax.new_ref(b)
+
+    result = jt.triton_call(
+        (a_ref, b_ref),
+        size,
+        kernel=kernel,
+        out_shape=(),
+        grid=(size,),
+    )
+    self.assertEqual(result, ())
+    np.testing.assert_array_equal(a_ref[...], a + 1)
+    np.testing.assert_array_equal(b_ref[...], b + 2)
+
   def test_autodiff_exception(self):
     x, y = create_random_inputs([10, 100], dtype="float32")
     with self.assertRaisesRegex(
@@ -867,6 +998,12 @@ class TritonKernelCallTest(parameterized.TestCase):
         r"jax\.custom_batching\.custom_vmap.*",
     ):
       jax.vmap(lambda x, y: add(x, y, BLOCK_SIZE=32))(x, y)
+
+  def test_kernel_call_from_worker_thread(self):
+    x, y = create_random_inputs([8])
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+      out = pool.submit(add, x, y, BLOCK_SIZE=8).result()
+    np.testing.assert_array_equal(out, x + y)
 
   def test_has_side_effect_parameter(self):
     x, y = create_random_inputs([8])
@@ -911,6 +1048,18 @@ class TritonKernelCallTest(parameterized.TestCase):
     x, y = create_random_inputs([8])
     with self.assertRaisesRegex(ValueError, "backend_options"):
       add(x, y, num_warps=4, backend_options={"num_warps": 2}, BLOCK_SIZE=8)
+
+  def test_non_hashable_backend_options(self):
+    x, y = create_random_inputs([8])
+    with self.assertRaisesRegex(
+        TypeError, r"backend_options\['extern_libs'\] must be hashable"
+    ):
+      add(
+          x,
+          y,
+          backend_options={"extern_libs": {"libdevice": "/path"}},
+          BLOCK_SIZE=8,
+      )
 
   def test_tuple_tensor_args(self):
     @triton.jit
