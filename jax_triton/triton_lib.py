@@ -33,7 +33,7 @@ import zlib
 
 import jax
 from jax import tree_util
-from jax._src import config
+from jax._src import config as jax_config
 from jax._src import core
 from jax._src import state
 from jax._src import util
@@ -221,7 +221,7 @@ def _is_ref(x: Any) -> bool:
 def _triton_kernel_call_impl(*args, **params):
   if any(_is_ref(a) for a in args):
     # Ensure the jit is enabled to trigger the discharge.
-    with config.disable_jit(False):
+    with jax_config.disable_jit(False):
       return jax.jit(functools.partial(triton_kernel_call_p.bind, **params))(
           *args
       )
@@ -253,9 +253,10 @@ def _triton_kernel_call_dce_rule(
 pe.dce_rules[triton_kernel_call_p] = _triton_kernel_call_dce_rule
 
 
-def _triton_kernel_call_discharge_rule(
-    ctx: state_discharge.DischargeContext,
-    *args,
+def _triton_kernel_call_discharge_impl(
+    in_avals,
+    out_avals,
+    args,
     in_tree,
     out_shapes,
     input_output_aliases,
@@ -269,7 +270,7 @@ def _triton_kernel_call_discharge_rule(
   ref_indices = []
   arr_idx = op_idx = -1
   for _, leaf in tree_util.tree_leaves_with_path(
-      in_tree.unflatten(ctx.in_avals),
+      in_tree.unflatten(in_avals),
       is_leaf=lambda a: isinstance(a, (_StaticArg, _OutputPlaceholder)),
   ):
     if isinstance(leaf, _OutputPlaceholder):
@@ -288,7 +289,7 @@ def _triton_kernel_call_discharge_rule(
   new_aliases: dict[int, int] = {}
   for out_idx, (arr_idx, op_idx) in enumerate(ref_indices):
     new_out_shapes.append(
-        jax.ShapeDtypeStruct.like(ctx.in_avals[arr_idx].inner_aval)
+        jax.ShapeDtypeStruct.like(in_avals[arr_idx].inner_aval)
     )
     new_aliases[op_idx] = num_out_orig + out_idx
   res = triton_kernel_call_p.bind(
@@ -299,11 +300,25 @@ def _triton_kernel_call_discharge_rule(
       **params,
   )
   ans, updated_refs = util.split_list(res, [num_out_orig])
-  new_invals: list[Any] = [None] * len(ctx.in_avals)
+  new_invals: list[Any] = [None] * len(in_avals)
   for out_idx, (arr_idx, _) in enumerate(ref_indices):
     new_invals[arr_idx] = updated_refs[out_idx]
   return new_invals, ans
 
+
+# TODO(slebedev): Remove once the minimum JAX version we support is 0.12.0.
+if hasattr(state_discharge, "DischargeContext"):
+  def _triton_kernel_call_discharge_rule(
+      ctx: state_discharge.DischargeContext, *args, **params,
+  ):
+    return _triton_kernel_call_discharge_impl(
+        ctx.in_avals, ctx.out_avals, args, **params
+    )
+else:
+  def _triton_kernel_call_discharge_rule(in_avals, out_avals, *args, **params):
+    return _triton_kernel_call_discharge_impl(
+        in_avals, out_avals, args, **params
+    )
 
 state_discharge.register_discharge_rule(triton_kernel_call_p)(
     _triton_kernel_call_discharge_rule
@@ -548,7 +563,7 @@ class KernelSpecialization:
         i for i, a in enumerate(args) if not isinstance(a, core.AbstractValue)
     }
     alignments = [0 if i in static_indices else 16 for i in range(len(args))]
-    specialize_impl = _triton.native_specialize_impl
+    specialize_impl = _triton.native_specialize_impl  # pyrefly: ignore[missing-attribute]
     is_const = False
     do_specialize = True
     specialization = [
@@ -1118,7 +1133,7 @@ class _OutputPlaceholder:
 
 
 def triton_call(
-    *args: jax.Array | StaticScalar,
+    *args: jax.Array | jax.Ref | StaticScalar,
     kernel: Autotuner | Heuristics | JITFunction,
     out_type: ShapeDtype | Sequence[ShapeDtype] | None = None,
     grid: ValueOrFn[Grid],

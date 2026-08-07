@@ -14,7 +14,6 @@
 
 """Library for JAX-Triton integrations."""
 
-from jax._src.lib import gpu_triton
 from jax.experimental.pallas import strides_from_shape
 from jax_triton.triton_lib import CUSTOM_CALL_TARGET_NAME
 from jax_triton.triton_lib import triton_call
@@ -24,6 +23,7 @@ from jax_triton.version import __version_info__
 __all__ = [
     "triton_call",
     "strides_from_shape",
+    "CUSTOM_CALL_TARGET_NAME",
     "__version__",
     "__version_info__",
 ]
