@@ -24,6 +24,7 @@ from jax import random
 from jax._src import test_util as jtu
 from jax._src.interpreters import partial_eval as pe
 from jax._src.lib import gpu_triton
+from jax._src.lib import version as jaxlib_version
 import jax.numpy as jnp
 import jax_triton as jt
 import jax_triton.triton_lib as jttl
@@ -1253,6 +1254,36 @@ class TritonKernelCallTest(parameterized.TestCase):
     self.assertRegex(
         hlo, r"cost_estimate_json\s*=\s*.*bytes_accessed\\22\s*:\s*456"
     )
+
+  @parameterized.product(shape=[(32, 32), (8, 64), (16, 128)])
+  def test_device_side_tma_copy(self, shape):
+    if jaxlib_version <= (0, 11, 0):
+      self.skipTest("Device-side TMA scratch requires a newer jaxlib")
+    if not jtu.is_cuda_compute_capability_at_least("9.0"):
+      self.skipTest("TMA requires Hopper or newer")
+
+    @triton.jit
+    def tma_copy_kernel(in_ptr, out_ptr, M: tl.constexpr, N: tl.constexpr):
+      desc_in = tl.make_tensor_descriptor(
+          in_ptr, shape=[M, N], strides=[N, 1], block_shape=[M, N]
+      )
+      desc_out = tl.make_tensor_descriptor(
+          out_ptr, shape=[M, N], strides=[N, 1], block_shape=[M, N]
+      )
+      block = desc_in.load([0, 0])
+      desc_out.store([0, 0], block)
+
+    M, N = shape
+    input = random.uniform(random.key(0), (M, N), dtype=jnp.float32)
+    output = jt.triton_call(
+        input,
+        kernel=tma_copy_kernel,
+        out_type=jax.typeof(input),
+        grid=1,
+        M=M,
+        N=N,
+    )
+    np.testing.assert_array_equal(output, input)
 
 
 if __name__ == "__main__":

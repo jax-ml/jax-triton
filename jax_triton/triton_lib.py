@@ -39,6 +39,7 @@ from jax._src import state
 from jax._src import util
 from jax._src.frozen_dict import FrozenDict
 from jax._src.interpreters import partial_eval as pe
+from jax._src.lib import version as jaxlib_version
 from jax._src.state import discharge as state_discharge
 import jax.extend as jex
 from jax.interpreters import ad
@@ -404,6 +405,8 @@ class CompilationResult:
   shared_mem_bytes: int
   ttgir: str
   llir: str
+  global_scratch_size: int | None = None
+  global_scratch_align: int | None = None
 
 
 def compile_ttir_inplace(
@@ -469,12 +472,20 @@ def compile_ttir_to_ptx_inplace(
   if cuda_options.debug:
     print(ptx)
   name = metadata["name"]
+  global_scratch_size = metadata.get("global_scratch_size")
+  if global_scratch_size == 0:
+    global_scratch_size = None
+  global_scratch_align = metadata.get("global_scratch_align")
+  if global_scratch_align == 1:
+    global_scratch_align = None
   return CompilationResult(
       binary=ptx,
       name=name,
       shared_mem_bytes=shared_mem_bytes,
       ttgir=str(ttgir),
       llir=str(llir),
+      global_scratch_size=global_scratch_size,
+      global_scratch_align=global_scratch_align,
   )
 
 
@@ -520,6 +531,8 @@ def compile_ttir_to_hsaco_inplace(
       shared_mem_bytes=shared_mem_bytes,
       ttgir=str(ttgir),
       llir=str(llir),
+      global_scratch_size=metadata.get("global_scratch_size"),
+      global_scratch_align=metadata.get("global_scratch_align"),
   )
 
 
@@ -823,7 +836,7 @@ class TritonFunction:
 
     num_warps = backend_options["num_warps"]
     num_ctas = backend_options["num_ctas"]
-    kernel = triton_kernel_call_lib.TritonKernel(
+    kernel_args = [
         compilation_result.name,
         num_warps,
         num_ctas,
@@ -831,7 +844,19 @@ class TritonFunction:
         compilation_result.binary,
         ttir,
         gpu_target.arch if isinstance(gpu_target.arch, int) else 0,
-    )
+    ]
+    if jaxlib_version > (0, 11, 0):
+      if compilation_result.global_scratch_size is not None:
+        kernel_args += [
+            compilation_result.global_scratch_size,
+            compilation_result.global_scratch_align,
+        ]
+    elif compilation_result.global_scratch_size is not None:
+      raise NotImplementedError(
+          "The kernel requires an on-device global scratch buffer, which is "
+          " only supported by jaxlib >0.11.0. Please upgrade."
+      )
+    kernel = triton_kernel_call_lib.TritonKernel(*kernel_args)
     return kernel, ttir, options, compilation_result
 
   def get_or_create_kernel(

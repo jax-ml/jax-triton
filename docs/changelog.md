@@ -25,6 +25,9 @@ Remember to align the itemized text with the first line of an item within a list
   * Exposed the custom call name `CUSTOM_CALL_TARGET_NAME`, which can be used
     with `disabled_checks` in `jax.export.export` without hand-coding this name.
   * `triton_call` now accepts `Ref` arguments for in-place buffer updates.
+  * Added support for Triton and Gluon kernels that build TMA descriptors
+    on-device via `make_tensor_descriptor` on Hopper and Blackwell GPUs.
+    This feature requires jaxlib >0.11.0.
   * The `out_shape` argument to `triton_call` has been renamed to `out_type`
     to match the modern Pallas APIs.
 
