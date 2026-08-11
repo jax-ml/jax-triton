@@ -31,6 +31,7 @@ import jax_triton.triton_lib as jttl
 import numpy as np
 import triton
 import triton.language as tl
+from triton.tools.tensor_descriptor import TensorDescriptor
 
 config.parse_flags_with_absl()
 
@@ -1277,6 +1278,34 @@ class TritonKernelCallTest(parameterized.TestCase):
     input = random.uniform(random.key(0), (M, N), dtype=jnp.float32)
     output = jt.triton_call(
         input,
+        kernel=tma_copy_kernel,
+        out_type=jax.typeof(input),
+        grid=1,
+        M=M,
+        N=N,
+    )
+    np.testing.assert_array_equal(output, input)
+
+  @parameterized.product(shape=[(32, 32), (8, 64), (16, 128)])
+  def test_host_side_tma_copy(self, shape):
+    if jaxlib_version <= (0, 11, 0):
+      self.skipTest("Host-side TMA descriptors require a newer jaxlib")
+    if not jtu.is_cuda_compute_capability_at_least("9.0"):
+      self.skipTest("TMA requires Hopper or newer")
+
+    @triton.jit
+    def tma_copy_kernel(in_desc, out_ptr, M: tl.constexpr, N: tl.constexpr):
+      block = in_desc.load([0, 0])
+      offs = tl.arange(0, M)[:, None] * N + tl.arange(0, N)[None, :]
+      tl.store(out_ptr + offs, block)
+
+    M, N = shape
+    input = random.uniform(random.key(0), (M, N), dtype=jnp.float32)
+    in_desc = TensorDescriptor(
+        input, shape=[M, N], strides=[N, 1], block_shape=[M, N]
+    )
+    output = jt.triton_call(
+        in_desc,
         kernel=tma_copy_kernel,
         out_type=jax.typeof(input),
         grid=1,

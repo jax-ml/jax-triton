@@ -14,6 +14,8 @@
 
 """Gluon-specific tests."""
 
+from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
@@ -29,6 +31,7 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.nvidia import blackwell as gl_blackwell
 from triton.experimental.gluon.language.nvidia import hopper as gl_hopper
+from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
 
 
 config.parse_flags_with_absl()
@@ -104,8 +107,38 @@ def _make_tma_copy_kernel(arch):
   return tma_copy_kernel
 
 
-tma_copy_kernel_hopper = _make_tma_copy_kernel(gl_hopper)
-tma_copy_kernel_blackwell = _make_tma_copy_kernel(gl_blackwell)
+tma_copy_hopper = _make_tma_copy_kernel(gl_hopper)
+tma_copy_blackwell = _make_tma_copy_kernel(gl_blackwell)
+
+
+def _make_host_desc_tma_copy_kernel(arch):
+  @gluon.jit
+  def tma_copy_kernel(in_desc, out_ptr, M: gl.constexpr, N: gl.constexpr):
+    layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
+        [M, N], gl.float32
+    )
+    out_desc = arch.tma.make_tensor_descriptor(
+        out_ptr,
+        shape=[M, N],
+        strides=[N, 1],
+        block_shape=[M, N],
+        layout=layout,
+    )
+    smem = gl.allocate_shared_memory(gl.float32, [M, N], layout)
+    bar = arch.mbarrier.allocate_mbarrier()
+    arch.mbarrier.init(bar, count=1)
+    arch.mbarrier.expect(bar, bytes_per_cta=in_desc.nbytes_per_cta)
+    arch.tma.async_copy_global_to_shared(in_desc, [0, 0], bar, smem)
+    arch.mbarrier.wait(bar, phase=0)
+    arch.mbarrier.invalidate(bar)
+    arch.tma.async_copy_shared_to_global(out_desc, [0, 0], smem)
+    arch.tma.store_wait(0)
+
+  return tma_copy_kernel
+
+
+host_desc_tma_copy_hopper = _make_host_desc_tma_copy_kernel(gl_hopper)
+host_desc_tma_copy_blackwell = _make_host_desc_tma_copy_kernel(gl_blackwell)
 
 
 class GluonTest(parameterized.TestCase):
@@ -155,21 +188,51 @@ class GluonTest(parameterized.TestCase):
     np.testing.assert_array_equal(y_ref[...], x)
 
   @parameterized.product(shape=[(32, 32), (8, 64), (16, 128)])
-  def test_device_side_tma_copy(self, shape):
+  def test_device_desc_tma_copy(self, shape):
     if jaxlib_version <= (0, 11, 0):
-      self.skipTest("Device-side TMA scratch requires a newer jaxlib")
+      self.skipTest("Device-side TMA descriptors requires a newer jaxlib")
     if not jtu.is_cuda_compute_capability_at_least("9.0"):
       self.skipTest("TMA requires Hopper or newer")
 
     kernel = (
-        tma_copy_kernel_blackwell
+        tma_copy_blackwell
         if jtu.is_cuda_compute_capability_at_least("10.0")
-        else tma_copy_kernel_hopper
+        else tma_copy_hopper
     )
     M, N = shape
     x = random.uniform(random.key(0), (M, N), dtype=jnp.float32)
     output = jt.triton_call(
         x, kernel=kernel, out_type=jax.typeof(x), grid=1, M=M, N=N
+    )
+    np.testing.assert_array_equal(output, x)
+
+  @parameterized.product(shape=[(32, 32), (8, 64), (16, 128)])
+  def test_host_desc_tma_copy(self, shape):
+    if jaxlib_version <= (0, 11, 0):
+      self.skipTest("Host-side TMA descriptors require a newer jaxlib")
+    if not jtu.is_cuda_compute_capability_at_least("9.0"):
+      self.skipTest("TMA requires Hopper or newer")
+
+    kernel = (
+        host_desc_tma_copy_blackwell
+        if jtu.is_cuda_compute_capability_at_least("10.0")
+        else host_desc_tma_copy_hopper
+    )
+    M, N = shape
+    x = random.uniform(random.key(0), (M, N), dtype=jnp.float32)
+
+    # Disable __post_init__ because it assumes PyTorch tensors.
+    with mock.patch.object(TensorDescriptor, "__post_init__"):
+      in_desc = TensorDescriptor(
+          x,
+          shape=[M, N],
+          strides=[N, 1],
+          block_shape=[M, N],
+          layout=gl.NVMMASharedLayout.get_default_for([M, N], gl.float32),
+      )
+
+    output = jt.triton_call(
+        in_desc, kernel=kernel, out_type=jax.typeof(x), grid=1, M=M, N=N
     )
     np.testing.assert_array_equal(output, x)
 
