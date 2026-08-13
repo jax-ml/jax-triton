@@ -31,6 +31,7 @@ import jax_triton.triton_lib as jttl
 import numpy as np
 import triton
 import triton.language as tl
+from triton.tools.tensor_descriptor import TensorDescriptor
 
 config.parse_flags_with_absl()
 
@@ -1284,6 +1285,68 @@ class TritonKernelCallTest(parameterized.TestCase):
         N=N,
     )
     np.testing.assert_array_equal(output, input)
+
+  @parameterized.product(
+      shape=[(32, 32), (8, 64), (16, 128)],
+      dtype=[
+          jnp.float32,
+          jnp.float16,
+          jnp.float8_e5m2,
+          jnp.int32,
+          jnp.int8,
+          jnp.uint16,
+      ],
+      padding=["zero", "nan"],
+      round_f32_to_tf32=[False, True],
+  )
+  def test_host_side_tma_copy(self, shape, dtype, padding, round_f32_to_tf32):
+    if jaxlib_version <= (0, 11, 0):
+      self.skipTest("Host-side TMA descriptors require a newer jaxlib")
+    if not jtu.is_cuda_compute_capability_at_least("9.0"):
+      self.skipTest("TMA requires Hopper or newer")
+    if padding == "nan" and (
+        not jnp.issubdtype(dtype, jnp.floating) or jnp.dtype(dtype).itemsize < 2
+    ):
+      self.skipTest(
+          "nan padding is only supported for floating point dtypes >=16-bit"
+      )
+    if round_f32_to_tf32 and dtype != jnp.float32:
+      self.skipTest("round_f32_to_tf32 is only supported for float32")
+
+    @triton.jit
+    def tma_copy_kernel(in_desc, out_ptr, M: tl.constexpr, N: tl.constexpr):
+      block = in_desc.load([0, 0])
+      offs = tl.arange(0, M)[:, None] * N + tl.arange(0, N)[None, :]
+      tl.store(out_ptr + offs, block)
+
+    M, N = shape
+    input = random.uniform(random.key(0), (M, N), dtype=jnp.float32)
+    input = input.astype(dtype)
+    # Disable __post_init__ because it assumes PyTorch tensors.
+    with mock.patch.object(TensorDescriptor, "__post_init__"):
+      in_desc = TensorDescriptor(
+          input,
+          shape=[M, N],
+          strides=[N, 1],
+          block_shape=[M, N],
+          padding=padding,
+          round_f32_to_tf32=round_f32_to_tf32,
+      )
+    output = jt.triton_call(
+        in_desc,
+        kernel=tma_copy_kernel,
+        out_type=jax.typeof(input),
+        grid=1,
+        M=M,
+        N=N,
+    )
+    if round_f32_to_tf32:
+      expected = jnp.float32(
+          jax.lax.reduce_precision(input, exponent_bits=8, mantissa_bits=10)
+      )
+    else:
+      expected = input
+    np.testing.assert_array_equal(output, expected)
 
 
 if __name__ == "__main__":

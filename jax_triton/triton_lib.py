@@ -27,7 +27,7 @@ import pprint
 import shutil
 import tempfile
 import types
-from typing import Any, Final, Protocol, TypedDict
+from typing import Any, Final, Protocol, TypeGuard, TypedDict
 import warnings
 import zlib
 
@@ -54,6 +54,7 @@ import triton.compiler.compiler as tc
 import triton.experimental.gluon._runtime as gl_runtime
 import triton.experimental.gluon.language as gl
 import triton.language as tl
+from triton.tools import tensor_descriptor
 
 try:
   from jax._src.pallas.triton import gpu_info  # pyrefly: ignore[missing-module-attribute]
@@ -67,17 +68,23 @@ except ImportError:
   triton_kernel_call_lib: Any = None
 
 
-class _Stub:
+class _Stub(Any):
   ...
 
 
 try:
   import triton.backends.nvidia.compiler as cb
+  from triton.backends.nvidia.driver import TMA_DTYPE_DEVICE_TO_HOST as _TMA_DTYPE_DEVICE_TO_HOST
+  from triton.backends.nvidia.driver import TMA_TF32 as _TMA_TF32  # pyrefly: ignore[missing-module-attribute]
+  from triton.experimental.gluon.nvidia.hopper import TensorDescriptor as GluonTensorDescriptor
 except ImportError:
   # NVIDIA backend is not available.
   cb: Any = types.SimpleNamespace(
       CUDAOptions=_Stub, CUDABackend=_Stub, GPUTarget=_Stub
   )
+  _TMA_DTYPE_DEVICE_TO_HOST = {}
+  _TMA_TF32 = 0
+  GluonTensorDescriptor = _Stub
 
 try:
   import triton.backends.amd.compiler as hb
@@ -96,6 +103,16 @@ _JAX_TRITON_DUMP_DIR = os.environ.get("JAX_TRITON_DUMP_DIR")
 class CostEstimate(TypedDict, total=False):
   flops: int
   bytes_accessed: int
+
+
+class TensorDescMeta(TypedDict):
+  block_size: Sequence[int]
+  elem_size: int
+  elem_type: int
+  fp4_padded: bool
+  is_im2col: bool
+  swizzle: int
+
 
 CUSTOM_CALL_TARGET_NAME: Final[str] = "triton_kernel_call_ffi"
 
@@ -131,6 +148,7 @@ _JAX_TO_TRITON_TYPE_MAP = {
 
 Heuristics = triton.runtime.Heuristics
 Autotuner = triton.runtime.Autotuner
+TensorDescriptor = tensor_descriptor.TensorDescriptor
 type JITFunction = triton.JITFunction | gl_runtime.GluonJITFunction
 type StaticScalar = bool | int | float | np.float32
 type Grid = int | tuple[int] | tuple[int, int] | tuple[int, int, int]
@@ -148,6 +166,12 @@ def normalize_grid(grid: ValueOrFn[Grid], metaparams) -> tuple[int, int, int]:
 
 
 def get_type_id(obj: Any) -> str:
+  if is_tensor_descriptor(obj):
+    elem = _JAX_TO_TRITON_TYPE_MAP[obj.base.dtype]
+    block = ",".join(str(b) for b in obj.block_shape)
+    if getattr(obj, "layout", None) is not None:
+      return f"tensordesc<{elem}[{block}],{repr(obj.layout)}>"
+    return f"tensordesc<{elem}[{block}]>"
   if isinstance(obj, (jax.core.ShapedArray, state.AbstractRef)):
     return f"*{_JAX_TO_TRITON_TYPE_MAP[obj.dtype]}"
   if isinstance(obj, (tl.constexpr, gl.constexpr)):
@@ -206,6 +230,52 @@ def to_python_type(arg: Any) -> Any:
   # else return as-is and let it possibly, but not necessarily, fail (constexprs and
   # strings pass through, and the rest isn't expected here, so saving cycles on that)
   return arg
+
+
+def _tensor_descriptor_flatten(desc):
+  children = (desc.base,)
+  aux = (
+      tuple(desc.shape),
+      tuple(desc.strides),
+      tuple(desc.block_shape),
+      getattr(desc, "layout", None),
+      desc.padding,
+      desc.round_f32_to_tf32,
+  )
+  return children, aux
+
+
+def _tensor_descriptor_unflatten(cls, aux, children):
+  (base,) = children
+  shape, strides, block_shape, layout, padding, round_f32_to_tf32 = aux
+  # ``object.__new__`` bypasses ``__post_init__`` validation.
+  obj = object.__new__(cls)
+  obj.base = base
+  obj.shape = list(shape)
+  obj.strides = list(strides)
+  obj.block_shape = list(block_shape)
+  obj.padding = padding
+  obj.round_f32_to_tf32 = round_f32_to_tf32
+  obj.layout = layout
+  return obj
+
+
+tree_util.register_pytree_node(
+    TensorDescriptor,
+    _tensor_descriptor_flatten,
+    functools.partial(_tensor_descriptor_unflatten, TensorDescriptor),
+)
+tree_util.register_pytree_node(
+    GluonTensorDescriptor,
+    _tensor_descriptor_flatten,
+    functools.partial(_tensor_descriptor_unflatten, GluonTensorDescriptor),
+)
+
+
+def is_tensor_descriptor(
+    x: object,
+) -> TypeGuard[TensorDescriptor | GluonTensorDescriptor]:
+  return isinstance(x, (TensorDescriptor, GluonTensorDescriptor))
 
 
 triton_kernel_call_p = jex.core.Primitive("triton_kernel_call")
@@ -407,6 +477,16 @@ class CompilationResult:
   llir: str
   global_scratch_size: int | None = None
   global_scratch_align: int | None = None
+  tensordesc_meta: Sequence[TensorDescMeta] = ()
+
+  def __post_init__(self):
+    if self.tensordesc_meta is not None:
+      for meta in self.tensordesc_meta:
+        if missing := TensorDescMeta.__required_keys__ - meta.keys():
+          raise ValueError(
+              f"Invalid tensordesc_meta entry: {meta}. Missing keys:"
+              f" {sorted(missing)}"
+          )
 
 
 def compile_ttir_inplace(
@@ -486,6 +566,7 @@ def compile_ttir_to_ptx_inplace(
       llir=str(llir),
       global_scratch_size=global_scratch_size,
       global_scratch_align=global_scratch_align,
+      tensordesc_meta=metadata["tensordesc_meta"],
   )
 
 
@@ -573,7 +654,9 @@ class KernelSpecialization:
     # We assume that all arrays are aligned to 16 bytes, and Triton may use this
     # assumption, unless array args are included in the `do_not_specialize` list.
     static_indices = {
-        i for i, a in enumerate(args) if not isinstance(a, core.AbstractValue)
+        i
+        for i, a in enumerate(args)
+        if not (isinstance(a, core.AbstractValue) or is_tensor_descriptor(a))
     }
     alignments = [0 if i in static_indices else 16 for i in range(len(args))]
     specialize_impl = _triton.native_specialize_impl  # pyrefly: ignore[missing-attribute]
@@ -584,13 +667,17 @@ class KernelSpecialization:
             backend,
             types.SimpleNamespace(
                 data_ptr=lambda a=alignment: a,
-                dtype=arg_dtype.removeprefix("*"),
+                dtype=_JAX_TO_TRITON_TYPE_MAP[arg.base.dtype]
+                if is_tensor_descriptor(arg)
+                else arg_dtype.removeprefix("*"),
             ),
             is_const,
             do_specialize,
             alignment > 0,
         )
-        for arg_dtype, alignment in strict_zip(arg_dtypes, alignments)
+        for arg, arg_dtype, alignment in strict_zip(
+            args, arg_dtypes, alignments
+        )
     ]
 
     attrs: dict[tuple[int, ...], Any] = {
@@ -871,7 +958,9 @@ class TritonFunction:
       compute_capability,
       backend_options: Mapping[str, Any],
       metaparams,
-  ) -> tuple[triton_kernel_call_lib.TritonKernel, Any]:
+  ) -> tuple[
+      triton_kernel_call_lib.TritonKernel, Any, Sequence[TensorDescMeta]
+  ]:
     gpu_target = make_target_func(
         compute_capability, backend_options["num_ctas"]
     )
@@ -889,13 +978,14 @@ class TritonFunction:
     )
 
     cache_key = self._make_cache_key(spec, gpu_target, backend_options)
-    kernel = self._kernel_cache.get(cache_key)
+    cached = self._kernel_cache.get(cache_key)
 
-    if kernel is None:
+    if cached is None:
       kernel, ttir, options, compilation_result = self._compile_kernel(
           spec, gpu_target, backend, backend_options
       )
-      self._kernel_cache[cache_key] = kernel
+      cached = (kernel, compilation_result.tensordesc_meta)
+      self._kernel_cache[cache_key] = cached
 
       if _JAX_TRITON_DUMP_DIR:
         _dump_kernel_artifacts(
@@ -906,7 +996,8 @@ class TritonFunction:
             platform,
         )
 
-    return kernel, spec.attrs
+    kernel, tensordesc_meta = cached
+    return kernel, spec.attrs, tensordesc_meta
 
 
 def _missing_gpu_support_error() -> Exception:
@@ -941,7 +1032,10 @@ def triton_kernel_call_lowering(
 
   flat_with_path, full_tree = tree_util.tree_flatten_with_path(
       in_tree.unflatten(ctx.avals_in),
-      is_leaf=lambda a: isinstance(a, (_StaticArg, _OutputPlaceholder)),
+      is_leaf=lambda a: (
+          isinstance(a, (_StaticArg, _OutputPlaceholder))
+          or is_tensor_descriptor(a)
+      ),
   )
 
   args: list[Any] = []
@@ -1009,21 +1103,60 @@ def triton_kernel_call_lowering(
         "num_ctas": config.num_ctas,
     }
 
-    kernel, specialization_attr = triton_fn.get_or_create_kernel(
-        make_target_func,
-        ctx.module_context.platforms[0],
-        args,
-        arg_dtypes,
-        in_tree=full_tree,
-        objpaths=objpaths,
-        compute_capability=compute_capability,
-        backend_options=config_backend_options,
-        metaparams=config_metaparams,
+    kernel, specialization_attr, tensordesc_meta = (
+        triton_fn.get_or_create_kernel(
+            make_target_func,
+            ctx.module_context.platforms[0],
+            args,
+            arg_dtypes,
+            in_tree=full_tree,
+            objpaths=objpaths,
+            compute_capability=compute_capability,
+            backend_options=config_backend_options,
+            metaparams=config_metaparams,
+        )
     )
 
     kernel_params = []
+    desc_idx = 0
     for i, (arg, dtype) in enumerate(strict_zip(args, arg_dtypes)):
-      if isinstance(arg, core.ShapedArray):
+      if is_tensor_descriptor(arg):
+        assert tensordesc_meta and desc_idx < len(tensordesc_meta)
+        meta = tensordesc_meta[desc_idx]
+        desc_idx += 1
+        if meta.get("is_im2col", False):
+          raise NotImplementedError(
+              "im2col TMA descriptors are not supported by jax-triton"
+          )
+        if meta.get("fp4_padded", False):
+          raise NotImplementedError(
+              "fp4_padded TMA descriptors are not supported by jax-triton"
+          )
+        if arg.round_f32_to_tf32 and arg.base.dtype != jnp.float32:  # pyrefly: ignore[missing-attribute]
+          raise ValueError(
+              "TMA descriptors with round_f32_to_tf32=True must have a "
+              f"float32 input type, but got {arg.base.dtype}"
+          )
+        elem_type = _TMA_TF32 if arg.round_f32_to_tf32 else meta["elem_type"]  # pyrefly: ignore[missing-attribute]
+        kernel_params.append(
+            triton_kernel_call_lib.create_tma_descriptor_parameter(  # pyrefly: ignore[missing-attribute]
+                elem_type=_TMA_DTYPE_DEVICE_TO_HOST[elem_type],
+                swizzle=meta["swizzle"],
+                shape=arg.shape,
+                strides=arg.strides,
+                block_shape=meta["block_size"],
+                oob_fill=1 if arg.padding == "nan" else 0,
+            )
+        )
+        for dim in arg.shape:
+          kernel_params.append(
+              triton_kernel_call_lib.create_scalar_parameter(int(dim), "i32")
+          )
+        for stride in arg.strides:
+          kernel_params.append(
+              triton_kernel_call_lib.create_scalar_parameter(int(stride), "i64")
+          )
+      elif isinstance(arg, core.ShapedArray):
         arg_attrs = specialization_attr[objpaths[i]]
         kernel_params.append(
             triton_kernel_call_lib.create_array_parameter(
