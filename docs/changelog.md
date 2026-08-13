@@ -4,7 +4,9 @@
 Remember to align the itemized text with the first line of an item within a list.
 -->
 
-## jax-triton 0.4.0 (unreleased)
+## Unreleased
+
+## jax-triton 0.4.0 (August 13, 2026)
 
 * New features
   * Added support for Gluon kernels.
