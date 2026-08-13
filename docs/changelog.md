@@ -8,9 +8,12 @@ Remember to align the itemized text with the first line of an item within a list
 
 * New features
   * Added support for Gluon kernels.
-  * `triton_call` now accepts pytrees as inputs and outputs. Note that
-    `input_output_aliases` and `zeroed_outputs` now index into the *flattened*
-    inputs and outputs, matching `jax.experimental.pallas.pallas_call`.
+  * `triton_call` now accepts pytrees as inputs and outputs. In particular,
+    `out_type` may be an arbitrary pytree of shape-dtype objects (not just a
+    single object or a sequence), and the result is returned with the same
+    structure. Note that `input_output_aliases` and `zeroed_outputs` now index
+    into the *flattened* inputs and outputs, matching
+    `jax.experimental.pallas.pallas_call`.
   * `triton_call` now accepts arbitrary backend options via the
     `backend_options` argument.
   * Added a `has_side_effect` argument to `triton_call` to prevent dead-code

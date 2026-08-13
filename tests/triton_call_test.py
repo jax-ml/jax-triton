@@ -687,7 +687,11 @@ class TritonKernelCallTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(out, x)
 
-  def test_multiple_outputs(self):
+  @parameterized.parameters(
+      lambda a: (a, a),
+      lambda a: {"a": a, "bs": (a,)},
+  )
+  def test_pytree_outputs(self, out_type_fn):
     @triton.jit
     def copy_twice_kernel(a_ptr, x_ptr, y_ptr):
       a = tl.load(a_ptr)
@@ -695,14 +699,13 @@ class TritonKernelCallTest(parameterized.TestCase):
       tl.store(y_ptr, a)
 
     a = jnp.array([42])
-    x, y = jt.triton_call(
+    results = jt.triton_call(
         a,
         kernel=copy_twice_kernel,
-        out_type=[jax.typeof(a), jax.typeof(a)],
+        out_type=out_type_fn(a),
         grid=(1,),
     )
-    np.testing.assert_array_equal(a, x)
-    np.testing.assert_array_equal(a, y)
+    jax.tree.map(np.testing.assert_array_equal, out_type_fn(a), results)
 
   def test_kernel_cache_equivalent_kernels(self):
     # Create unique JITFunction to avoid conflicts with other tests.

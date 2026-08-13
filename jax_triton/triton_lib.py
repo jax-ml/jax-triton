@@ -1302,7 +1302,7 @@ class _OutputPlaceholder:
 def triton_call(
     *args: jax.Array | jax.Ref | StaticScalar,
     kernel: Autotuner | Heuristics | JITFunction,
-    out_type: ShapeDtype | Sequence[ShapeDtype] | None = None,
+    out_type: Any = None,
     grid: ValueOrFn[Grid],
     name: str = "",
     num_warps: int | None = None,
@@ -1380,9 +1380,10 @@ def triton_call(
     kernel: A Triton kernel (e.g. a function decorated with `triton.jit`). All
       static values should be annotated with `triton.language.constexpr` or
       `triton.experimental.gluon.language.constexpr`.
-    out_type: An object with ``shape`` and ``dtype`` attributes or a sequence of
-      such objects. Pointers for each of the elements of ``out_type`` will be
-      passed into ``kernel`` following the inputs.
+    out_type: An object with ``shape`` and ``dtype`` attributes, or an arbitrary
+      pytree of such objects. A pointer for each leaf of ``out_type`` will be
+      passed into ``kernel`` following the inputs, and the result is returned
+      with the same pytree structure.
     grid: An integer, tuple of up to 3 integers, or a function that returns a
       tuple of up to 3 integers. When `grid` is an integer, `kernel` is invoked
       in `grid`-many parallel executions. When `grid` is a sequence of integers,
