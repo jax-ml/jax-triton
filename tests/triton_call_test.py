@@ -27,7 +27,6 @@ from jax._src.lib import gpu_triton
 from jax._src.lib import version as jaxlib_version
 import jax.numpy as jnp
 import jax_triton as jt
-import jax_triton.triton_lib as jttl
 import numpy as np
 import triton
 import triton.language as tl
@@ -331,7 +330,7 @@ class TritonKernelCallTest(parameterized.TestCase):
 
     # Scalar kwargs must stay static and not leak into metaparams.
     jaxpr = jax.make_jaxpr(call)(x, y)
-    (eqn,) = [e for e in jaxpr.eqns if e.primitive == jttl.triton_kernel_call_p]
+    (eqn,) = [e for e in jaxpr.eqns if e.primitive == jt.triton_kernel_call_p]
     self.assertLen(eqn.invars, 2)
     self.assertNotIn("n_elements", eqn.params["metaparams"])
     self.assertIn("BLOCK_SIZE", eqn.params["metaparams"])
@@ -711,14 +710,14 @@ class TritonKernelCallTest(parameterized.TestCase):
     fn2 = jax.jit(lambda x, y: add(x, y, BLOCK_SIZE=32, kernel=my_add_kernel))
     fn3 = jax.jit(lambda x, y: add(x, y, BLOCK_SIZE=64, kernel=my_add_kernel))
 
-    triton_fn = jttl.TritonFunction(my_add_kernel)
+    triton_fn = jt.TritonFunction(my_add_kernel)
     self.assertEmpty(triton_fn._kernel_cache)
 
     x1, y1 = create_random_inputs([42])
     x2, y2 = create_random_inputs([43])
 
     with mock.patch.object(
-        jttl, "compile_ttir_inplace", wraps=jttl.compile_ttir_inplace
+        jt, "compile_ttir_inplace", wraps=jt.compile_ttir_inplace
     ) as mock_compile:
       _ = fn1(x1, y1)
       self.assertEqual(mock_compile.call_count, 1)
@@ -748,14 +747,14 @@ class TritonKernelCallTest(parameterized.TestCase):
           grid=x.size,
       )
 
-    triton_fn = jttl.TritonFunction(silly_add_kernel)
+    triton_fn = jt.TritonFunction(silly_add_kernel)
     self.assertEmpty(triton_fn._kernel_cache)
 
     with mock.patch.object(
-        jttl.TritonFunction,
+        jt.TritonFunction,
         "get_or_create_kernel",
         autospec=True,
-        wraps=jttl.TritonFunction.get_or_create_kernel,
+        wraps=jt.TritonFunction.get_or_create_kernel,
     ) as mock_get_or_create:
       _ = silly_add(42)
       self.assertEqual(mock_get_or_create.call_count, 1)
@@ -794,7 +793,7 @@ class TritonKernelCallTest(parameterized.TestCase):
       tl.store(output_ptr + offsets, FN(x, y))
 
     x, y = create_random_inputs([8])
-    triton_fn = jttl.TritonFunction(dispatch_kernel)
+    triton_fn = jt.TritonFunction(dispatch_kernel)
     self.assertEmpty(triton_fn._kernel_cache)
 
     def call(fn):
@@ -1019,7 +1018,7 @@ class TritonKernelCallTest(parameterized.TestCase):
         lambda x, y: add(x, y, BLOCK_SIZE=8, has_side_effect=True)
     )(x, y)
     eqns_true = [
-        e for e in jaxpr_true.eqns if e.primitive == jttl.triton_kernel_call_p
+        e for e in jaxpr_true.eqns if e.primitive == jt.triton_kernel_call_p
     ]
     self.assertLen(eqns_true, 1)
     self.assertTrue(eqns_true[0].params["has_side_effect"])
@@ -1027,7 +1026,7 @@ class TritonKernelCallTest(parameterized.TestCase):
     # Case 2: has_side_effect=False (default)
     jaxpr_false = jax.make_jaxpr(lambda x, y: add(x, y, BLOCK_SIZE=8))(x, y)
     eqns_false = [
-        e for e in jaxpr_false.eqns if e.primitive == jttl.triton_kernel_call_p
+        e for e in jaxpr_false.eqns if e.primitive == jt.triton_kernel_call_p
     ]
     self.assertLen(eqns_false, 1)
     self.assertFalse(eqns_false[0].params.get("has_side_effect", False))
@@ -1040,7 +1039,7 @@ class TritonKernelCallTest(parameterized.TestCase):
     # even when its outputs are completely unused (instantiation=False).
     dce_jaxpr, _ = pe.dce_jaxpr(jaxpr.jaxpr, [False])
     dce_eqns = [
-        e for e in dce_jaxpr.eqns if e.primitive == jttl.triton_kernel_call_p
+        e for e in dce_jaxpr.eqns if e.primitive == jt.triton_kernel_call_p
     ]
     self.assertLen(dce_eqns, 1)
 
