@@ -95,10 +95,10 @@ def _make_tma_copy_kernel(arch):
     bar = arch.mbarrier.allocate_mbarrier()
     arch.mbarrier.init(bar, count=1)
     arch.mbarrier.expect(bar, bytes_per_cta=in_desc.nbytes_per_cta)
-    arch.tma.async_copy_global_to_shared(in_desc, [0, 0], bar, smem)
+    arch.tma.async_load(in_desc, [0, 0], bar, smem)
     arch.mbarrier.wait(bar, phase=0)
     arch.mbarrier.invalidate(bar)
-    arch.tma.async_copy_shared_to_global(out_desc, [0, 0], smem)
+    arch.tma.async_store(out_desc, [0, 0], smem)
     arch.tma.store_wait(0)
 
   return tma_copy_kernel
@@ -122,10 +122,10 @@ def _make_host_desc_tma_copy_kernel(arch):
     bar = arch.mbarrier.allocate_mbarrier()
     arch.mbarrier.init(bar, count=1)
     arch.mbarrier.expect(bar, bytes_per_cta=in_desc.nbytes_per_cta)
-    arch.tma.async_copy_global_to_shared(in_desc, [0, 0], bar, smem)
+    arch.tma.async_load(in_desc, [0, 0], bar, smem)
     arch.mbarrier.wait(bar, phase=0)
     arch.mbarrier.invalidate(bar)
-    arch.tma.async_copy_shared_to_global(out_desc, [0, 0], smem)
+    arch.tma.async_store(out_desc, [0, 0], smem)
     arch.tma.store_wait(0)
 
   return tma_copy_kernel
