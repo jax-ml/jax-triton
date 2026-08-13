@@ -31,7 +31,6 @@ import jax_triton.triton_lib as jttl
 import numpy as np
 import triton
 import triton.language as tl
-from triton.tools.tensor_descriptor import TensorDescriptor
 
 config.parse_flags_with_absl()
 
@@ -1322,16 +1321,12 @@ class TritonKernelCallTest(parameterized.TestCase):
     M, N = shape
     input = random.uniform(random.key(0), (M, N), dtype=jnp.float32)
     input = input.astype(dtype)
-    # Disable __post_init__ because it assumes PyTorch tensors.
-    with mock.patch.object(TensorDescriptor, "__post_init__"):
-      in_desc = TensorDescriptor(
-          input,
-          shape=[M, N],
-          strides=[N, 1],
-          block_shape=[M, N],
-          padding=padding,
-          round_f32_to_tf32=round_f32_to_tf32,
-      )
+    in_desc = jt.TensorDescriptor.from_array(
+        input,
+        block_shape=[M, N],
+        padding=padding,
+        round_f32_to_tf32=round_f32_to_tf32,
+    )
     output = jt.triton_call(
         in_desc,
         kernel=tma_copy_kernel,

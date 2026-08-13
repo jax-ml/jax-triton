@@ -14,8 +14,6 @@
 
 """Gluon-specific tests."""
 
-from unittest import mock
-
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
@@ -31,7 +29,6 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.nvidia import blackwell as gl_blackwell
 from triton.experimental.gluon.language.nvidia import hopper as gl_hopper
-from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
 
 
 config.parse_flags_with_absl()
@@ -225,15 +222,9 @@ class GluonTest(parameterized.TestCase):
     layout = gl.NVMMASharedLayout(
         swizzle, element_bitwidth=jax.dtypes.itemsize_bits(x.dtype), rank=x.ndim
     )
-    # Disable __post_init__ because it assumes PyTorch tensors.
-    with mock.patch.object(TensorDescriptor, "__post_init__"):
-      in_desc = TensorDescriptor(
-          x,
-          shape=[M, N],
-          strides=[N, 1],
-          block_shape=[M, N],
-          layout=layout,
-      )
+    in_desc = jt.TensorDescriptor.from_array(
+        x, block_shape=[M, N], layout=layout
+    )
 
     output = jt.triton_call(
         in_desc, kernel=kernel, out_type=jax.typeof(x), grid=1, M=M, N=N
