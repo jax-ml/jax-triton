@@ -75,7 +75,7 @@ class _Stub(Any):
 try:
   import triton.backends.nvidia.compiler as cb
   from triton.backends.nvidia.driver import TMA_DTYPE_DEVICE_TO_HOST as _TMA_DTYPE_DEVICE_TO_HOST
-  from triton.backends.nvidia.driver import TMA_TF32 as _TMA_TF32
+  from triton.backends.nvidia.driver import TMA_TF32 as _TMA_TF32  # pyrefly: ignore[missing-module-attribute]
 except ImportError:
   # NVIDIA backend is not available.
   cb: Any = types.SimpleNamespace(
