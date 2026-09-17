@@ -696,6 +696,7 @@ class KernelSpecialization:
     }
 
     constants = dict(metaparams)
+    constants.update({k: None for k, v in signature.items() if v is None})
     constants.update({
         arg_names[objpaths[i][0]]: 1
         for i in static_indices
