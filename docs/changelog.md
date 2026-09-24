@@ -4,7 +4,10 @@
 Remember to align the itemized text with the first line of an item within a list.
 -->
 
-## Unreleased
+## jax-triton 0.4.1 (September 24, 2026)
+
+* Bug fixes
+  * Allowed passing None to optional kernel parameters.
 
 ## jax-triton 0.4.0 (August 13, 2026)
 
