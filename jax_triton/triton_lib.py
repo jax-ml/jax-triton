@@ -326,8 +326,10 @@ def triton_kernel_call_abstract_eval(*in_avals, out_shapes, **__):
 
 
 def _triton_kernel_call_dce_rule(
-    used_outs: list[bool], eqn: core.JaxprEqn
+    used_outs: list[bool], *args: Any
 ) -> tuple[list[bool], core.JaxprEqn | None]:
+  del used_outs
+  eqn = args[-1]
   return [True] * len(eqn.invars), eqn
 
 
