@@ -26,7 +26,7 @@ def add_kernel(
     x_ptr,
     y_ptr,
     length,
-    out_ptr,                   # out_shape pointers follow the inputs.
+    out_ptr,                   # out_type pointers follow the inputs.
     block_size: tl.constexpr,  # constexpr params can go anywhere.
 ):
   """Adds two vectors output = x + y."""
@@ -66,7 +66,7 @@ print(jax.jit(add)(x_val, y_val))
 
 One could also use in-out parameters for kernels by passing a read-write
 `Ref` (created via `jax.new_ref`). The kernel mutates the `Ref` in place, so it
-is not listed in `out_shape`:
+is not listed in `out_type`:
 
 ```python
 

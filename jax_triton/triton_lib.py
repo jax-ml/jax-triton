@@ -340,51 +340,35 @@ def _triton_kernel_call_discharge_impl(
     in_avals,
     out_avals,
     args,
-    in_tree,
     out_shapes,
-    input_output_aliases,
     **params,
 ):
-  if input_output_aliases:
-    raise NotImplementedError(
-        "input_output_aliases cannot be combined with ref arguments"
-    )
-
-  ref_indices = []
-  arr_idx = op_idx = -1
-  for _, leaf in tree_util.tree_leaves_with_path(
-      in_tree.unflatten(in_avals),
-      is_leaf=lambda a: isinstance(a, (_StaticArg, _OutputPlaceholder)),
-  ):
-    if isinstance(leaf, _OutputPlaceholder):
-      continue
-    op_idx += 1
-    if isinstance(leaf, _StaticArg):
-      continue
-    arr_idx += 1
-    if isinstance(leaf, state.AbstractRef):
-      ref_indices.append((arr_idx, op_idx))
+  del out_avals
+  ref_indices = [
+      i
+      for i, aval in enumerate(in_avals)
+      if isinstance(aval, state.AbstractRef)
+  ]
 
   # Turn each ref into an input-output alias: append an extra output and alias
-  # it to the corresponding operand.
+  # it to the corresponding array argument.
   num_out_orig = len(out_shapes)
   new_out_shapes = list(out_shapes)
-  new_aliases: dict[int, int] = {}
-  for out_idx, (arr_idx, op_idx) in enumerate(ref_indices):
+  input_output_aliases: dict[int, int] = {}
+  for out_idx, arr_idx in enumerate(ref_indices):
     new_out_shapes.append(
         jax.ShapeDtypeStruct.like(in_avals[arr_idx].inner_aval)
     )
-    new_aliases[op_idx] = num_out_orig + out_idx
+    input_output_aliases[arr_idx] = num_out_orig + out_idx
   res = triton_kernel_call_p.bind(
       *args,
-      in_tree=in_tree,
       out_shapes=tuple(new_out_shapes),
-      input_output_aliases=FrozenDict(new_aliases),
+      input_output_aliases=FrozenDict(input_output_aliases),
       **params,
   )
   ans, updated_refs = util.split_list(res, [num_out_orig])
   new_invals: list[Any] = [None] * len(in_avals)
-  for out_idx, (arr_idx, _) in enumerate(ref_indices):
+  for out_idx, arr_idx in enumerate(ref_indices):
     new_invals[arr_idx] = updated_refs[out_idx]
   return new_invals, ans
 
@@ -901,12 +885,7 @@ class TritonFunction:
           f"Number of parameters in the kernel '{fn}' signature"
           f" ({len(self.signature.parameters)}: {self.signature})"
           " does not match reconstructed signature"
-          f" ({len(spec.signature)}: {spec.signature}). If the"
-          " kernel was working on an older version of jax-triton"
-          " and its triton_call() launcher uses"
-          " `input_output_aliases` argument, note that implicit"
-          " output arguments are no longer required for aliased"
-          " arguments."
+          f" ({len(spec.signature)}: {spec.signature})."
       )
 
     options = backend.parse_options(backend_options)  # pyrefly: ignore[bad-argument-type]
@@ -1031,10 +1010,9 @@ def triton_kernel_call_lowering(
     grid,
     compute_capability,
     backend_options: FrozenDict[str, Any],
-    input_output_aliases: FrozenDict[int, int],
-    zeroed_outputs,
     serialized_metadata,
     metaparams: FrozenDict[str, Any],
+    input_output_aliases: FrozenDict[int, int] = FrozenDict({}),
     has_side_effect: bool = False,
     cost_estimate: CostEstimate | None = None,
 ):
@@ -1053,15 +1031,11 @@ def triton_kernel_call_lowering(
   args: list[Any] = []
   objpaths: list[tuple[int, ...]] = []
   static_indices: set[int] = set()
-  output_flat_idx: dict[int, int] = {}
-  operand_flat_idx: list[int] = []
   for flat_idx, (path, leaf) in enumerate(flat_with_path):
     objpaths.append(tuple(k.idx for k in path))
     if isinstance(leaf, _OutputPlaceholder):
       args.append(ctx.avals_out[leaf.ordinal])
-      output_flat_idx[leaf.ordinal] = flat_idx
       continue
-    operand_flat_idx.append(flat_idx)
     if isinstance(leaf, _StaticArg):
       args.append(leaf.value)
       static_indices.add(flat_idx)
@@ -1078,16 +1052,6 @@ def triton_kernel_call_lowering(
   )
   configs = triton_fn.make_configs(backend_options, metaparams, named_args)
 
-  io_aliases: dict[int, int] = {}
-  for operand_idx, out_ordinal in input_output_aliases.items():
-    output_flat_idx[out_ordinal] = operand_flat_idx[operand_idx]
-    # Position of this operand among the traced (non-static) array args.
-    array_idx = sum(
-        fi not in static_indices for fi in operand_flat_idx[:operand_idx]
-    )
-    io_aliases[array_idx] = out_ordinal
-  input_output_aliases = FrozenDict(io_aliases)
-
   equal_to_1 = {
       i for i in static_indices if args[i] == 1 and len(objpaths[i]) == 1
   }
@@ -1096,17 +1060,6 @@ def triton_kernel_call_lowering(
   for config in configs:
     config_metaparams = {**metaparams, **config.kwargs}
     config_grid = normalize_grid(grid, config_metaparams)
-
-    config_zeroed_outputs = zeroed_outputs
-    if callable(zeroed_outputs):
-      config_zeroed_outputs = config_zeroed_outputs(config_metaparams)
-
-    # zeroed_params_with_sizes is a dict output_arg_idx -> aval_size_bytes
-    # config_zeroed_outputs contains output ordinal indices
-    zeroed_params_with_sizes = {
-        output_flat_idx[i]: aval_size_bytes(ctx.avals_out[i])
-        for i in sorted(config_zeroed_outputs)
-    }
 
     config_backend_options = {
         **backend_options,
@@ -1172,7 +1125,7 @@ def triton_kernel_call_lowering(
         arg_attrs = specialization_attr[objpaths[i]]
         kernel_params.append(
             triton_kernel_call_lib.create_array_parameter(
-                zeroed_params_with_sizes.get(i, 0),
+                0,
                 16 if (["tt.divisibility", 16] in arg_attrs) else 0,
             )
         )
@@ -1305,7 +1258,7 @@ class _OutputPlaceholder:
 def triton_call(
     *args: jax.Array | jax.Ref | StaticScalar,
     kernel: Autotuner | Heuristics | JITFunction,
-    out_type: Any = None,
+    out_type: Any,
     grid: ValueOrFn[Grid],
     name: str = "",
     num_warps: int | None = None,
@@ -1314,8 +1267,6 @@ def triton_call(
     num_ctas: int | None = None,
     compute_capability: int | None = None,
     backend_options: Mapping[str, Any] | None = None,
-    input_output_aliases: dict[int, int] | None = None,
-    zeroed_outputs: ValueOrFn[Sequence[int]] = (),
     debug: bool = False,
     serialized_metadata: bytes = b"",
     cost_estimate: CostEstimate | None = None,
@@ -1375,11 +1326,11 @@ def triton_call(
   Args:
     *args: Positional operands for the Triton kernel. Array and ``Ref``
       arguments are passed as runtime buffers in their positional order before
-      any ``out_type`` pointers. ``Ref`` arguments, created via ``jax.new_ref``
-      are read-write buffers that the kernel mutates in-place. Unlike
-      ``input_output_aliases``, they should not be included in ``out_type``.
-      Non-array scalars are baked in as static (specialization) values, and any
-      argument bound to a ``constexpr`` parameter becomes a metaparam.
+      any ``out_type`` pointers. ``Ref`` arguments, created via ``jax.new_ref``,
+      are read-write buffers that the kernel mutates in-place; they should not
+      be included in ``out_type``. Non-array scalars are baked in as static
+      (specialization) values, and any argument bound to a ``constexpr``
+      parameter becomes a metaparam.
     kernel: A Triton kernel (e.g. a function decorated with `triton.jit`). All
       static values should be annotated with `triton.language.constexpr` or
       `triton.experimental.gluon.language.constexpr`.
@@ -1395,19 +1346,6 @@ def triton_call(
       tuple of up to 3 integers.
     name: A name for the kernel call.
     compute_capability: The GPU compute capability to compile for.
-    input_output_aliases: Deprecated. A dictionary mapping input argument
-      indices to output indices. Providing a mapping will alias the
-      corresponding buffers. Input indices refer to the flattened
-      non-``constexpr`` operands in kernel parameter declaration order (whether
-      passed positionally or as keyword arguments). If operands contain nested
-      tuples, the indices correspond to the flattened leaves. Output indices
-      correspond to the flattened ``out_type``.
-    zeroed_outputs: Deprecated. A sequence of indices into the flattened
-      ``out_type``, or a function returning such a sequence, for outputs that
-      should be zeroed before the kernel is launched. Note that this also
-      supports zeroing input-output (i.e. aliased through
-      ``input_output_aliases``) arguments that should be treated as outputs in
-      this argument.
     num_warps: The number of warps used to execute the Triton kernel.
     num_stages: The number of stages emitted by the Triton compiler.
     num_ctas: The size of thread blocks per cluster to be used on GPUs with
@@ -1430,9 +1368,8 @@ def triton_call(
       ``*args``. All other keywords -- ``constexpr`` parameters and names that
       are not kernel parameters -- are treated as metaparams. Missing constexpr
       arguments are filled from the kernel's declared defaults. Metaparams are
-      also provided to ``grid`` and ``zeroed_outputs`` when either is a
-      function. A misspelled operand name silently becomes a metaparam rather
-      than raising an error.
+      also provided to ``grid`` when it is a function. A misspelled operand name
+      silently becomes a metaparam rather than raising an error.
 
   Returns:
     Outputs from the Triton kernel.
@@ -1467,22 +1404,6 @@ def triton_call(
           f"backend_options[{k!r}] must be hashable, got {v!r}"
       ) from None
 
-  if "out_shape" in kwargs:
-    if out_type is not None:
-      raise TypeError(
-          "Cannot specify both out_type= and the deprecated out_shape="
-      )
-    warnings.warn(
-        "out_shape= is deprecated in favor of out_type=",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    out_type = kwargs.pop("out_shape")
-  elif out_type is None:
-    raise TypeError(
-        "Either out_type= or the deprecated out_shape= must be provided"
-    )
-
   out_type = tree_util.tree_map(
       lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), out_type
   )
@@ -1507,7 +1428,6 @@ def triton_call(
   bound = triton_fn.signature.bind_partial(*args, **kernel_kwargs)
 
   operands: dict[str, Any] = {}
-  has_refs = False
   for p_name, value in bound.arguments.items():
     if p_name in constexpr_names:
       metaparams[p_name] = value
@@ -1519,50 +1439,17 @@ def triton_call(
       raise NotImplementedError(
           "TransformedRefs are not supported as triton_call arguments"
       )
-    has_refs = has_refs or any(map(_is_ref, leaves))
     operands[p_name] = tree_util.tree_map(_StaticArg.maybe_wrap, value)
 
   flat_out_shapes, out_tree = tree_util.tree_flatten(out_type)
 
-  if input_output_aliases is None:
-    input_output_aliases = {}
-  elif input_output_aliases:
-    warnings.warn(
-        "input_output_aliases is deprecated. Pass inputs you want to alias as"
-        " Ref arguments instead",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-
-    if has_refs:
-      raise ValueError(
-          "input_output_aliases cannot be combined with Ref arguments. Refs"
-          " express input/output aliasing implicitly"
-      )
-
-  if zeroed_outputs if callable(zeroed_outputs) else len(zeroed_outputs):
-    warnings.warn(
-        "zeroed_outputs is deprecated. Zero the buffer explicitly and pass"
-        " it as a Ref argument instead",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-
-  # Aliased outputs reuse their input buffer; unaliased outputs are matched
-  # to the kernel parameters not supplied by the caller.
-  aliased_out_ordinals = frozenset(input_output_aliases.values())
-  if len(aliased_out_ordinals) != len(input_output_aliases):
-    raise ValueError("input_output_aliases must be a bijection")
   n_missing_operands = len(triton_fn.non_constexpr_param_names) - len(operands)
-  n_unaliased_outputs = len(flat_out_shapes) - len(aliased_out_ordinals)
-  if n_missing_operands != n_unaliased_outputs:
+  if n_missing_operands != len(flat_out_shapes):
     raise ValueError(
-        f"out_type has {n_unaliased_outputs} unaliased outputs, but"
+        f"out_type has {len(flat_out_shapes)} outputs, but"
         f" {n_missing_operands} kernel parameters are missing an argument"
     )
-  out_ordinals = iter(
-      o for o in range(len(flat_out_shapes)) if o not in aliased_out_ordinals
-  )
+  out_ordinals = iter(range(len(flat_out_shapes)))
   array_args, in_tree = tree_util.tree_flatten([
       operands[n] if n in operands else _OutputPlaceholder(next(out_ordinals))
       for n in triton_fn.non_constexpr_param_names
@@ -1577,8 +1464,6 @@ def triton_call(
       grid=grid,
       compute_capability=compute_capability,
       backend_options=FrozenDict(backend_options),
-      input_output_aliases=FrozenDict(input_output_aliases),
-      zeroed_outputs=zeroed_outputs,
       serialized_metadata=serialized_metadata,
       cost_estimate=FrozenDict(cost_estimate) if cost_estimate else None,
       has_side_effect=has_side_effect,

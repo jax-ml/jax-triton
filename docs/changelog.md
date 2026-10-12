@@ -4,6 +4,14 @@
 Remember to align the itemized text with the first line of an item within a list.
 -->
 
+## Unreleased
+
+* Breaking changes
+  * Removed the deprecated `out_shape` argument to `triton_call`. Use `out_type`
+    instead.
+  * Removed the deprecated `input_output_aliases` and `zeroed_outputs` arguments
+    to `triton_call`. Use `Ref` arguments for in-place buffer updates instead.
+
 ## jax-triton 0.4.1 (September 24, 2026)
 
 * Bug fixes
