@@ -574,7 +574,7 @@ def compile_ttir_to_hsaco_inplace(
   if hip_options.debug:
     print(ttir)
   try:
-    metadata = {}
+    metadata: dict[str, Any] = {"num_ctas": hip_options.num_ctas}
     opt_ttir = hip_backend.make_ttir(ttir, metadata, hip_options)
     ttgir = hip_backend.make_ttgir(opt_ttir, metadata, hip_options)
   except RuntimeError as e:
