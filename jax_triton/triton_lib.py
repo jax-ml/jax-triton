@@ -92,6 +92,10 @@ except ImportError:
       HIPOptions=_Stub, HIPBackend=_Stub, GPUTarget=_Stub
   )
 
+# Treat this module as library-internal. Otherwise the innermost "user" frame of
+# every `triton_call` op is the `triton_kernel_call_p.bind` call below.
+jex.source_info_util.register_exclusion(__file__)
+
 # TODO(slebedev): Investigate if this is necessary.
 if "TRITON_CACHE_DIR" in os.environ:
   del os.environ["TRITON_CACHE_DIR"]
