@@ -57,9 +57,13 @@ import triton.experimental.gluon.language as gl
 import triton.language as tl
 
 try:
-  from jax._src.pallas.triton import gpu_info  # pyrefly: ignore[missing-module-attribute]
+  from jax._src import gpu_info  # pyrefly: ignore[missing-module-attribute]
 except ImportError:
-  gpu_info = None  # Only available in JAX 0.11.0+.
+  # Remove once we require JAX 0.13.0+.
+  try:
+    from jax._src.pallas.triton import gpu_info  # pyrefly: ignore[missing-import,missing-module-attribute]
+  except ImportError:
+    gpu_info = None  # Only available in JAX 0.11.0+.
 
 try:
   from jax._src.lib import gpu_triton as triton_kernel_call_lib
