@@ -6,6 +6,8 @@ Remember to align the itemized text with the first line of an item within a list
 
 ## Unreleased
 
+## jax-triton 0.5.0 (November 5, 2026)
+
 * Breaking changes
   * Removed the deprecated `out_shape` argument to `triton_call`. Use `out_type`
     instead.
