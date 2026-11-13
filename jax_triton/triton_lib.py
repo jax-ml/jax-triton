@@ -1457,6 +1457,19 @@ def triton_call(
         f"out_type has {len(flat_out_shapes)} outputs, but"
         f" {n_missing_operands} kernel parameters are missing an argument"
     )
+  first_output = None
+  for param_name in triton_fn.non_constexpr_param_names:
+    if param_name not in operands:
+      if first_output is None:
+        first_output = param_name
+    elif first_output is not None and tree_util.tree_leaves(
+        operands[param_name]
+    ):
+      raise ValueError(
+          f"Output parameter '{first_output}' cannot precede input parameter"
+          f" '{param_name}'; `out_type` outputs must follow all input"
+          " arrays/Refs. Use `jax.new_ref` or a wrapper kernel instead."
+      )
   out_ordinals = iter(range(len(flat_out_shapes)))
   array_args, in_tree = tree_util.tree_flatten([
       operands[n] if n in operands else _OutputPlaceholder(next(out_ordinals))

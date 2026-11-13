@@ -332,6 +332,58 @@ class TritonKernelCallTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(out, x + y)
 
+  def test_output_before_input_raises(self):
+    @triton.jit
+    def scale_out_first(y_ptr, x_ptr, n, block_size: tl.constexpr):
+      offs = tl.program_id(0) * block_size + tl.arange(0, block_size)
+      mask = offs < n
+      tl.store(y_ptr + offs, 2.0 * tl.load(x_ptr + offs, mask=mask), mask=mask)
+
+    x = jnp.arange(1.0, 9.0, dtype=jnp.float32)
+    with self.assertRaisesRegex(
+        ValueError,
+        "Output parameter 'y_ptr' cannot precede input parameter 'x_ptr'",
+    ):
+      jt.triton_call(
+          kernel=scale_out_first,
+          out_type=jax.ShapeDtypeStruct(x.shape, x.dtype),
+          grid=(1,),
+          x_ptr=x,
+          n=x.size,
+          block_size=8,
+      )
+
+    # Passing the output as a Ref in its declared position still works.
+    y_ref = jax.new_ref(jnp.zeros_like(x))
+    jt.triton_call(
+        y_ref,
+        x,
+        kernel=scale_out_first,
+        out_type=(),
+        grid=(1,),
+        n=x.size,
+        block_size=8,
+    )
+    np.testing.assert_array_equal(y_ref[...], 2.0 * x)
+
+  def test_output_before_static_scalar_succeeds(self):
+    @triton.jit
+    def scale_out_before_scalar(x_ptr, y_ptr, n, block_size: tl.constexpr):
+      offs = tl.program_id(0) * block_size + tl.arange(0, block_size)
+      mask = offs < n
+      tl.store(y_ptr + offs, 2.0 * tl.load(x_ptr + offs, mask=mask), mask=mask)
+
+    x = jnp.arange(1.0, 9.0, dtype=jnp.float32)
+    out = jt.triton_call(
+        x,
+        kernel=scale_out_before_scalar,
+        out_type=jax.ShapeDtypeStruct(x.shape, x.dtype),
+        grid=(1,),
+        n=x.size,
+        block_size=8,
+    )
+    np.testing.assert_array_equal(out, 2.0 * x)
+
   def test_kwarg_operand_conflict_raises(self):
     x = jnp.arange(8, dtype=jnp.float32)
     with self.assertRaisesRegex(
