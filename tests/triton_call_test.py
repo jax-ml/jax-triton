@@ -1157,6 +1157,67 @@ class TritonKernelCallTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(out_with_bias, x + bias)
 
+  def test_specialization(self):
+    def add_scalar(x_ptr, unused_const: tl.constexpr, s, out_ptr):
+      tl.store(out_ptr, tl.load(x_ptr) + s)
+
+    @triton.jit
+    def unpack_tuple(vals, out_ptr):
+      a, b, c = vals
+      tl.store(out_ptr, a + b * 100 + c * 1000)
+
+    x = jnp.array([10.0], dtype=jnp.float32)
+    compiled = []
+    orig = jttl.compile_ttir_inplace
+
+    def record(ttir, *args):
+      compiled.append(str(ttir))
+      return orig(ttir, *args)
+
+    def run(fn, s):
+      out = jt.triton_call(
+          x, s=s, kernel=fn, out_type=jax.typeof(x), grid=(1,), unused_const=0
+      )
+      np.testing.assert_array_equal(out, x + s)
+
+    kernel = triton.jit(add_scalar)
+    nospec = triton.jit(do_not_specialize=["s"])(add_scalar)
+    noalign = triton.jit(do_not_specialize_on_alignment=["x_ptr", "s"])(
+        add_scalar
+    )
+    with mock.patch.object(jttl, "compile_ttir_inplace", side_effect=record):
+      for a, b, expected in (
+          (16, 32, "%s: i32 {tt.divisibility = 16 : i32}"),
+          (17, 19, "%s: i32"),
+          (1.0, 2.0, "%s: f32"),
+          (False, True, "%s: i1"),
+      ):
+        run(kernel, a)
+        run(kernel, b)
+        self.assertIn(expected, compiled[-1])
+      self.assertLen(compiled, 4)
+      self.assertNotIn("%s: i32 {", compiled[1])
+      self.assertIn(
+          "%out_ptr: !tt.ptr<f32> {tt.divisibility = 16 : i32}", compiled[1]
+      )
+      for s in (1, 16, 17):
+        run(nospec, s)
+      self.assertLen(compiled, 5)
+      run(noalign, 16)
+      self.assertNotIn("%x_ptr: !tt.ptr<f32> {", compiled[-1])
+      self.assertNotIn("%s: i32 {", compiled[-1])
+
+      i32_out = jax.ShapeDtypeStruct((1,), jnp.int32)
+      for a, c in ((16, 5), (32, 7)):
+        out = jt.triton_call(
+            (a, 1, c), kernel=unpack_tuple, out_type=i32_out, grid=(1,)
+        )
+        np.testing.assert_array_equal(out, [a + 100 + c * 1000])
+      self.assertLen(compiled, 7)
+      self.assertIn("%vals.0: i32 {tt.divisibility = 16 : i32}", compiled[-1])
+      self.assertNotIn("%vals.1", compiled[-1])
+      self.assertNotIn("%vals.2: i32 {", compiled[-1])
+
 
 if __name__ == "__main__":
   os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
