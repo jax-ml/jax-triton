@@ -6,6 +6,9 @@ Remember to align the itemized text with the first line of an item within a list
 
 ## Unreleased
 
+* Bug fixes
+  * Fixed kernel argument specialization to match upstream Triton.
+
 ## jax-triton 0.5.0 (November 5, 2026)
 
 * Breaking changes
