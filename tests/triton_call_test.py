@@ -332,6 +332,64 @@ class TritonKernelCallTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(out, x + y)
 
+  def test_output_before_input(self):
+    @triton.jit
+    def scale(
+        p0_ptr, p1_ptr, n, block_size: tl.constexpr, out_first: tl.constexpr
+    ):
+      offs = tl.program_id(0) * block_size + tl.arange(0, block_size)
+      mask = offs < n
+      if out_first:
+        tl.store(
+            p0_ptr + offs, 2.0 * tl.load(p1_ptr + offs, mask=mask), mask=mask
+        )
+      else:
+        tl.store(
+            p1_ptr + offs, 2.0 * tl.load(p0_ptr + offs, mask=mask), mask=mask
+        )
+
+    x = jnp.arange(1.0, 9.0, dtype=jnp.float32)
+    with self.subTest("out_type_before_input"):
+      with self.assertRaisesRegex(
+          NotImplementedError,
+          "Output parameter 'p0_ptr' cannot precede input parameter 'p1_ptr'",
+      ):
+        jt.triton_call(
+            kernel=scale,
+            out_type=jax.ShapeDtypeStruct(x.shape, x.dtype),
+            grid=(1,),
+            p1_ptr=x,
+            n=x.size,
+            block_size=8,
+            out_first=True,
+        )
+
+    with self.subTest("ref_in_declared_position"):
+      y_ref = jax.new_ref(jnp.zeros_like(x))
+      jt.triton_call(
+          y_ref,
+          x,
+          kernel=scale,
+          out_type=(),
+          grid=(1,),
+          n=x.size,
+          block_size=8,
+          out_first=True,
+      )
+      np.testing.assert_array_equal(y_ref[...], 2.0 * x)
+
+    with self.subTest("out_type_before_static_scalar"):
+      out = jt.triton_call(
+          x,
+          kernel=scale,
+          out_type=jax.ShapeDtypeStruct(x.shape, x.dtype),
+          grid=(1,),
+          n=x.size,
+          block_size=8,
+          out_first=False,
+      )
+      np.testing.assert_array_equal(out, 2.0 * x)
+
   def test_kwarg_operand_conflict_raises(self):
     x = jnp.arange(8, dtype=jnp.float32)
     with self.assertRaisesRegex(

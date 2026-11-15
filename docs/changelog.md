@@ -6,6 +6,11 @@ Remember to align the itemized text with the first line of an item within a list
 
 ## Unreleased
 
+* Bug fixes
+  * `triton_call` now raises `NotImplementedError` when an `out_type` output
+    parameter precedes an input array or `Ref` parameter, instead of silently
+    misbinding buffers.
+
 ## jax-triton 0.5.0 (November 5, 2026)
 
 * Breaking changes

@@ -1345,7 +1345,9 @@ def triton_call(
     out_type: An object with ``shape`` and ``dtype`` attributes, or an arbitrary
       pytree of such objects. A pointer for each leaf of ``out_type`` will be
       passed into ``kernel`` following the inputs, and the result is returned
-      with the same pytree structure.
+      with the same pytree structure. ``out_type`` parameters must be declared
+      after all input array and ``Ref`` parameters in ``kernel``; otherwise,
+      pass the output buffer as a ``Ref`` in its declared position.
     grid: An integer, tuple of up to 3 integers, or a function that returns a
       tuple of up to 3 integers. When `grid` is an integer, `kernel` is invoked
       in `grid`-many parallel executions. When `grid` is a sequence of integers,
@@ -1457,6 +1459,18 @@ def triton_call(
         f"out_type has {len(flat_out_shapes)} outputs, but"
         f" {n_missing_operands} kernel parameters are missing an argument"
     )
+  first_output = None
+  for param_name in triton_fn.non_constexpr_param_names:
+    if param_name not in operands:
+      first_output = first_output or param_name
+    elif first_output is not None and tree_util.tree_leaves(
+        operands[param_name]
+    ):
+      raise NotImplementedError(
+          f"Output parameter '{first_output}' cannot precede input parameter"
+          f" '{param_name}'; pass '{first_output}' as a `jax.Ref` instead of"
+          " listing it in `out_type`."
+      )
   out_ordinals = iter(range(len(flat_out_shapes)))
   array_args, in_tree = tree_util.tree_flatten([
       operands[n] if n in operands else _OutputPlaceholder(next(out_ordinals))
