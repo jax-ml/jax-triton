@@ -632,18 +632,18 @@ class KernelSpecialization:
       used in the compilation cache key.
     attrs: Per-argument attributes (e.g. divisibility hints) keyed by argument
       index tuples.
-    constants: Constant argument names to their values.
+    constants: Constant argument names or index tuples to their values.
   """
 
-  signature: dict[str, str]
-  specialization: list[Any]
+  signature: dict[str, Any]
+  specialization: list[tuple[str, Any]]
   attrs: dict[tuple[int, ...], Any]
-  constants: dict[str, Any]
+  constants: dict[str | tuple[int, ...], Any]
 
   @classmethod
   def build(
       cls,
-      arg_names: list[str],
+      non_constexpr_params: Sequence[triton.runtime.jit.KernelParam],
       args: list[Any],
       arg_dtypes: list[str],
       in_tree: tree_util.PyTreeDef,
@@ -651,53 +651,67 @@ class KernelSpecialization:
       metaparams: Mapping[str, Any],
       backend: tc.BaseBackend,
   ) -> KernelSpecialization:
-    # Build the signature dict, restoring nested structure from ``in_tree``.
-    signature = dict(strict_zip(arg_names, in_tree.unflatten(arg_dtypes)))
-
-    # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
-    # We assume that all arrays are aligned to 16 bytes, and Triton may use this
-    # assumption, unless array args are included in the `do_not_specialize` list.
-    static_indices = {
-        i
-        for i, a in enumerate(args)
-        if not isinstance(a, (core.AbstractValue, TensorDescriptor))
-    }
-    alignments = [0 if i in static_indices else 16 for i in range(len(args))]
     specialize_impl = _triton.native_specialize_impl  # pyrefly: ignore[missing-attribute]
     is_const = False
-    do_specialize = True
-    specialization = [
-        specialize_impl(
+    params_by_num = {p.num: p for p in non_constexpr_params}
+    specialization: list[tuple[str, Any]] = []
+    attrs: dict[tuple[int, ...], Any] = {}
+    constants: dict[str | tuple[int, ...], Any] = {**metaparams}
+
+    for arg, arg_dtype, objpath in strict_zip(args, arg_dtypes, objpaths):
+      param = params_by_num[objpath[0]]
+      # Triton ignores these flags for tuple elements.
+      do_specialize = len(objpath) > 1 or not param.do_not_specialize
+      align = len(objpath) > 1 or not param.do_not_specialize_on_alignment
+
+      if isinstance(arg, core.AbstractValue):
+        # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
+        # We assume that all arrays are aligned to 16 bytes, and Triton may use
+        # this assumption, unless array args are included in the
+        # `do_not_specialize` list.
+        spec_type, attr = specialize_impl(
             backend,
             types.SimpleNamespace(
-                data_ptr=lambda a=alignment: a,
-                dtype=_JAX_TO_TRITON_TYPE_MAP[arg.base.dtype]
-                if isinstance(arg, TensorDescriptor)
-                else arg_dtype.removeprefix("*"),
+                data_ptr=lambda: 16,
+                dtype=arg_dtype.removeprefix("*"),
             ),
             is_const,
             do_specialize,
-            alignment > 0,
+            align,
         )
-        for arg, arg_dtype, alignment in strict_zip(
-            args, arg_dtypes, alignments
+      elif isinstance(arg, TensorDescriptor):
+        spec_type, attr = arg_dtype, None
+      else:
+        raw_type, attr = specialize_impl(
+            backend, to_python_type(arg), is_const, do_specialize, align
         )
-    ]
+        if raw_type == "constexpr":
+          spec_type = "constexpr"
+          if isinstance(attr, (tl.constexpr, gl.constexpr)):
+            attr = attr.value
+          constants[objpath] = attr
+        else:
+          # Keep `get_type_id` dtypes (`B`, `u32`, `fp64`) so `signature`
+          # matches what `create_scalar_parameter` expects.
+          spec_type = arg_dtype
 
-    attrs: dict[tuple[int, ...], Any] = {
-        objpaths[i]: backend.parse_attr(attr)
-        for i, (_, attr) in enumerate(specialization)
-    }
+      specialization.append((spec_type, attr))
+      if (
+          spec_type != "constexpr"
+          and isinstance(attr, str)
+          and (parsed := backend.parse_attr(attr))
+      ):
+        attrs[objpath] = parsed
 
-    constants = dict(metaparams)
+    # Build the signature dict, restoring nested structure from ``in_tree``.
+    arg_names = [p.name for p in non_constexpr_params]
+    signature = dict(
+        strict_zip(arg_names, in_tree.unflatten(t for t, _ in specialization))
+    )
     constants.update({k: None for k, v in signature.items() if v is None})
-    constants.update({
-        arg_names[objpaths[i][0]]: 1
-        for i in static_indices
-        if args[i] == 1 and len(objpaths[i]) == 1
-    })
     for constant in constants:
-      signature[constant] = "constexpr"
+      if isinstance(constant, str):
+        signature[constant] = "constexpr"
     return cls(signature, specialization, attrs, constants)
 
 
@@ -836,9 +850,14 @@ class TritonFunction:
     return frozenset(p.name for p in self.params if p.is_constexpr)
 
   @functools.cached_property
+  def non_constexpr_params(self) -> list[triton.runtime.jit.KernelParam]:
+    """Parameters not annotated with ``constexpr``."""
+    return [p for p in self.params if not p.is_constexpr]
+
+  @functools.cached_property
   def non_constexpr_param_names(self) -> list[str]:
     """Names of parameters not annotated with ``constexpr``."""
-    return [p.name for p in self.params if not p.is_constexpr]
+    return [p.name for p in self.non_constexpr_params]
 
   @functools.cached_property
   def param_defaults(self) -> dict[str, Any]:
@@ -959,7 +978,9 @@ class TritonFunction:
       backend_options: Mapping[str, Any],
       metaparams,
   ) -> tuple[
-      triton_kernel_call_lib.TritonKernel, Any, Sequence[TensorDescMeta]
+      triton_kernel_call_lib.TritonKernel,
+      KernelSpecialization,
+      Sequence[TensorDescMeta],
   ]:
     gpu_target = make_target_func(
         compute_capability, backend_options["num_ctas"]
@@ -968,7 +989,7 @@ class TritonFunction:
     assert isinstance(backend, (cb.CUDABackend, hb.HIPBackend))
 
     spec = KernelSpecialization.build(
-        self.non_constexpr_param_names,
+        self.non_constexpr_params,
         args,
         arg_dtypes,
         in_tree,
@@ -997,7 +1018,7 @@ class TritonFunction:
         )
 
     kernel, tensordesc_meta = cached
-    return kernel, spec.attrs, tensordesc_meta
+    return kernel, spec, tensordesc_meta
 
 
 def _missing_gpu_support_error() -> Exception:
@@ -1036,11 +1057,16 @@ def triton_kernel_call_lowering(
       ),
   )
 
+  triton_fn = TritonFunction(fn)
+  non_constexpr_params = triton_fn.non_constexpr_params
+
   args: list[Any] = []
   objpaths: list[tuple[int, ...]] = []
   static_indices: set[int] = set()
   for flat_idx, (path, leaf) in enumerate(flat_with_path):
-    objpaths.append(tuple(k.idx for k in path))
+    objpaths.append(
+        (non_constexpr_params[path[0].idx].num, *(k.idx for k in path[1:]))
+    )
     if isinstance(leaf, _OutputPlaceholder):
       args.append(ctx.avals_out[leaf.ordinal])
       continue
@@ -1051,7 +1077,6 @@ def triton_kernel_call_lowering(
       args.append(leaf)  # operand array aval
   arg_dtypes = list(map(get_type_id, args))
 
-  triton_fn = TritonFunction(fn)
   named_args = dict(
       strict_zip(
           triton_fn.non_constexpr_param_names, full_tree.unflatten(args)
@@ -1059,10 +1084,6 @@ def triton_kernel_call_lowering(
       **metaparams,
   )
   configs = triton_fn.make_configs(backend_options, metaparams, named_args)
-
-  equal_to_1 = {
-      i for i in static_indices if args[i] == 1 and len(objpaths[i]) == 1
-  }
 
   kernel_calls = []
   for config in configs:
@@ -1076,18 +1097,16 @@ def triton_kernel_call_lowering(
         "num_ctas": config.num_ctas,
     }
 
-    kernel, specialization_attr, tensordesc_meta = (
-        triton_fn.get_or_create_kernel(
-            make_target_func,
-            ctx.module_context.platforms[0],
-            args,
-            arg_dtypes,
-            in_tree=full_tree,
-            objpaths=objpaths,
-            compute_capability=compute_capability,
-            backend_options=config_backend_options,
-            metaparams=config_metaparams,
-        )
+    kernel, spec, tensordesc_meta = triton_fn.get_or_create_kernel(
+        make_target_func,
+        ctx.module_context.platforms[0],
+        args,
+        arg_dtypes,
+        in_tree=full_tree,
+        objpaths=objpaths,
+        compute_capability=compute_capability,
+        backend_options=config_backend_options,
+        metaparams=config_metaparams,
     )
 
     kernel_params = []
@@ -1130,14 +1149,14 @@ def triton_kernel_call_lowering(
               triton_kernel_call_lib.create_scalar_parameter(int(stride), "i64")
           )
       elif isinstance(arg, core.ShapedArray):
-        arg_attrs = specialization_attr[objpaths[i]]
+        arg_attrs = spec.attrs.get(objpaths[i], ())
         kernel_params.append(
             triton_kernel_call_lib.create_array_parameter(
                 0,
                 16 if (["tt.divisibility", 16] in arg_attrs) else 0,
             )
         )
-      elif i not in equal_to_1:
+      elif spec.specialization[i][0] != "constexpr":
         # Convert TypedInt/TypedFloat subclasses to plain Python types,
         # as nanobind's strict-mode integer caster rejects subclasses.
         arg = to_python_type(arg)
@@ -1158,7 +1177,7 @@ def triton_kernel_call_lowering(
   if len(kernel_calls) > 1:
     named_static_args = {}
     for i in static_indices:
-      arg_name = triton_fn.non_constexpr_param_names[objpaths[i][0]]
+      arg_name = triton_fn.param_names[objpaths[i][0]]
       path_str = "".join(f"[{idx}]" for idx in objpaths[i][1:])
       named_static_args[f"{arg_name}{path_str}"] = args[i]
     input_output_aliases_with_sizes = tuple(
