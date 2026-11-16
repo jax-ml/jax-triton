@@ -2,8 +2,14 @@
 
 ![PyPI version](https://img.shields.io/pypi/v/jax-triton)
 
-The `jax-triton` repository contains integrations between [JAX](https://github.com/jax-ml/jax)
-and [Triton](https://github.com/openai/triton), including support for Gluon dialect.
+The `jax-triton` repository contains integrations between
+[JAX](https://github.com/jax-ml/jax) and
+[Triton](https://github.com/openai/triton), including support for Gluon dialect.
+
+> **Note:** `jax-triton` **only works on GPUs** (NVIDIA CUDA and AMD ROCm). It
+> integrates JAX with Triton's GPU backends and does **not** support TPUs or
+> CPUs. For writing custom kernels on TPUs (or across GPUs and TPUs) in JAX, see
+> [Pallas](https://docs.jax.dev/en/latest/pallas/index.html).
 
 Documentation can be found [here](https://jax-ml.github.io/jax-triton).
 
