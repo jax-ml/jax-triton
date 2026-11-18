@@ -89,6 +89,13 @@ except ImportError:
   _TMA_TF32 = 0
 
 try:
+  from triton.backends.nvidia.driver import TMA_B4X16_P64 as _TMA_B4X16_P64  # pyrefly: ignore[missing-module-attribute]
+except ImportError:
+  # Value of TMA_ELEMENT_TYPES::TMA_B4X16_P64 in
+  # triton/lib/Dialect/TritonNvidiaGPU/Transforms/TMAUtilities.cpp.
+  _TMA_B4X16_P64 = 14
+
+try:
   import triton.backends.amd.compiler as hb
 except ImportError:
   # AMD backend is not available.
@@ -228,11 +235,14 @@ def to_python_type(arg: Any) -> Any:
   return arg
 
 
-class TensorDescMeta(TypedDict):
+class _OptionalTensorDescMeta(TypedDict, total=False):
+  fp4_padded: bool
+
+
+class TensorDescMeta(_OptionalTensorDescMeta):
   block_size: Sequence[int]
   elem_size: int
   elem_type: int
-  fp4_padded: bool
   is_im2col: bool
   swizzle: int
 
@@ -1120,7 +1130,10 @@ def triton_kernel_call_lowering(
           raise NotImplementedError(
               "im2col TMA descriptors are not supported by jax-triton"
           )
-        if meta.get("fp4_padded", False):
+        if (
+            meta.get("fp4_padded", False)
+            or meta["elem_type"] == _TMA_B4X16_P64
+        ):
           raise NotImplementedError(
               "fp4_padded TMA descriptors are not supported by jax-triton"
           )
