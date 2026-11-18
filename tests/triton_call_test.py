@@ -1215,6 +1215,35 @@ class TritonKernelCallTest(parameterized.TestCase):
     )
     np.testing.assert_allclose(out_with_bias, x + bias)
 
+  def test_optional_operand_in_tuple(self):
+    @triton.jit
+    def maybe_add_bias_tuple_kernel(bufs, out_ptr, block_size: tl.constexpr):
+      x_ptr, bias_ptr = bufs
+      offs = tl.arange(0, block_size)
+      x = tl.load(x_ptr + offs)
+      if bias_ptr is not None:
+        x += tl.load(bias_ptr + offs)
+      tl.store(out_ptr + offs, x)
+
+    x, bias = create_random_inputs([8])
+    out_no_bias = jt.triton_call(
+        (x, None),
+        kernel=maybe_add_bias_tuple_kernel,
+        out_type=jax.typeof(x),
+        grid=(1,),
+        block_size=8,
+    )
+    np.testing.assert_allclose(out_no_bias, x)
+
+    out_with_bias = jt.triton_call(
+        (x, bias),
+        kernel=maybe_add_bias_tuple_kernel,
+        out_type=jax.typeof(x),
+        grid=(1,),
+        block_size=8,
+    )
+    np.testing.assert_allclose(out_with_bias, x + bias)
+
   def test_specialization(self):
     def add_scalar(x_ptr, unused_const: tl.constexpr, s, out_ptr):
       tl.store(out_ptr, tl.load(x_ptr) + s)
