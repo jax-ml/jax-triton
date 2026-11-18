@@ -214,6 +214,8 @@ def get_type_id(obj: Any) -> str:
     return "fp32"
   if isinstance(obj, str):
     return "str"
+  if obj is None:
+    return "constexpr"
   raise NotImplementedError(
       f"could not compute type name for {obj}: {type(obj)}"
   )
@@ -1481,7 +1483,9 @@ def triton_call(
       raise NotImplementedError(
           "TransformedRefs are not supported as triton_call arguments"
       )
-    operands[p_name] = tree_util.tree_map(_StaticArg.maybe_wrap, value)
+    operands[p_name] = tree_util.tree_map(
+        _StaticArg.maybe_wrap, value, is_leaf=lambda a: a is None
+    )
 
   flat_out_shapes, out_tree = tree_util.tree_flatten(out_type)
 
