@@ -67,7 +67,7 @@ def add_kernel(
   pid = tl.program_id(axis=0)
   block_start = pid * block_size
   offsets = block_start + tl.arange(0, block_size)
-  mask = offsets < 8
+  mask = offsets < block_size
   x = tl.load(x_ptr + offsets, mask=mask)
   y = tl.load(y_ptr + offsets, mask=mask)
   output = x + y
