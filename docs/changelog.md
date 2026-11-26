@@ -11,6 +11,7 @@ Remember to align the itemized text with the first line of an item within a list
     parameter precedes an input array or `Ref` parameter, instead of silently
     misbinding buffers.
   * Fixed kernel argument specialization to match upstream Triton.
+  * `triton_call` now supports `None` inside tuple arguments.
 
 ## jax-triton 0.5.0 (November 5, 2026)
 
